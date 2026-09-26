@@ -105,6 +105,9 @@ type Handler struct {
 	// wafIP WAF IP 级拦截状态机（fail-fast，wafip.go）：短窗多号 WAF 403 →
 	// 激活期轮转遇 WAF 403 直接终止（不放大请求量）。进程内状态、重启清零。
 	wafIP wafIPGate
+	// respStore /v1/responses 的响应存储（previous_response_id / item_reference /
+	// GET /v1/responses/{id} 的后端）：进程内内存、TTL 1h、上限 512 条。
+	respStore *responsesStore
 }
 
 // NewHandler 构建 handler。
@@ -121,8 +124,12 @@ func NewHandler(cfg Config) *Handler {
 	if cfg.PromptMode == "" {
 		cfg.PromptMode = "custom" // 缺省 custom：网关自有提示词
 	}
-	h := &Handler{cfg: cfg, mux: http.NewServeMux()}
+	h := &Handler{cfg: cfg, mux: http.NewServeMux(), respStore: newResponsesStore()}
 	h.mux.HandleFunc("POST /v1/chat/completions", h.withAuth(h.chatCompletions))
+	// Responses API 兼容层：Responses 请求转成 chat 后复用同一管线，响应再翻译回
+	// Responses 形态（流式逐帧改写为 response.* 事件序列）。
+	h.mux.HandleFunc("POST /v1/responses", h.withAuth(h.responses))
+	h.mux.HandleFunc("GET /v1/responses/{id}", h.withAuth(h.getResponse))
 	h.mux.HandleFunc("GET /v1/models", h.withAuth(h.models))
 	h.mux.HandleFunc("GET /status", h.withAuth(h.status))
 	h.mux.HandleFunc("GET /healthz", h.healthz)

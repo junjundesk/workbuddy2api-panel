@@ -559,6 +559,8 @@ http://127.0.0.1:7863/panel/
 |---|---|---|
 | `POST /v1/chat/completions` | Bearer（`api_key` 非空时） | OpenAI 兼容补全；流式/非流式；请求体上限 8 MiB |
 | `GET /v1/models` | Bearer（`api_key` 非空时） | 模型列表（纯动态拉取，缓存 10min；失败返回空列表 + 5min 负缓存）；**严格上游口径（`upstream.strictListing`）**：条目与 `context_length`/`max_output_tokens`/`reasoning_supported_efforts`/`reasoning_default_effort` 等字段只透出账号上游实际下发的值，上游没给就省略字段——不回落源码内置知识表 / model.json / models.dev，也不填 1M 默认窗口（CN 与 global 同一口径）；上游不可达时返回空列表而非任何内置名单。单账号实时口径见面板 `GET /panel/api/accounts/{uid}/models` |
+| `POST /v1/responses` | Bearer（`api_key` 非空时） | **OpenAI Responses API 兼容层**：请求转成 chat 后复用同一管线，响应/SSE 事件再翻译回 Responses 形态（工具调用、思考内容、`previous_response_id` 续接齐全，见下） |
+| `GET /v1/responses/{id}` | Bearer（`api_key` 非空时） | 取回内存中缓存的响应（TTL 1h、最多 512 条；`store: false` 的请求不缓存） |
 | `GET /status` | Bearer（`api_key` 非空时） | 账号状态汇总 + 每账号详情（积分/冷却/熔断/在途/粘性） |
 | `GET /healthz` | 无 | 健康检查：有 healthy 且未占满账号返回 200，否则 503；响应带身份标识（见下） |
 
@@ -581,6 +583,60 @@ http://127.0.0.1:7863/panel/
 - 出站请求强制 `stream:true`；SSE 帧按 OpenAI 规范**白名单重建**（`reasoning_content` 保留、工具调用按 index 合并、未知字段剥离）
 - 保证恰好一个 `data: [DONE]`（上游漏发时兜底补写）；空流先写一帧 `error` 再补 `[DONE]`
 - 非流式请求由本地聚合完整 SSE 流为单 `chat.completion` 响应（含 `reasoning_content` / `tool_calls`）
+
+### Responses API 兼容层（`/v1/responses`）
+
+面向只讲 OpenAI Responses API 的客户端（Codex CLI / Codex Desktop、openai SDK 的 `responses.create`）。
+网关侧把请求转成 chat/completions 送进**同一套管线**，再把 chat 输出（聚合 JSON 或 SSE 帧）翻译回
+Responses 形态，因此选号轮换、会话粘性、自有提示词改写、逐请求用量/成本台账、错误分类与软冷却、
+WAF IP 门、`gateway_hint` 全部与 `/v1/chat/completions` 同源，chat 主链路零改动。
+
+| 请求字段 | 映射到 chat/completions |
+|---|---|
+| `instructions` | 首条 `system` 消息 |
+| `input`（字符串 / items 数组） | `messages`：`message`→角色消息、`function_call`→assistant `tool_calls`、`function_call_output`→`role:tool`、`custom_tool_call(_output)` 往返、`reasoning`→下一条 assistant 的 `reasoning_content`、`item_reference`→按 id 展开存储条目；`additional_tools` 并入工具声明 |
+| `tools[].type=function` | 原样直译为 chat function（`parameters`/parametersJsonSchema`/input_schema` 三种形态都认） |
+| `tools[].type=custom`（Codex 自由格式工具） | chat function，参数固定 `{"input": string}`；响应侧还原为 `custom_tool_call` 并自动反解 `{"input": ...}` 包装 |
+| `tool_choice` / `text.format` / `reasoning.effort` / `max_output_tokens` / `temperature` / `top_p` / `parallel_tool_calls` / `user` | `tool_choice` / `response_format` / `reasoning_effort`（`none`→`off`）/ `max_tokens` / 同名参数 |
+| `previous_response_id` | 从响应存储续接上下文；未知 / 过期 → 400（不静默丢上下文） |
+| `stream` | 见下表事件序列 |
+
+流式事件序列（`stream: true`）：
+
+```
+response.created → response.in_progress
+  → response.output_item.added → response.content_part.added
+  → response.output_text.delta → response.output_text.done
+  → response.content_part.done → response.output_item.done
+  → response.completed            （finish_reason=length/content_filter 时为 response.incomplete）
+```
+
+- 工具调用：`response.output_item.added`（`function_call` / `custom_tool_call`）→ `response.function_call_arguments.delta/done`（custom 走 `response.custom_tool_call_input.delta/done`）
+- 思考内容：`response.reasoning_summary_part.added` → `response.reasoning_summary_text.delta/done`
+- 每帧带递增 `sequence_number`；上游 error 帧（含 `gateway_hint`）→ `response.failed`，`error` 对象原文透传
+- 错误响应（HTTP >= 400，如无可用账号 / 上游限流）与原 chat 端点同构（`{"error":{message,type,code}}`）原样返回
+
+已知边界（不静默假装支持：出现即在日志里记 `[responses] ignored request fields: ...`）：
+
+- `background` / `include` / `metadata` / `prompt_cache_key` / `safety_identifier` / `service_tier` / `top_logprobs` / `truncation` / `max_tool_calls` 只回显，不参与上游调用；
+- 工具类型 BTweb_search_preview` / `file_search` / `computer_use` / `local_shell` 等无上游对应能力 → 丢弃；`namespace` 分组展开为本地工具名（分组名记账）；
+- 文件类输入（`input_file` / `file_data`）丢弃；图片（`input_image`）正常透传；
+- 响应存储是**进程内内存**（TTL 1h、512 条 LRU）：多副本部署时 `previous_response_id` / `GET /v1/responses/{id}` 只在同副本命中，重启即失效；`store: false` 的请求不落存储。
+
+```bash
+# 非流式
+curl -sS http://127.0.0.1:7863/v1/responses \
+  -H "Authorization: Bearer $API_KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"cn:glm-5.2","input":"用一句话介绍你自己","stream":false}'
+
+# 流式
+curl -N -sS http://127.0.0.1:7863/v1/responses \
+  -H "Authorization: Bearer $API_KEY" -H 'Content-Type: application/json' \
+  -d '{"model":"cn:glm-5.2","input":"写一首四行诗","stream":true}'
+
+# 取回缓存的响应
+curl -sS http://127.0.0.1:7863/v1/responses/<resp_id> -H "Authorization: Bearer $API_KEY"
+```
 
 ### 上游端点
 
