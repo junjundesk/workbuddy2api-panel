@@ -847,6 +847,30 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   </div>
 </div>
 
+<!-- 账号实时模型列表（该账号直连上游拉取，不读网关缓存） -->
+<div class="veil" id="accModelVeil">
+  <div class="dlg" style="width:900px">
+    <header>
+      <h3>账号模型列表 <span class="hint" id="accModelWho"></span></h3>
+      <div class="hint" id="accModelMeta">用该账号直连上游实时拉取，不读网关缓存；「变化」列对比同账号上一次拉取结果（首次拉取只建基线）。</div>
+    </header>
+    <div class="body">
+      <div class="state" id="accModelState"><span class="dots">拉取中</span></div>
+      <div class="tbl-wrap">
+        <table class="acc md" id="accModelTable" hidden>
+          <thead><tr><th class="mark" aria-hidden="true"></th><th>模型</th><th>积分倍率</th><th>默认档</th><th>思考档位</th><th>上下文</th><th>变化</th></tr></thead>
+          <tbody id="accModelBody"></tbody>
+        </table>
+      </div>
+    </div>
+    <footer>
+      <span class="grow"></span>
+      <button id="btnAccModelReload">重新拉取</button>
+      <button id="btnCloseAccModel" class="primary">关闭</button>
+    </footer>
+  </div>
+</div>
+
 <!-- 开学季券码 -->
 <div class="veil" id="vcVeil">
   <div class="dlg">

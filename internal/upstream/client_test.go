@@ -478,13 +478,18 @@ func TestNewChatClientNoTotalTimeoutAndSharedTransport(t *testing.T) {
 	if c.ChatHTTP.Timeout != 0 {
 		t.Errorf("ChatHTTP.Timeout=%v want 0 (no total cap)", c.ChatHTTP.Timeout)
 	}
-	// 共享同一个 Transport 实例，连接池不重复。
+	// 共享同一个 Transport 实例，连接池不重复。现为「模型目录主域兜底」包装
+	// （model_fallback.go），包装内层仍是同一个连接加固过的 *http.Transport。
 	if c.ChatHTTP.Transport != c.HTTP.Transport {
-		t.Errorf("ChatHTTP and HTTP must share the same *http.Transport")
+		t.Errorf("ChatHTTP and HTTP must share the same Transport instance")
 	}
-	htr, ok := c.ChatHTTP.Transport.(*http.Transport)
+	fb, ok := c.ChatHTTP.Transport.(*modelFallbackTransport)
 	if !ok {
-		t.Fatalf("Transport type=%T", c.ChatHTTP.Transport)
+		t.Fatalf("Transport type=%T want *modelFallbackTransport", c.ChatHTTP.Transport)
+	}
+	htr, ok := fb.base.(*http.Transport)
+	if !ok {
+		t.Fatalf("inner transport type=%T want *http.Transport", fb.base)
 	}
 	if htr.ResponseHeaderTimeout != 60*time.Second { // 连接层加固：响应头上限从 120s 收到 60s（慢冷启动留 3.75× 余量）
 		t.Errorf("ResponseHeaderTimeout=%v want 60s", htr.ResponseHeaderTimeout)

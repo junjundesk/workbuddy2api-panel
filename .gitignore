@@ -44,3 +44,6 @@ docs/
 /cmd/desktopverify*/
 *.zip
 server.exe
+
+# 工作区临时/调研产物（他仓库克隆、探针输出等，不入库）
+/tmp/

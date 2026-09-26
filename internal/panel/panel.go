@@ -86,6 +86,12 @@ type Panel struct {
 	// 任务中心执行队列（taskcenter.go）。
 	queueOnce sync.Once
 	q         *queueState
+
+	// 账号模型快照：uid → 该账号最近一次实时拉取的模型 id 列表。
+	// 只用于算 added/removed（账号侧模型上下线可观测），进程级内存、不落盘；
+	// 条目数 = 账号数，天然有界。
+	snapMu    sync.Mutex
+	snapshots map[string]accountModelSnapshot
 }
 
 // tryLockAccount 尝试锁定账号的任务执行；已在执行返回 false。
@@ -156,6 +162,7 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/disable", p.withAuth(p.accountDisable))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/checkin", p.withAuth(p.accountCheckin))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/balance", p.withAuth(p.accountBalance))
+	p.mux.HandleFunc("GET /panel/api/accounts/{uid}/models", p.withAuth(p.accountModels))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/remove", p.withAuth(p.accountRemove))
 	p.mux.HandleFunc("GET /panel/api/accounts/{uid}/tasks", p.withAuth(p.accountTasks))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/tasks/accept", p.withAuth(p.accountTaskAccept))
@@ -293,6 +300,133 @@ func (p *Panel) models(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "models": out})
 }
 
+// accountModelSnapshot 单账号上一次拉取结果（模型 id 快照 + 时间）。
+type accountModelSnapshot struct {
+	ids []string
+	at  time.Time
+}
+
+// accountModels 指定账号的实时模型列表：用该账号**直连上游**拉取，不读任何缓存，
+// 回答"这个账号自己从最上游能看到哪些模型"。
+//
+// 与 /panel/api/models 的差别：后者只反映该域**首个可用账号**的目录，拿不到单账号
+// 口径；而不同账号（套餐 / 域 / 灰度）可见模型可以不同，上游新模型也可能先在个别
+// 账号可见。本接口每次调用都真实打上游，并返回与**同账号上次拉取**的 added/removed
+// 差集（首次调用只建基线，不报差集——没有前值就不编造变化）。
+func (p *Panel) accountModels(w http.ResponseWriter, r *http.Request) {
+	uid := r.PathValue("uid")
+	a := p.cfg.Pool.AuthByUID(uid)
+	if a == nil {
+		writeErr(w, http.StatusNotFound, "account not found")
+		return
+	}
+	realm := a.Realm()
+	if realm == "" {
+		realm = "cn" // 旧凭证无 realm：与池内缺省口径一致按 CN
+	}
+
+	start := time.Now()
+	var (
+		infos   []upstream.ModelInfo
+		efforts map[string][]string
+		defs    map[string]string
+	)
+	if realm == "global" {
+		if !p.cfg.Upstream.GlobalEnabled {
+			writeErr(w, http.StatusBadRequest, "global 路由已关闭（config global.enabled=false）")
+			return
+		}
+		infos = p.cfg.Upstream.FetchGlobalModelInfos(a)
+		if len(infos) == 0 {
+			writeErr(w, http.StatusBadGateway, "上游未返回可用模型（realm=global）")
+			return
+		}
+		// global 目录不与 CN 共用 effort 桶（两域同模型名档位不同）。
+		efforts, defs = p.cfg.Upstream.GlobalEffortSnapshot()
+	} else {
+		var err error
+		infos, err = p.cfg.Upstream.FetchModels(a) // CN：/v3/config ∪ 企业端点并发探测
+		if err != nil {
+			writeErr(w, http.StatusBadGateway, "fetch models: "+err.Error())
+			return
+		}
+	}
+	if len(infos) == 0 {
+		writeErr(w, http.StatusBadGateway, "上游未返回可用模型（realm="+realm+"）")
+		return
+	}
+
+	out := make([]map[string]any, 0, len(infos))
+	ids := make([]string, 0, len(infos))
+	for _, mi := range infos {
+		remoteEfforts, remoteDefault := mi.Efforts, mi.DefaultEffort
+		if realm == "global" {
+			remoteEfforts, remoteDefault = efforts[mi.ID], defs[mi.ID]
+		}
+		out = append(out, panelModelEntry(realm, mi, remoteEfforts, remoteDefault, p.cfg.Upstream.HTTP))
+		ids = append(ids, realm+":"+mi.ID)
+	}
+
+	added, removed, prevAt := p.noteAccountModels(uid, ids)
+	resp := map[string]any{
+		"ok":         true,
+		"uid":        uid,
+		"realm":      realm,
+		"count":      len(out),
+		"elapsed_ms": time.Since(start).Milliseconds(),
+		"fetched_at": time.Now().Format(time.RFC3339),
+		"models":     out,
+		"added":      added,
+		"removed":    removed,
+	}
+	if !prevAt.IsZero() {
+		resp["prev_at"] = prevAt.Format(time.RFC3339) // 首次拉取无前值：字段缺省
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// noteAccountModels 记下本次快照并返回与上次的差集（prevAt 为零值 = 首次，不报差集）。
+func (p *Panel) noteAccountModels(uid string, ids []string) (added, removed []string, prevAt time.Time) {
+	p.snapMu.Lock()
+	defer p.snapMu.Unlock()
+	prev, seen := p.snapshots[uid]
+	if seen {
+		added, removed = diffModelIDs(prev.ids, ids)
+		prevAt = prev.at
+	}
+	if p.snapshots == nil {
+		p.snapshots = map[string]accountModelSnapshot{}
+	}
+	p.snapshots[uid] = accountModelSnapshot{ids: append([]string(nil), ids...), at: time.Now()}
+	return added, removed, prevAt
+}
+
+// diffModelIDs 快照差集：added = 本次有、上次无；removed = 上次有、本次无。
+// 输出按字典序排序（响应稳定，不随 map 迭代序漂移）；重复 id 视为一个。
+func diffModelIDs(prev, cur []string) (added, removed []string) {
+	prevSet := make(map[string]struct{}, len(prev))
+	for _, id := range prev {
+		prevSet[id] = struct{}{}
+	}
+	curSet := make(map[string]struct{}, len(cur))
+	for _, id := range cur {
+		curSet[id] = struct{}{}
+	}
+	for id := range curSet {
+		if _, ok := prevSet[id]; !ok {
+			added = append(added, id)
+		}
+	}
+	for id := range prevSet {
+		if _, ok := curSet[id]; !ok {
+			removed = append(removed, id)
+		}
+	}
+	sort.Strings(added)
+	sort.Strings(removed)
+	return added, removed
+}
+
 // panelModelEntry 构造单个模型条目（两域共用）：id 带 realm 前缀（调用值即显示值），
 // context_length / max_output_tokens 走四级查找链，effort 档位按 realm 域取
 // EffortListing（远端权威 ∪ 静态兜底表）——与 /v1/models 同一口径，两侧不再漂移。
@@ -330,7 +464,9 @@ func panelModelEntry(realm string, mi upstream.ModelInfo, remoteEfforts []string
 	if mi.MaxAllowedSize > 0 {
 		entry["max_allowed_size"] = mi.MaxAllowedSize
 	}
-	entry["context_length"] = upstream.ContextWindowListingV4(mi.ID, mi.ContextWindow, httpc)
+	if cw := upstream.ContextWindowListingV4(mi.ID, mi.ContextWindow, httpc); cw > 0 {
+		entry["context_length"] = cw
+	}
 	if mo, ok := upstream.MaxOutputTokensListingV4(mi.ID, mi.MaxTokens, httpc); ok {
 		entry["max_output_tokens"] = mo
 	}

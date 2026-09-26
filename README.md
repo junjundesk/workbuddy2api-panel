@@ -545,6 +545,8 @@ http://127.0.0.1:7863/panel/
 
 面板后端接口挂在 `/panel/api/*`（同一 Bearer 鉴权），可脚本化调用；账号运维操作均落到池既有入口（`Revive`/`Disable`/`Remove` 等），与 `/status` 观测口径一致。
 
+**账号级实时模型列表**：`GET /panel/api/accounts/{uid}/models` 用**指定账号直连上游**拉取模型目录（不读 `/v1/models` 与面板的 10 分钟缓存），返回该账号自己可见模型的全部字段，并与**同账号上一次拉取**对比给出 `added`/`removed`（首次调用只建基线，不编造变化）。用途：对比不同账号（套餐 / 域 / 灰度）可见模型的差异、确认某个账号是否真的没有被下发新模型。账号池每行的「模型」按钮即调此接口；「模型与档位」页反映的是该域**首个可用账号**的目录（缓存口径），两者用途不同。
+
 **安全响应头**：面板页面与全部 `/panel/api/*` 响应统一带 `Content-Security-Policy`（`default-src 'none'`，脚本仅同源，`frame-ancestors 'none'` 禁嵌套）、`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer` 等；前端脚本独立为同源 `app.js`，不含内联脚本与内联事件处理器。
 
 **鉴权实现**：`internal/httpauth` 统一 server 与 panel 的 Bearer 校验，使用 SHA-256 摘要 + `subtle.ConstantTimeCompare` 常量时间比较（避免逐字节比较泄露密钥信息）；上游返回的 `uid` 经白名单校验（`[A-Za-z0-9_-]`，长度 ≤64）后才用于拼凭证文件名，防止路径穿越。
@@ -556,11 +558,13 @@ http://127.0.0.1:7863/panel/
 | 端点 | 鉴权 | 说明 |
 |---|---|---|
 | `POST /v1/chat/completions` | Bearer（`api_key` 非空时） | OpenAI 兼容补全；流式/非流式；请求体上限 8 MiB |
-| `GET /v1/models` | Bearer（`api_key` 非空时） | 模型列表（纯动态拉取，缓存 1h；失败返回空列表 + 5min 负缓存）；每模型带 `context_length`/`max_output_tokens`（四级查找链：上游目录 → 内置知识表 → model.json 缓存 → models.dev）、`reasoning_supported_efforts`/`reasoning_default_effort` 思考档位及描述/标签/倍率等全字段（上游有返回时） |
+| `GET /v1/models` | Bearer（`api_key` 非空时） | 模型列表（纯动态拉取，缓存 10min；失败返回空列表 + 5min 负缓存）；**严格上游口径（`upstream.strictListing`）**：条目与 `context_length`/`max_output_tokens`/`reasoning_supported_efforts`/`reasoning_default_effort` 等字段只透出账号上游实际下发的值，上游没给就省略字段——不回落源码内置知识表 / model.json / models.dev，也不填 1M 默认窗口（CN 与 global 同一口径）；上游不可达时返回空列表而非任何内置名单。单账号实时口径见面板 `GET /panel/api/accounts/{uid}/models` |
 | `GET /status` | Bearer（`api_key` 非空时） | 账号状态汇总 + 每账号详情（积分/冷却/熔断/在途/粘性） |
 | `GET /healthz` | 无 | 健康检查：有 healthy 且未占满账号返回 200，否则 503；响应带身份标识（见下） |
 
 > 鉴权规则：仅当 `api_key` 非空才校验 `Authorization: Bearer <api_key>`；**`api_key` 为空时上述端点直接放行**；`/healthz` 恒无鉴权。
+
+**模型目录主域兜底**（`internal/upstream/model_fallback.go`）：模型目录只有三条家族路径（`/v3/config`、`/console/enterprises/personal/models`、`/v2/enterprises/personal/models`），**整域不可达就等于没有模型**。故在**主域连接层失败 / 5xx / 404** 时，把模型目录 GET 改打到同族备用域：国际 `www.workbuddy.ai → www.codebuddy.ai`、国内 `copilot.tencent.com → www.codebuddy.cn`（两域对同一账号返回**逐 ID 一致**的目录，2026-09-27 实测）。作用域**仅限模型目录 GET**——chat / billing / 任务路径一律不改写；401/403 不换域（凭证问题换域无益，还会掩盖真实错误）。数据仍由账号上游下发，不引入任何本地或内置目录，与「严格上游口径」不冲突。
 
 `/healthz` 响应示例（200 / 503 同结构，仅状态码与计数变化）：
 

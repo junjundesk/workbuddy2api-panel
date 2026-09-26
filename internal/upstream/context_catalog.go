@@ -81,9 +81,14 @@ var contextCapFallback = map[string]contextCap{
 // ContextWindowListing 模型在 /v1/models 的 context_length（三级查找）：
 // remote（上游 maxInputTokens）>0 时权威；否则查知识表；仍未收录 → DefaultContextWindow
 // （1M，宁可高估不低估）。绝不再透出假 131072。
+// 严格口径（strictListing=true，当前生效）：上游没给 → 返回 0（调用方省略字段），
+// 不查知识表、不填 1M。本函数当前无生产调用方，与 V4 版本保持同一口径以防误用。
 func ContextWindowListing(model string, remote int64) int64 {
 	if remote > 0 {
 		return remote
+	}
+	if strictListing {
+		return 0
 	}
 	if cap, ok := contextCapFallback[model]; ok && cap.context > 0 {
 		return cap.context
@@ -98,6 +103,9 @@ func ContextWindowListing(model string, remote int64) int64 {
 func MaxOutputTokensListing(model string, remote int64) (int64, bool) {
 	if remote > 0 {
 		return remote, true
+	}
+	if strictListing {
+		return 0, false
 	}
 	if cap, ok := contextCapFallback[model]; ok && cap.maxOutput > 0 {
 		return cap.maxOutput, true

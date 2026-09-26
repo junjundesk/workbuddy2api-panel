@@ -332,7 +332,9 @@ func (h *Handler) modelList() []map[string]any {
 		// 写 model.json 供下次命中）→ 1M 兜底 / max_output_tokens 省略。
 		// 上游零值不再透出假 131072（误导 Codex/ZCode 等按 context_length 提前
 		// 截断、白白丢上下文）。
-		entry["context_length"] = upstream.ContextWindowListingV4(mi.ID, mi.ContextWindow, h.cfg.Upstream.HTTP)
+		if cw := upstream.ContextWindowListingV4(mi.ID, mi.ContextWindow, h.cfg.Upstream.HTTP); cw > 0 {
+			entry["context_length"] = cw
+		}
 		if mo, ok := upstream.MaxOutputTokensListingV4(mi.ID, mi.MaxTokens, h.cfg.Upstream.HTTP); ok {
 			entry["max_output_tokens"] = mo
 		}
@@ -375,7 +377,9 @@ func (h *Handler) modelList() []map[string]any {
 				entry = applyModelInfoFields(entry, mi)
 				remoteCtx, remoteOut = mi.ContextWindow, mi.MaxTokens
 			}
-			entry["context_length"] = upstream.ContextWindowListingV4(id, remoteCtx, h.cfg.Upstream.HTTP)
+			if cw := upstream.ContextWindowListingV4(id, remoteCtx, h.cfg.Upstream.HTTP); cw > 0 {
+				entry["context_length"] = cw
+			}
 			if mo, ok := upstream.MaxOutputTokensListingV4(id, remoteOut, h.cfg.Upstream.HTTP); ok {
 				entry["max_output_tokens"] = mo
 			}

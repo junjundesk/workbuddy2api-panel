@@ -203,6 +203,7 @@ function renderAccounts(list) {
         '<button class="xs ghost" data-a="checkin" data-u="' + esc(s.uid) + '">签到</button>' +
         '<button class="xs ghost" data-a="balance" data-u="' + esc(s.uid) + '">余额</button>' +
         '<button class="xs ghost" data-a="tasks" data-u="' + esc(s.uid) + '">任务</button>' +
+        '<button class="xs ghost" data-a="models" data-u="' + esc(s.uid) + '">模型</button>' +
         (frozen ? '<button class="xs primary" data-a="revive" data-u="' + esc(s.uid) + '">解冻</button>'
                 : '<button class="xs ghost" data-a="disable" data-u="' + esc(s.uid) + '">禁用</button>') +
         '<button class="xs ghost danger" data-a="remove" data-u="' + esc(s.uid) + '">移除</button>' +
@@ -257,6 +258,8 @@ $('accBody').addEventListener('click', async ev => {
       toast('已禁用', 'ok');
     } else if (a === 'tasks') {
       openTasks(u);
+    } else if (a === 'models') {
+      openAccountModels(u);
     } else if (a === 'remove') {
       const r = await api('accounts/' + encodeURIComponent(u) + '/remove', { method: 'POST' });
       toast(r.file_error ? '已移除（凭证文件删除失败：' + r.file_error + '）' : '已移除', 'ok');
@@ -364,12 +367,78 @@ async function loadModels() {
         outCell(m, probeOf(m.id)) + '</tr>';
     }).join('');
     const hit = list.filter(m => probeOf(m.id)).length;
-    $('mdNote').textContent = list.length + ' 个模型 · 已刷新降级缓存' + (hit ? ' · ' + hit + ' 个有实测上限' : '');
+    $('mdNote').textContent = list.length + ' 个模型（该域首个可用账号；单账号实时列表见账号行「模型」）· 已刷新降级缓存' + (hit ? ' · ' + hit + ' 个有实测上限' : '');
   } catch (e) {
     tb.innerHTML = '<tr><td colspan="7"><div class="empty">' + esc(e.message) + '</div></td></tr>';
   }
 }
 $('btnModels').onclick = loadModels;
+
+/* ── 账号实时模型列表（该账号直连上游，不读网关缓存） ────────────────
+   与上面「模型与档位」的区别：那一页是「该域首个可用账号」的目录（网关缓存口径），
+   这里回答「这个账号自己从最上游能看到哪些模型」——不同套餐/域/灰度可见模型可以
+   不同。每次打开/重新拉取都真实打上游，并与同账号上次结果对比出变化。 */
+let accModelUID = null;
+function stripRealm(id) { return String(id || '').replace(/^(cn|global):/, ''); }
+function openAccountModels(uid) {
+  accModelUID = uid;
+  $('accModelWho').textContent = uid.slice(0, 16);
+  $('accModelVeil').classList.add('on');
+  loadAccountModels();
+}
+function closeAccountModels() {
+  $('accModelVeil').classList.remove('on');
+  accModelUID = null;
+}
+$('btnCloseAccModel').onclick = closeAccountModels;
+$('btnAccModelReload').onclick = loadAccountModels;
+
+async function loadAccountModels() {
+  if (!accModelUID) return;
+  const st = $('accModelState'), tb = $('accModelBody'), tbl = $('accModelTable');
+  const btn = $('btnAccModelReload');
+  st.hidden = false; st.className = 'state';
+  st.innerHTML = '<span class="dots">直连上游拉取中</span>';
+  tbl.hidden = true;
+  btn.disabled = true;
+  try {
+    const d = await api('accounts/' + encodeURIComponent(accModelUID) + '/models');
+    const list = d.models || [];
+    const added = new Set((d.added || []).map(stripRealm));
+    const removed = (d.removed || []).map(stripRealm);
+    if (!list.length) {
+      st.innerHTML = '<div class="empty">该账号上游未返回模型</div>';
+      return;
+    }
+    st.hidden = true; tbl.hidden = false;
+    tb.innerHTML = list.map(m => {
+      const eff = (m.supported_efforts || []).slice();
+      const effs = eff.length ? eff.map(e => '<span class="tag warn">' + esc(e) + '</span>').join(' ')
+        : '<span style="color:var(--ink-3);font-size:12.5px">' + (m.supports_reasoning ? '固定档 · 默认 ' + esc(m.default_effort || '?') : '不支持思考') + '</span>';
+      const caps = [];
+      if (m.is_default) caps.push('<span class="tag ok">默认</span>');
+      if (m.supports_tool_call) caps.push('<span class="tag warn">工具</span>');
+      if (m.supports_images) caps.push('<span class="tag warn">视觉</span>');
+      const capHtml = caps.length ? '<div class="id" style="margin-top:2px">' + caps.join(' ') + '</div>' : '';
+      const tip = m.description ? ' title="' + esc(m.description) + '"' : '';
+      const chg = added.has(stripRealm(m.id)) ? '<span class="tag ok">新增</span>' : '<span style="color:var(--ink-3)">—</span>';
+      return '<tr><td class="mark" aria-hidden="true"><i></i></td><td class="who"' + tip + '><div class="nm">' + esc(m.id) + '</div><div class="id">' + esc(m.name || '') + '</div>' + capHtml + '</td>' +
+        '<td class="num">' + rateCell(m) + '</td>' +
+        '<td>' + (m.default_effort ? '<span class="tag ok">' + esc(m.default_effort) + '</span>' : '<span style="color:var(--ink-3)">—</span>') + '</td>' +
+        '<td class="efs" style="white-space:normal">' + effs + '</td>' +
+        '<td class="num">' + (m.context_length ? Math.round(m.context_length / 1000) + 'K' : '—') + '</td>' +
+        '<td>' + chg + '</td></tr>';
+    }).join('');
+    const parts = [list.length + ' 个模型', '域 ' + (d.realm || 'cn')];
+    if (d.elapsed_ms != null) parts.push('耗时 ' + d.elapsed_ms + 'ms');
+    parts.push(d.prev_at ? '对比上次 ' + new Date(d.prev_at).toLocaleTimeString() : '首次拉取（已建基线）');
+    if (removed.length) parts.push('本次不再返回：' + removed.join('、'));
+    $('accModelMeta').textContent = parts.join(' · ');
+  } catch (e) {
+    st.hidden = false; st.className = 'state';
+    st.innerHTML = '<div class="empty">' + esc(e.message) + '</div>';
+  } finally { btn.disabled = false; }
+}
 
 /* ── 日志（频道：全部/任务/对话/系统） ─────────────────────────────── */
 let logCh = 'all';

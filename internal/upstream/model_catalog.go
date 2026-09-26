@@ -231,15 +231,27 @@ func ResetLookupChainForTest() {
 
 // ---- 四级查找链（对 handler 暴露的入口，签名与 32a3c13 三级版兼容）----
 
+// strictListing 列表口径开关：true = **只透出账号上游实际下发的字段**，禁止一切
+// 源码内置兜底（静态种子表 / model.json 种子 / models.dev 补值 / 1M 默认窗口）。
+// CN 与 global 共用同一开关，两域口径一致。
+// 需要恢复原四级查找链时改回 false——下面的兜底分支保留即为该用途。
+const strictListing = true
+
 // ContextWindowListingV4 四级查找链的 context_length 决策：
 //  1. remote>0 权威透出（上游动态值永远压过 model.json，任务书 §清理）；
 //  2. 静态种子表（contextCapFallback）；
 //  3. model.json 缓存（内含种子初值 / models.dev 运行时补充值）；
 //  4. 全链 miss 且非负缓存 → 异步触发 models.dev 拉取（本次返回 DefaultContextWindow
 //     1M，不阻塞；拉到后写 model.json 供下次命中）。
+//
+// 严格口径（strictListing=true，当前生效）：只保留第 1 级——上游没下发就是"未知"，
+// 返回 0 由调用方省略字段；第 2-4 级兜底一概不走（列表不得替上游编造窗口）。
 func ContextWindowListingV4(model string, remote int64, client *http.Client) int64 {
 	if remote > 0 {
 		return remote
+	}
+	if strictListing {
+		return 0 // 未知：调用方省略 context_length
 	}
 	if model == "" {
 		return DefaultContextWindow
@@ -264,9 +276,15 @@ func ContextWindowListingV4(model string, remote int64, client *http.Client) int
 
 // MaxOutputTokensListingV4 四级查找链的 max_output_tokens 决策（与 context 口径
 // 刻意不同：未知 → 省略，无「宁可高估」安全侧）。
+//
+// 严格口径（strictListing=true，当前生效）：只信上游——remote>0 才透出，否则 ok=false
+// 由调用方省略；静态种子表 / model.json / models.dev 一概不查。
 func MaxOutputTokensListingV4(model string, remote int64, client *http.Client) (int64, bool) {
 	if remote > 0 {
 		return remote, true
+	}
+	if strictListing {
+		return 0, false // 未知：调用方省略 max_output_tokens
 	}
 	if model == "" {
 		return 0, false

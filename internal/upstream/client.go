@@ -674,9 +674,13 @@ type Client struct {
 // kongjianguan 4 连击实测经验）。
 func New() *Client {
 	tr := newTransport()
+	// 唯一 Transport 实例：挂「模型目录主域兜底」包装（只拦模型目录 GET，其余直通），
+	// HTTP 与 ChatHTTP 共用它——连接池仍只有一份，roundTripCloseIdle 也照常透传
+	// （兜底范围与理由见 model_fallback.go）。
+	rt := http.RoundTripper(&modelFallbackTransport{base: tr})
 	return &Client{
-		HTTP:                 &http.Client{Timeout: 120 * time.Second, Transport: tr},
-		ChatHTTP:             &http.Client{Timeout: 0, Transport: tr}, // 无总时长；首字节由 ResponseHeaderTimeout 管
+		HTTP:                 &http.Client{Timeout: 120 * time.Second, Transport: rt},
+		ChatHTTP:             &http.Client{Timeout: 0, Transport: rt}, // 无总时长；首字节由 ResponseHeaderTimeout 管
 		SanitizeFingerprints: true,
 		ChatBaseCN:           "https://copilot.tencent.com",
 		BillingBaseCN:        "https://www.codebuddy.cn",

@@ -81,6 +81,10 @@ func staticEffortCap(realm, model string) effortCap {
 // remoteEfforts 非空时以其为权威（不回落到静态表），否则落到产品级静态兜底表；
 // 两者皆无 → efforts 返回 nil（调用方省略字段，不输出空数组）。
 //
+// 严格口径（strictListing=true，当前生效）：远端没下发档位 → 直接返回 nil（省略字段），
+// **不再回落静态兜底表**——列表只反映账号上游声明的能力，不替上游宣称档位。CN 与 global
+// 两域同口径（静态表仅保留给 strictListing=false 的旧行为）。
+//
 // defaultEffort 仅在「efforts 非空且 default 命中 efforts」时才返回
 // （对齐参考仓库 resolveModel 的 `defaultEffort ∈ efforts` 防御：不宣称不支持的默认档）。
 // remoteDefault 空串不回落到静态默认档——默认档随档位表同源：remote 有档位就用 remote 默认档，
@@ -90,6 +94,8 @@ func EffortListing(realm, model string, remoteEfforts []string, remoteDefault st
 	switch {
 	case len(remoteEfforts) > 0:
 		src = effortCap{efforts: remoteEfforts, defaultEffort: remoteDefault}
+	case strictListing:
+		return nil, "" // 严格口径：上游未声明档位 → 省略字段
 	default:
 		src = staticEffortCap(realm, model)
 	}
