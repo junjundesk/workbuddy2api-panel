@@ -70,9 +70,11 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | 💾 **状态持久化** | 池状态本地原子落盘 + Upstash Redis 异步镜像（可选），重启择新恢复 |
 | 🖥️ **Web 管理面板** | 内嵌单页面板（明暗主题，七个视图）：账号运维 / 用量与积分分析 / 模型档位条件查询 / 在线改配置（热生效）/ 运行日志（含**调用来源 IP·UA** 与时间区间）/ 积分任务，见 [Web 管理面板](#-web-管理面板) |
 
-## 🎯 成长任务一键完成（17/18）
+## 🎯 成长任务一键完成（17/18 + 活动任务）
 
 官方「成长计划」的 18 个成长任务中，**17 个可在面板上一键纯 API 完成**——无需安装官方客户端、无需人工交互，点一下「一键完成」即自动推进进度、等待异步计分落定并**自动领奖**。剩余任务展示操作指引。
+
+**活动类「体验指定专家」任务同样可一键完成**（2026-10 新增，见下方专节）：判据与 `expert_5` 同构，只是目标专家由任务指定。
 
 ### 任务覆盖与奖励
 
@@ -108,6 +110,23 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 任务计分走 `/v2/report` 行为上报，但**不同任务认不同客户端指纹**：CLI 指纹（`www.codebuddy.cn`）、桌面指纹（`copilot.tencent.com` + `WorkBuddy/5.5.6` UA + `workbuddy-desktop` 事件族）、web 指纹（`www.workbuddy.cn` + `x-client-platform: web`）。网关为每类任务构造对应指纹的判据事件链（`internal/upstream/desktop.go`）；专家类任务额外要求真实专家 id 与真实对话回执（`internal/upstream/streak.go` 之外的 expert 序列）。上报 200 ≠ 计分——面板在执行后轮询任务进度，达标即自动调用 Web 域领奖接口。
 
 > ⚠️ 行为事件按天幂等：重复点「一键完成」不会重复扣资源，已达标的任务自动跳过。
+
+### 🆕 活动类任务：「体验指定专家」（2026-10）
+
+上游不定期下发「在专家页搜索并召唤「X」专家，完成一次对话」的活动任务（`+50c +5e` 或 `+100c +5e`）。这类任务的目标专家**由任务指定**，用别的专家点不亮。
+
+实现（`autotask.go` 的 `runTaskExpertUse`）：
+
+1. **定位专家**：`jump_url` 的 deeplink 里带 `expertId=ex_xxx`（两层 URL 编码，先反解），再用 `keyword` 搜专家市场补齐名称/版本/类目（`MarketExpertSearch`）；`jump_url` 只有 `workbuddy://expert` 时按任务标题里的「X」做 keyword 搜索兜底。
+2. **召唤链**：`web_element_click(expert_summon_click)` → `expert_summon_click` → `expert_summoned`。
+3. **真实对话**：带 `X-Expert-Id` 打 `/v2/chat/completions`，从 SSE 抓服务端 `requestId`（自造 id 不计数）。
+4. **使用事件**：`DesktopChatSequence` + `expert_actual_use`（JOIN 上面那条真实 requestId）。
+5. **回读+领奖**：与其它任务同一闭环，达标自动 claim。
+
+已实测点亮：`expert_use_bowangwang`（直播电商教练 / `播旺旺` ex_WZY136wV5aMt）——上报后首轮回读即 1/1 completed，claim 成功。
+已登记的同类码：`WorkBuddy_Valorant`、`expert_use_maidehao`、`expert_use_douyinyin`、`expert_use_shangjia_xuanchuan`。上游再下发新的 `expert_use_*` 时，只需在 `autoActions` + 前端 `AUTO_TASKS` 各加一行（标题里的专家名会自动解析，无需硬编码 id）。
+
+**不可自动**：`wb_wechat_oa_subscribe_task`（关注官方公众号满 24 小时，需真实微信关注行为，服务端校验关注时长）。
 
 ### 🧭 任务中心（面板新视图）
 

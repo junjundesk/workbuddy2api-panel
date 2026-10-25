@@ -1316,6 +1316,11 @@ const AUTO_TASKS = {
   'create_canvas': '上报「设计创意画布创建」事件组（三账号实测点亮，+300 分）',
   'expert_5': '真实专家召唤+使用链 ×5（专家市场+真实 chat，三账号实测点亮）',
   'Expert_team_use_3': '真实专家团召唤+使用链 ×3（三账号实测点亮）',
+  'WorkBuddy_Valorant': '召唤「无畏契约拼豆专家」+ 真实对话（任务指定专家，实测点亮）',
+  'expert_use_maidehao': '召唤「中国电商运营专家」+ 真实对话（任务指定专家）',
+  'expert_use_douyinyin': '召唤「抖音策略师」+ 真实对话（任务指定专家）',
+  'expert_use_shangjia_xuanchuan': '召唤「商家宣传页与海报设计师」+ 真实对话（任务指定专家）',
+  'expert_use_bowangwang': '召唤「直播电商教练」+ 真实对话（任务指定专家）',
   'Hp_Appearance': '设置主题 API + 皮肤生效事件（两账号实测点亮）',
   'black_cat': '夜猫子：23:00–08:00 窗口内 glm-5.2 对话补足（窗口外提示等 23 点排程）',
   'Expert_lighthouse': '真实轻量云专家召唤+使用链（真实对话 requestId，两账号实测点亮）',
@@ -1329,6 +1334,15 @@ const AUTO_TASKS = {
   'Sequential_Tasks_6': '小程序十次对话（预留）：accept → mini 对话上报 ×target（自动补差额）→ 领奖',
   'Sequential_Tasks_7': '体验灵感功能（预留，疑 PC 口径）：accept → 灵感事件组（PC+mp 双形态）→ 领奖（判据待解锁验证）'
 };
+
+// autoTaskHint 可一键完成任务的说明文字；未知码返回空串（= 只展示操作指引）。
+// expert_use_* 是上游「体验「X」专家」活动任务码族：后端有同构兜底实现，
+// 新码无需改前端也能出按钮（说明文字对兜底码给通用描述）。
+function autoTaskHint(code) {
+  if (AUTO_TASKS[code]) return AUTO_TASKS[code];
+  if (/^expert_use_/.test(String(code))) return '召唤任务指定的专家 + 完成一次真实对话（活动任务，后端按任务 jump_url 解析专家）';
+  return '';
+}
 
 function openTasks(uid) {
   taskUID = uid;
@@ -1408,7 +1422,7 @@ async function loadTasks() {
         : '<span class="tag mute">未接受</span>';
       const acted = t.claimed || t.locked ? ''
         : t.claimable ? '<button class="xs primary" data-t="claim" data-c="' + esc(t.task_code) + '">领取</button>'
-        : AUTO_TASKS[t.task_code] ? '<button class="xs primary" data-t="auto" data-c="' + esc(t.task_code) + '" title="' + esc(AUTO_TASKS[t.task_code]) + '">一键完成</button>'
+        : autoTaskHint(t.task_code) ? '<button class="xs primary" data-t="auto" data-c="' + esc(t.task_code) + '" title="' + esc(autoTaskHint(t.task_code)) + '">一键完成</button>'
         : t.accept_status === 'accepted' ? ''
         : '<button class="xs" data-t="accept" data-c="' + esc(t.task_code) + '">接受</button>';
       // 操作指引（description/task_desc）挂 title 提示：如何完成交给用户看

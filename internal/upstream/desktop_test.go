@@ -119,3 +119,66 @@ func TestSetAppearanceTheme(t *testing.T) {
 		t.Errorf("body=%v want kind=theme resource_key=theme-tkmw7j", got)
 	}
 }
+
+// TestMarketExpertSearchKeyword 专家市场搜索：keyword 必须进 body（上游按它检索），
+// 且搜索场景放宽 page_size（同名不同 id 的专家常见，「抖音策略师」实测 10 条）。
+// 背景：2026-10 活动任务「体验「直播电商教练」」指定的专家不在默认推荐序前 100 条，
+// 只能靠 keyword 搜到，否则整类任务无法自动完成。
+func TestMarketExpertSearchKeyword(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/portal/operation-platform/market/expert/list" {
+			t.Errorf("path=%s want 专家市场列表", r.URL.Path)
+		}
+		raw, _ := io.ReadAll(r.Body)
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatalf("body: %v", err)
+		}
+		w.Write([]byte(`{"code":0,"data":{"experts":[{"expert_id":"ex_WZY136wV5aMt","expert_type":"agent","display_name_zh":"播旺旺","profession_zh":"直播电商教练","version":"1.0.2","categories":["05-MarketingGrowth"]}]}}`))
+	}))
+	defer srv.Close()
+
+	c := &Client{HTTP: srv.Client(), ChatBaseCN: srv.URL}
+	list, err := c.MarketExpertSearch(&auth.Auth{AccessToken: "at", UID: "u1"}, "agent", "直播电商教练")
+	if err != nil {
+		t.Fatalf("MarketExpertSearch: %v", err)
+	}
+	if got["keyword"] != "直播电商教练" {
+		t.Errorf("keyword=%v want 直播电商教练", got["keyword"])
+	}
+	if got["expert_type"] != "agent" {
+		t.Errorf("expert_type=%v want agent", got["expert_type"])
+	}
+	if n, _ := got["page_size"].(float64); n < 50 {
+		t.Errorf("搜索场景 page_size=%v want >=50", got["page_size"])
+	}
+	if len(list) != 1 || list[0].ExpertID != "ex_WZY136wV5aMt" {
+		t.Fatalf("解析结果=%+v", list)
+	}
+	if list[0].DisplayNameZH != "播旺旺" || list[0].ProfessionZH != "直播电商教练" {
+		t.Errorf("字段映射错：%+v", list[0])
+	}
+}
+
+// TestMarketExpertListNoKeyword 默认列表不传 keyword（推荐序），page_size 保持 20：
+// expert_5 / Expert_team_use_3 依赖这个口径，改动会影响既有任务。
+func TestMarketExpertListNoKeyword(t *testing.T) {
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &got)
+		w.Write([]byte(`{"code":0,"data":{"experts":[]}}`))
+	}))
+	defer srv.Close()
+
+	c := &Client{HTTP: srv.Client(), ChatBaseCN: srv.URL}
+	if _, err := c.MarketExpertList(&auth.Auth{AccessToken: "at", UID: "u1"}, "agent"); err != nil {
+		t.Fatalf("MarketExpertList: %v", err)
+	}
+	if _, ok := got["keyword"]; ok {
+		t.Errorf("默认列表不应带 keyword：%v", got["keyword"])
+	}
+	if n, _ := got["page_size"].(float64); n != 20 {
+		t.Errorf("默认列表 page_size=%v want 20", got["page_size"])
+	}
+}

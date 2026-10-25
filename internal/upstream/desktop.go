@@ -31,6 +31,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
@@ -379,9 +380,30 @@ type MarketExpert struct {
 // MarketExpertList 拉取专家市场真实专家列表（expertType: "agent" 单专家 / "team" 专家团）。
 // expert_actual_use 的判据校验要求 id 是平台上真实存在的专家（编造 id 不计数）。
 func (c *Client) MarketExpertList(a *auth.Auth, expertType string) ([]MarketExpert, error) {
+	return c.marketExpertList(a, expertType, "")
+}
+
+// MarketExpertSearch 按关键词搜专家市场（上游 keyword 字段）。
+//
+// 为什么需要：市场列表按 reco_rank 推荐序返回，默认第 1 页 20 条里根本没有
+// 「体验某专家」类新任务指定的专家（2026-10 实测「直播电商教练」/「商家宣传页与
+// 海报设计师」都不在前 100 条内）；而 keyword 搜索能精确命中——任务 jump_url 里
+// 的 expertId 可直接用来对齐搜索结果，确认名称/版本/类目。
+func (c *Client) MarketExpertSearch(a *auth.Auth, expertType, keyword string) ([]MarketExpert, error) {
+	return c.marketExpertList(a, expertType, keyword)
+}
+
+// marketExpertList 专家市场列表/搜索公共实现（keyword 为空 = 默认推荐序）。
+func (c *Client) marketExpertList(a *auth.Auth, expertType, keyword string) ([]MarketExpert, error) {
 	body := map[string]any{"page": 1, "page_size": 20, "sort_by": "reco_rank", "sort_order": "desc"}
 	if expertType != "" {
 		body["expert_type"] = expertType
+	}
+	if keyword = strings.TrimSpace(keyword); keyword != "" {
+		body["keyword"] = keyword
+		// 搜索场景放宽条数：同名不同 id 的专家常见（「抖音策略师」实测 10 条），
+		// 取全量才能按 expertId 精确命中。
+		body["page_size"] = 50
 	}
 	raw, err := json.Marshal(body)
 	if err != nil {
