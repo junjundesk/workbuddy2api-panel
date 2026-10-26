@@ -273,7 +273,30 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 		// model_locks 模型级限流全清单（哪些模型不能用、锁了几个号、还要锁多久）：
 		// 与 accounts 的账号池视图互补，前端「模型锁池」表直接渲染。无锁时为 null。
 		"model_locks": p.cfg.Pool.ModelLockView(),
+		// groups 主页账号池按分组卡片展示用的精简分组信息（按创建时间排序）。
+		// 只放展示字段，不含密钥提示、代理、成员列表：overview 轮询频繁。
+		"groups": p.groupBriefs(),
 	})
+}
+
+// groupBrief 主页按分组展示所需的最小分组信息。
+type groupBrief struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Color      string `json:"color,omitempty"`
+	SharedPool bool   `json:"shared_pool"`
+	CallPublic bool   `json:"call_public"`
+}
+
+func (p *Panel) groupBriefs() []groupBrief {
+	out := []groupBrief{}
+	if p.cfg.Groups == nil {
+		return out
+	}
+	for _, g := range p.cfg.Groups.Groups() {
+		out = append(out, groupBrief{ID: g.ID, Name: g.Name, Color: g.Color, SharedPool: g.SharedPool, CallPublic: g.CallPublic})
+	}
+	return out
 }
 
 // logsHandler 返回日志环形缓冲快照（时间升序，含频道标记 chat/task/sys）。

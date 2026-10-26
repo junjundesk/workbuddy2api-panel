@@ -586,6 +586,23 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   .exp-main .note { margin-top: 2px; font-size: 11px; color: var(--ink-3); }
   .exp-main.err { color: var(--bad); }
 
+  /* 账号池按分组卡片（方案 B）：每组一张卡片，列宽固定保证跨卡片对齐。 */
+  .acc-groups { display: flex; flex-direction: column; gap: 14px; }
+  .acc-groups[hidden] { display: none; }
+  .gcard > header { cursor: pointer; user-select: none; gap: 10px; }
+  .gcard > header .car { width: 10px; color: var(--ink-3); transition: transform .15s; display: inline-block; font-size: 11px; }
+  .gcard.fold > header .car { transform: rotate(-90deg); }
+  .gcard.fold > .tbl-wrap { display: none; }
+  .gcard.fold > header { border-bottom: none; }
+  .gcard .gdot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+  .gcard .gn { font-weight: 600; font-size: 13px; }
+  .gcard .gbadge { font-size: 10.5px; padding: 1px 6px; border-radius: 4px; border: 1px solid var(--line); color: var(--ink-3); }
+  .gcard .gc { color: var(--ink-3); font-size: 12.5px; }
+  .gcard .gs { display: inline-flex; gap: 6px; }
+  .gcard .gcred { color: var(--ink-2); font-size: 12.5px; font-variant-numeric: tabular-nums; }
+  .acc.gfix { table-layout: fixed; min-width: 1300px; }
+  .acc.gfix td.acts { white-space: nowrap; }
+
 </style>
 </head>
 <body>
@@ -672,7 +689,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <button class="xs" id="btnActivityAll">活跃上报</button>
           <button class="xs" id="btnKeepaliveAll">全部保活</button>
         </header>
-        <div class="tbl-wrap">
+        <div class="tbl-wrap" id="accTblWrap">
         <table class="acc">
           <thead><tr>
             <th class="mark" aria-hidden="true"></th>
@@ -683,6 +700,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         </table>
         </div>
       </div>
+      <div class="acc-groups" id="accGroups" hidden></div>
 
       <div class="box">
         <header>
@@ -1246,8 +1264,8 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       </div>
       <!-- 导入 JSON -->
       <div id="addTabImport" class="tab-panel" hidden>
-        <div class="hint" style="margin-bottom:8px">选择 cockpit tools 导出的 JSON 文件，批量导入账号。文件需为账号数组格式。</div>
-        <input type="file" id="importFile" accept=".json" style="margin-bottom:8px">
+        <div class="hint" style="margin-bottom:8px">选择 cockpit tools 或面板导出的 JSON 文件批量导入，可一次多选多个文件。</div>
+        <input type="file" id="importFile" accept=".json,application/json" multiple style="margin-bottom:8px">
         <div id="importDone" class="state ok" hidden></div>
         <div id="importErr" class="state err" hidden></div>
       </div>

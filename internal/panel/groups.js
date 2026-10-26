@@ -35,9 +35,11 @@ async function load() {
     if (state.selected !== 'public' && !groupOf(state.selected)) state.selected = 'public';
     $('navState').textContent = '服务正常';
     renderAll();
+    return true;
   } catch (e) {
     $('navState').textContent = '加载失败';
     if (String(e.message).indexOf('密钥') < 0) toast('加载失败：' + e.message, 'err');
+    return false;
   }
 }
 function statusOf(a) {
@@ -90,14 +92,38 @@ function shareCard(g) {
     '<label class="switch-row"><span class="sw-text"><b>允许本组调用公共池账号</b><em>本组无可用号时回源；默认关闭</em></span><input type="checkbox" data-act="toggle-call"' + (g.call_public ? ' checked' : '') + '><span class="track"><i></i></span></label>' +
     '<div class="hint">' + (g.shared_pool ? '公共池可命中本组账号。' : '') + (g.call_public ? '本组可回源公共池。' : '') + (!g.shared_pool && !g.call_public ? '本组与公共池双向隔离。' : '') + '</div></div>';
 }
+// accActs 账号行操作，与主页账号池（app.js renderAccounts）同口径：
+// 企业版不显示签到 / 任务（上游不支持），冻结 → 解冻、暂停 → 恢复选号、否则 → 暂停选号。
+// 任务 / 模型弹窗逻辑较重，复用主页实现：新标签页深链 /panel/?open=tasks&uid=...。
+function accActs(a, mode) {
+  const u = esc(a.uid);
+  const b = (act, label, cls, title) => '<button class="xs ' + (cls || 'ghost') + '" data-act="acc" data-a="' + act + '" data-uid="' + u + '"' + (title ? ' title="' + esc(title) + '"' : '') + '>' + label + '</button>';
+  const frozen = a.disabled || a.cooling;
+  let h = '';
+  if (!a.enterprise) h += b('checkin', a.checkin_done ? '已签' : '签到', '', a.checkin_done ? '今日已签到；点击可重新签到并刷新余额' : '');
+  h += b('balance', a.enterprise ? '额度' : '余额');
+  if (!a.enterprise) h += b('tasks', '任务', '', '在控制台打开任务面板');
+  h += b('models', '模型', '', '在控制台打开模型面板');
+  h += frozen ? b('revive', '解冻', 'primary') : (a.paused ? b('resume', '恢复选号', 'primary') : b('pause', '暂停选号', '', '退出选号，但照常签到 / 保活 / 刷新余额'));
+  if (!a.disabled) h += b('disable', '禁用');
+  if (mode === 'group') h += '<button class="xs ghost" data-act="move-account" data-uid="' + u + '">移出</button>';
+  else if (a.group) h += '<button class="xs ghost" data-act="select" data-id="' + esc(a.group) + '">前往分组</button>';
+  h += '<button class="xs ghost danger" data-act="remove-account" data-uid="' + u + '">移除</button>';
+  return h;
+}
+function credText(a) {
+  if (a.credits_total === -1) return '不限';
+  if (a.credits == null) return '—';
+  return fmt(a.credits) + (a.credits_total > 0 ? '<span style="color:var(--ink-3)">/' + fmt(a.credits_total) + '</span>' : '');
+}
 function rowsHtml(list, mode) {
   if (!list.length) return '<tr><td colspan="9"><div class="empty"><div class="big">' + (mode === 'group' ? '这个分组还没有账号' : '没有账号') + '</div>点击「添加账号」或「导入 JSON」。</div></td></tr>';
   return list.map(a => {
     const st = statusOf(a);
-    const acts = mode === 'group'
-      ? '<button data-act="move-account" data-uid="' + esc(a.uid) + '">移出</button><button class="danger" data-act="remove-account" data-uid="' + esc(a.uid) + '">移除</button>'
-      : (a.group ? '<button data-act="select" data-id="' + esc(a.group) + '">前往分组</button>' : '<button class="danger" data-act="remove-account" data-uid="' + esc(a.uid) + '">移除</button>');
-    return '<tr class="' + st.cls + '"><td class="mark"><i></i></td><td><div class="who"><div class="nm">' + esc(a.nickname || a.uid.slice(0, 8)) + '</div><div class="id">' + esc(a.uid) + '</div></div></td><td><span class="tag ' + st.tag + '">' + st.text + '</span></td><td class="num">' + fmt(a.credits) + '</td><td class="num">' + fmt(a.success_count) + ' / ' + fmt(a.err_total) + '</td><td class="num">' + (a.in_flight || 0) + '</td><td class="num">' + (a.token_usage && a.token_usage.total_tokens ? fmtTokens(a.token_usage.total_tokens) : '—') + '</td><td class="num">' + (a.realm || 'cn').toUpperCase() + '</td><td><div class="acts">' + acts + '</div></td></tr>';
+    const acts = accActs(a, mode);
+    const tags = (a.realm === 'global' ? ' <span class="tag accent">国际版</span>' : '') + (a.enterprise ? ' <span class="tag accent">企业版</span>' : '');
+    const note = a.reason ? '<div class="id" style="margin-top:3px">' + esc(a.reason) + '</div>' : '';
+    return '<tr class="' + st.cls + '"><td class="mark"><i></i></td><td><div class="who"><div class="nm">' + esc(a.nickname || a.uid.slice(0, 8)) + tags + '</div><div class="id">' + esc(a.uid) + '</div></div></td><td><span class="tag ' + st.tag + '">' + st.text + '</span>' + note + '</td><td class="num">' + credText(a) + '</td><td class="num">' + fmt(a.success_count) + ' / ' + fmt(a.err_total) + '</td><td class="num">' + (a.in_flight || 0) + '</td><td class="num">' + (a.token_usage && a.token_usage.total_tokens ? fmtTokens(a.token_usage.total_tokens) : '—') + '</td><td class="num">' + (a.realm || 'cn').toUpperCase() + '</td><td><div class="acts">' + acts + '</div></td></tr>';
   }).join('');
 }
 function accountsBox(list, mode) {
@@ -167,9 +193,19 @@ function updateImportParse() {
 }
 $('importSingle').addEventListener('input', updateImportParse);
 $('importBatch').addEventListener('input', updateImportParse);
+// 支持一次多选多个 JSON 文件：逐个解析后按 uid 去重合并成一个数组放进批量文本框。
+// 解析失败 / 无有效账号的文件单独计数提示，不影响其他文件。
 $('importFile').addEventListener('change', async () => {
-  const file = $('importFile').files[0]; if (!file) return;
-  $('importBatch').value = await file.text(); updateImportParse();
+  const files = Array.from($('importFile').files || []); if (!files.length) return;
+  const merged = new Map(); const bad = [];
+  for (const f of files) {
+    const arr = parseAccounts(await f.text());
+    if (!arr.length) { bad.push(f.name); continue; }
+    arr.forEach(x => merged.set(x.uid || (x.account && x.account.uid), x));
+  }
+  $('importBatch').value = merged.size ? JSON.stringify(Array.from(merged.values()), null, 1) : '';
+  updateImportParse();
+  $('importParse').textContent = files.length + ' 个文件，识别到 ' + merged.size + ' 个账号（已按 uid 去重）' + (bad.length ? '；无法识别：' + bad.join('、') : '');
 });
 function openConfirm(title, body, label, fn) { $('confirmTitle').textContent = title; $('confirmBody').innerHTML = body; $('confirmYes').textContent = label; state.confirm = fn; open('confirmVeil'); }
 
@@ -252,6 +288,21 @@ document.addEventListener('click', async e => {
       }, 3000);
       return;
     }
+    if (act === 'acc') {
+      const u = el.dataset.uid, a = el.dataset.a, p = 'accounts/' + encodeURIComponent(u) + '/';
+      if (a === 'tasks' || a === 'models') { window.open('/panel/?open=' + a + '&uid=' + encodeURIComponent(u) + '#accounts', '_blank'); return; }
+      if (a === 'disable' && !confirm('禁用后该账号不再参与选号（保号任务默认也跳过），需手动解冻才能恢复。若只是想临时让位、仍要保号，请改用「暂停选号」。确认禁用？')) return;
+      el.disabled = true;
+      try {
+        if (a === 'checkin') { const r = await api(p + 'checkin', { method: 'POST' }); toast('签到完成' + (r.credits != null ? '，积分 ' + r.credits + (r.credits_total > 0 ? '/' + r.credits_total : '') : '') + (r.checkin_message ? '（' + r.checkin_message + '）' : ''), 'ok'); }
+        else if (a === 'balance') { const r = await api(p + 'balance', { method: 'POST' }); toast('余额已更新：' + r.credits + (r.credits_total > 0 ? ' / ' + r.credits_total : ''), 'ok'); }
+        else if (a === 'revive') { await api(p + 'revive', { method: 'POST' }); toast('已解冻', 'ok'); }
+        else if (a === 'pause') { await api(p + 'pause', { method: 'POST' }); toast('已暂停选号（签到 / 保活照常）', 'ok'); }
+        else if (a === 'resume') { await api(p + 'resume', { method: 'POST' }); toast('已恢复选号', 'ok'); }
+        else if (a === 'disable') { await api(p + 'disable', { method: 'POST' }); toast('已禁用', 'ok'); }
+      } finally { el.disabled = false; await load(); }
+      return;
+    }
     if (act === 'move-account') {
       const uid = el.dataset.uid;
       await api('accounts/' + encodeURIComponent(uid) + '/group', { method: 'POST', body: JSON.stringify({ group: '' }) });
@@ -259,7 +310,7 @@ document.addEventListener('click', async e => {
     }
     if (act === 'remove-account') {
       const uid = el.dataset.uid;
-      openConfirm('移除账号', '<div class="hint">从池中移除 ' + esc(uid) + '，不会删除 auth 文件。</div>', '移除', async () => {
+      openConfirm('移除账号', '<div class="hint">移除 ' + esc(uid) + ' 将删除池状态与 auths/ 下的凭证文件，且不可恢复。</div>', '移除', async () => {
         await api('accounts/' + encodeURIComponent(uid) + '/remove', { method: 'POST' }); close('confirmVeil'); await load(); toast('账号已移除', 'ok');
       }); return;
     }
@@ -270,7 +321,13 @@ document.addEventListener('click', async e => {
   } catch (err) { toast(err.message || String(err), 'err'); }
 });
 
-$('btnRefresh').onclick = load;
+// 刷新：原来直接 onclick = load，数据没变时页面看起来毫无反应；现在给出进行中状态与结果提示。
+$('btnRefresh').onclick = async () => {
+  const b = $('btnRefresh'); if (b.disabled) return;
+  b.disabled = true; b.textContent = '刷新中…';
+  try { if (await load()) toast('已刷新 · ' + state.accounts.length + ' 个账号', 'ok'); }
+  finally { b.disabled = false; b.textContent = '刷新'; }
+};
 $('btnTheme').onclick = () => { const cur = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light'; document.documentElement.dataset.theme = cur; localStorage.setItem('wb2gp.theme', cur); };
 if (localStorage.getItem('wb2gp.theme')) document.documentElement.dataset.theme = localStorage.getItem('wb2gp.theme');
 load();

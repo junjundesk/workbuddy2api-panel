@@ -365,18 +365,90 @@ document.querySelectorAll('.nav a[data-view]').forEach(a => a.onclick = e => { e
 setTimeout(() => {
   const hash = (location.hash || '#accounts').slice(1);
   go(hash in TITLES ? hash : 'accounts');
+  // 深链：号池分组页的「任务 / 模型」按钮跳 /panel/?open=tasks&uid=...，复用这里的弹窗。
+  const q = new URLSearchParams(location.search);
+  const openUID = q.get('uid'), openWhat = q.get('open');
+  if (openUID && (openWhat === 'tasks' || openWhat === 'models')) {
+    history.replaceState(null, '', location.pathname + location.hash);
+    if (openWhat === 'tasks') openTasks(openUID); else openAccountModels(openUID);
+  }
 }, 0);
 
 /* ── 账号池 ───────────────────────────────────────────────────────── */
-function renderAccounts(list) {
+function renderAccounts(list, groups) {
   const tb = $('accBody');
+  // 有分组 → 每组一张卡片（方案 B），原单表隐藏；没有分组 → 与原来完全一致的单表。
+  const gbox = $('accGroups'), wrap = $('accTblWrap');
+  if (gbox) {
+    const grouped = !!(groups && groups.length && list.length);
+    gbox.hidden = !grouped; if (wrap) wrap.hidden = grouped;
+    if (grouped) { renderAccountGroups(list, groups); return; }
+    gbox.innerHTML = '';
+  }
   if (!list.length) {
     tb.innerHTML = '<tr><td colspan="9"><div class="empty"><div class="big">账号池是空的</div>点击右上角「添加账号」，用浏览器登录一个 WorkBuddy 账号</div></td></tr>';
     return;
   }
   // 有总额度（credits_total）→ 进度条按自身 剩余/总额 百分比；旧数据无总额 → 退回池内最高=100%
   const maxCred = Math.max(1, ...list.map(s => s.credits || 0));
-  tb.innerHTML = list.map(s => {
+  tb.innerHTML = list.map(s => accRowHtml(s, maxCred)).join('');
+}
+
+// groupAccountsForView 把账号分到「公共池 + 各分组（按创建时间）」桶里。
+// 没有 group、或 group 已被删除的账号归公共池，保证不会因为分组被删而在页面上消失。
+function groupAccountsForView(list, groups) {
+  const buckets = [{ key: '_public', id: '', name: '公共池', color: '', pub: true, items: [] }]
+    .concat((groups || []).map(g => ({ key: g.id, id: g.id, name: g.name, color: g.color || '', shared: !!g.shared_pool, call: !!g.call_public, items: [] })));
+  const byKey = new Map(buckets.map(b => [b.key, b]));
+  (list || []).forEach(s => { (byKey.get(s.group) || buckets[0]).items.push(s); });
+  return buckets;
+}
+function accCoolSec(s, now) {
+  const bl = (new Date(s.breaker_until || 0) - now) / 1000;
+  const dg = (new Date(s.degrade_until || 0) - now) / 1000;
+  return Math.max(s.cool_remaining_sec || 0, bl > 0 ? bl : 0, dg > 0 ? dg : 0);
+}
+// accGroupCounts 分组标题上的状态计数与积分合计，口径与行内状态标签一致。
+function accGroupCounts(items, now) {
+  const c = { ok: 0, cool: 0, paused: 0, off: 0, credits: 0, total: 0 };
+  items.forEach(s => {
+    if (s.disabled) c.off++;
+    else if (s.paused) c.paused++;
+    else if (accCoolSec(s, now) > 0) c.cool++;
+    else c.ok++;
+    if (s.credits_total !== -1) { c.credits += s.credits || 0; if (s.credits_total > 0) c.total += s.credits_total; }
+  });
+  return c;
+}
+const LS_ACC_FOLD = 'wb2api.accFold';
+function accFoldState() { try { return JSON.parse(localStorage.getItem(LS_ACC_FOLD) || '{}') || {}; } catch (e) { return {}; } }
+function renderAccountGroups(list, groups) {
+  const fold = accFoldState(), now = Date.now();
+  const maxCred = Math.max(1, ...list.map(s => s.credits || 0));
+  // 固定列宽：各卡片的列上下对齐。
+  const cols = '<colgroup><col style="width:3px"><col style="width:190px"><col style="width:150px"><col style="width:100px"><col style="width:90px"><col style="width:54px"><col style="width:260px"><col style="width:92px"><col></colgroup>';
+  const head = '<thead><tr><th class="mark" aria-hidden="true"></th><th>账号</th><th>状态</th><th>积分</th><th>成功 / 失败</th><th>在途</th><th>用量</th><th>最近成功</th><th class="c-acts"></th></tr></thead>';
+  const tag = (n, cls, label) => n ? '<span class="tag ' + cls + '">' + label + ' ' + n + '</span>' : '';
+  $('accGroups').innerHTML = groupAccountsForView(list, groups).map(b => {
+    const c = accGroupCounts(b.items, now);
+    const badge = b.pub ? '未分组' : (b.shared ? '进入公共池' : '独立') + (b.call ? ' · 可回源' : '');
+    const cred = c.total > 0 ? '积分 ' + c.credits + ' / ' + c.total : (c.credits ? '积分 ' + c.credits : '');
+    const rows = b.items.length ? b.items.map(s => accRowHtml(s, maxCred)).join('')
+      : '<tr><td colspan="9"><div class="empty">' + (b.pub ? '没有未分组的账号' : '这个分组还没有账号') + '</div></td></tr>';
+    const k = esc(b.key);
+    return '<div class="box gcard' + (fold[b.key] ? ' fold' : '') + '"><header data-gfold="' + k + '" title="点击折叠 / 展开">' +
+      '<span class="car">▾</span><span class="gdot" style="background:' + esc(b.color || 'var(--ink-3)') + '"></span>' +
+      '<span class="gn">' + esc(b.name) + '</span><span class="gbadge">' + badge + '</span>' +
+      '<span class="gc">' + b.items.length + ' 个账号</span>' +
+      '<span class="gs">' + tag(c.ok, 'ok', '可用') + tag(c.cool, 'warn', '冷却') + tag(c.paused, 'warn', '暂停') + tag(c.off, 'bad', '禁用') + '</span>' +
+      '<span class="gcred">' + cred + '</span><span class="grow"></span>' +
+      (b.items.length ? '<button class="xs" data-gbulk="checkin" data-g="' + k + '" title="逐个签到本组账号（跳过禁用 / 企业版）">本组签到</button>' +
+        '<button class="xs" data-gbulk="balance" data-g="' + k + '" title="逐个刷新本组账号余额">本组余额</button>' : '') +
+      '</header><div class="tbl-wrap"><table class="acc gfix">' + cols + head + '<tbody>' + rows + '</tbody></table></div></div>';
+  }).join('');
+}
+
+function accRowHtml(s, maxCred) {
     const bl = (new Date(s.breaker_until || 0) - Date.now()) / 1000;
     const dg = (new Date(s.degrade_until || 0) - Date.now()) / 1000;
     const cool = Math.max(s.cool_remaining_sec || 0, bl > 0 ? bl : 0, dg > 0 ? dg : 0);
@@ -452,7 +524,6 @@ function renderAccounts(list) {
         (s.disabled ? '' : '<button class="xs ghost" data-a="disable" data-u="' + esc(s.uid) + '">禁用</button>') +
         '<button class="xs ghost danger" data-a="remove" data-u="' + esc(s.uid) + '">移除</button>' +
       '</td></tr>';
-  }).join('');
 }
 
 // renderModelLocks 模型锁池：哪些模型不能用、锁了几个号、还要锁多久。
@@ -514,12 +585,12 @@ async function loadOverview(quiet) {
     $('accNote').textContent = d.in_flight_full ? d.in_flight_full + ' 个账号在途占满' : '';
     const up = Math.floor(d.uptime_sec);
     $('subMeta').textContent = '运行 ' + (up >= 86400 ? Math.floor(up / 86400) + ' 天 ' : '') + Math.floor(up % 86400 / 3600) + ' 时 ' + Math.floor(up % 3600 / 60) + ' 分';
-    renderAccounts(d.accounts || []);
+    renderAccounts(d.accounts || [], d.groups);
     renderModelLocks(d.model_locks);
   } catch (e) { if (!quiet) toast(e.message, 'err'); }
 }
 
-$('accBody').addEventListener('click', async ev => {
+async function onAccClick(ev) {
   const b = ev.target.closest('button[data-a]');
   if (!b) return;
   const u = b.dataset.u, a = b.dataset.a;
@@ -555,6 +626,38 @@ $('accBody').addEventListener('click', async ev => {
     }
   } catch (e) { toast(e.message, 'err'); }
   finally { b.disabled = false; loadOverview(true); }
+}
+$('accBody').addEventListener('click', onAccClick);
+
+// 分组卡片：行内按钮复用 onAccClick；标题栏点击折叠（记住状态）；本组签到 / 余额逐个执行。
+async function runGroupBulk(btn) {
+  const key = btn.dataset.g, what = btn.dataset.gbulk;
+  const d = overviewData || {};
+  const bucket = groupAccountsForView(d.accounts || [], d.groups || []).find(b => b.key === key);
+  const items = (bucket ? bucket.items : []).filter(s => !s.disabled && !(what === 'checkin' && s.enterprise));
+  if (!items.length) { toast('本组没有可执行的账号', 'err'); return; }
+  const label = btn.textContent; btn.disabled = true;
+  let ok = 0, fail = 0;
+  for (let i = 0; i < items.length; i++) {
+    btn.textContent = label + ' ' + (i + 1) + '/' + items.length;
+    try { await api('accounts/' + encodeURIComponent(items[i].uid) + '/' + what, { method: 'POST' }); ok++; }
+    catch (e) { fail++; }
+  }
+  btn.disabled = false; btn.textContent = label;
+  toast(label + '完成：成功 ' + ok + (fail ? '，失败 ' + fail : ''), fail ? 'err' : 'ok');
+  loadOverview(true);
+}
+if ($('accGroups')) $('accGroups').addEventListener('click', ev => {
+  const bulk = ev.target.closest('button[data-gbulk]');
+  if (bulk) { if (!bulk.disabled) runGroupBulk(bulk); return; }
+  if (ev.target.closest('button[data-a]')) { onAccClick(ev); return; }
+  const h = ev.target.closest('header[data-gfold]');
+  if (!h) return;
+  const card = h.parentElement, key = h.dataset.gfold;
+  card.classList.toggle('fold');
+  const st = accFoldState();
+  if (card.classList.contains('fold')) st[key] = 1; else delete st[key];
+  localStorage.setItem(LS_ACC_FOLD, JSON.stringify(st));
 });
 
 $('btnCheckinAll').onclick = async () => {
@@ -1241,28 +1344,35 @@ $('btnOpenUrl').onclick = () => open($('addUrl').textContent, '_blank');
 $('btnCopyUrl').onclick = () => navigator.clipboard.writeText($('addUrl').textContent)
   .then(() => toast('链接已复制', 'ok'), () => toast('复制失败，请手动选择复制', 'err'));
 $('importFile').onchange = async () => {
-  const file = $('importFile').files[0];
-  if (!file) return;
+  // 支持多选：逐个文件上传，单个文件失败不影响其他文件，最后汇总。
+  const files = Array.from($('importFile').files || []);
+  if (!files.length) return;
   $('importDone').hidden = true; $('importErr').hidden = true;
-  const fd = new FormData();
-  fd.append('file', file);
   const h = {};
   const k = localStorage.getItem(LS_KEY);
   if (k) h['Authorization'] = 'Bearer ' + k;
-  try {
-    const r = await fetch('/panel/api/import/cockpit', { method: 'POST', body: fd, headers: h });
-    const d = await r.json();
-    if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
-    $('importDone').hidden = false;
-    $('importDone').textContent = '导入完成：成功 ' + d.imported + ' 个' + (d.skipped ? '，跳过 ' + d.skipped + ' 个' : '');
-    if (d.errors && d.errors.length) {
-      console.warn('import errors:', d.errors);
-    }
-    loadOverview(true);
-  } catch (e) {
-    $('importErr').hidden = false;
-    $('importErr').textContent = '导入失败：' + e.message;
+  let imported = 0, skipped = 0;
+  const failed = [];
+  for (const file of files) {
+    const fd = new FormData();
+    fd.append('file', file);
+    try {
+      const r = await fetch('/panel/api/import/cockpit', { method: 'POST', body: fd, headers: h });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+      imported += d.imported || 0; skipped += d.skipped || 0;
+      if (d.errors && d.errors.length) console.warn('import errors (' + file.name + '):', d.errors);
+    } catch (e) { failed.push(file.name + '：' + e.message); }
   }
+  if (imported || skipped || !failed.length) {
+    $('importDone').hidden = false;
+    $('importDone').textContent = (files.length > 1 ? files.length + ' 个文件，' : '') + '导入完成：成功 ' + imported + ' 个' + (skipped ? '，跳过 ' + skipped + ' 个' : '');
+  }
+  if (failed.length) {
+    $('importErr').hidden = false;
+    $('importErr').textContent = '导入失败：' + failed.join('；');
+  }
+  loadOverview(true);
   $('importFile').value = '';
 };
 
