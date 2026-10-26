@@ -7,8 +7,9 @@ function esc(s) { return String(s == null ? '' : s).replace(/&/g,'&amp;').replac
 function fmt(n) { return Number(n || 0).toLocaleString('zh-CN'); }
 function fmtTokens(n) { n = Number(n || 0); if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M'; if (n >= 1000) return (n / 1000).toFixed(0) + 'k'; return String(n); }
 function toast(msg, cls) { const el = document.createElement('div'); el.className = 'tst ' + (cls || ''); el.textContent = msg; $('toasts').appendChild(el); setTimeout(() => el.remove(), 3600); }
-function open(id) { $(id).classList.add('on'); }
-function close(id) { $(id).classList.remove('on'); }
+// 不能叫 open/close：顶层函数声明会覆盖 window.open，导致新标签页深链报 classList of null。
+function openVeil(id) { $(id).classList.add('on'); }
+function closeVeil(id) { $(id).classList.remove('on'); }
 function copyText(t) { if (!t) return; const ta = document.createElement('textarea'); ta.value = t; ta.style.position = 'fixed'; ta.style.opacity = '0'; document.body.appendChild(ta); ta.select(); try { document.execCommand('copy'); toast('已复制', 'ok'); } catch (e) { toast('复制失败', 'err'); } ta.remove(); }
 function groupOf(id) { return state.groups.find(g => g.id === id); }
 function selectedGroup() { return groupOf(state.selected); }
@@ -22,7 +23,7 @@ async function api(path, opts) {
   if (k) h['Authorization'] = 'Bearer ' + k;
   if (opts.body && !(opts.body instanceof FormData)) h['Content-Type'] = 'application/json';
   const r = await fetch('/panel/api/' + path, Object.assign({}, opts, { headers: h }));
-  if (r.status === 401) { open('keyGate'); throw new Error('密钥无效'); }
+  if (r.status === 401) { openVeil('keyGate'); throw new Error('密钥无效'); }
   const d = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
   return d;
@@ -144,7 +145,7 @@ function renderDetail() {
     '<div class="gp-cards">' + keyCard(g) + proxyCard(g) + shareCard(g) + '</div>' + accountsBox(list, 'group');
 }
 function renderAll() { renderStats(); renderRail(); renderDetail(); }
-function showKeyModal(key) { $('keyBig').textContent = key; open('keyVeil'); }
+function showKeyModal(key) { $('keyBig').textContent = key; openVeil('keyVeil'); }
 function openGroupModal(edit) {
   state.editing = edit ? edit.id : null;
   state.groupColor = edit ? (edit.color || COLORS[0]) : COLORS[state.groups.length % COLORS.length];
@@ -153,7 +154,7 @@ function openGroupModal(edit) {
   $('groupShared').checked = !!(edit && edit.shared_pool);
   $('groupCallPublic').checked = !!(edit && edit.call_public);
   $('groupColors').innerHTML = COLORS.map(c => '<button class="swatch ' + (c === state.groupColor ? 'on' : '') + '" style="--c:' + c + '" data-act="group-color" data-color="' + c + '"></button>').join('');
-  open('groupVeil');
+  openVeil('groupVeil');
 }
 function proxyHint(t) { if (t === 'http') return 'HTTP CONNECT；目标域名由本机解析。'; if (t === 'socks5') return 'SOCKS5（本地 DNS）：先解析目标域名再由代理转发 IP。'; return 'SOCKS5H（远程 DNS）：域名交给代理解析，适合避免 DNS 泄漏。'; }
 function openProxyModal(g) {
@@ -165,7 +166,7 @@ function openProxyModal(g) {
   $('proxyUser').value = p ? (p.username || '') : '';
   $('proxyPass').value = '';
   $('proxyTestBox').hidden = true; $('proxyTestBox').className = 'testbox';
-  updateProxyUI(); open('proxyVeil');
+  updateProxyUI(); openVeil('proxyVeil');
 }
 function updateProxyUI() {
   document.querySelectorAll('#proxyTypes button').forEach(b => b.classList.toggle('on', b.dataset.type === state.proxyType));
@@ -176,7 +177,7 @@ function openImportModal() {
   state.importGroup = state.selected === 'public' ? null : state.selected;
   $('importGroupName').textContent = state.importGroup ? '· ' + groupOf(state.importGroup).name : '· 公共号池';
   $('importSingle').value = ''; $('importBatch').value = ''; $('importFile').value = '';
-  switchImportTab('single'); updateImportParse(); open('importVeil');
+  switchImportTab('single'); updateImportParse(); openVeil('importVeil');
 }
 function switchImportTab(t) { state.importTab = t; document.querySelectorAll('#importVeil .tab').forEach(b => b.classList.toggle('on', b.dataset.tab === t)); $('importSinglePanel').hidden = t !== 'single'; $('importBatchPanel').hidden = t !== 'batch'; if ($('importParse')) updateImportParse(); }
 function parseAccounts(text) {
@@ -207,7 +208,7 @@ $('importFile').addEventListener('change', async () => {
   updateImportParse();
   $('importParse').textContent = files.length + ' 个文件，识别到 ' + merged.size + ' 个账号（已按 uid 去重）' + (bad.length ? '；无法识别：' + bad.join('、') : '');
 });
-function openConfirm(title, body, label, fn) { $('confirmTitle').textContent = title; $('confirmBody').innerHTML = body; $('confirmYes').textContent = label; state.confirm = fn; open('confirmVeil'); }
+function openConfirm(title, body, label, fn) { $('confirmTitle').textContent = title; $('confirmBody').innerHTML = body; $('confirmYes').textContent = label; state.confirm = fn; openVeil('confirmVeil'); }
 
 document.addEventListener('click', async e => {
   const el = e.target.closest('[data-act]'); if (!el) return;
@@ -222,7 +223,7 @@ document.addEventListener('click', async e => {
       if (!body.name) { toast('请填写分组名称', 'err'); return; }
       if (state.editing) { await api('groups/' + state.editing, { method: 'PATCH', body: JSON.stringify(body) }); toast('分组已更新', 'ok'); }
       else { const r = await api('groups', { method: 'POST', body: JSON.stringify(body) }); state.selected = r.group.id; showKeyModal(r.key); toast('分组已创建', 'ok'); }
-      close('groupVeil'); await load(); return;
+      closeVeil('groupVeil'); await load(); return;
     }
     if (act === 'delete-group') {
       const g = selectedGroup(); if (!g) return;
@@ -230,7 +231,7 @@ document.addEventListener('click', async e => {
       openConfirm('删除分组', body, '删除分组', async () => {
         const mode = document.querySelector('input[name="delMode"]:checked').value;
         await api('groups/' + g.id + '?account_action=' + mode, { method: 'DELETE' });
-        state.selected = 'public'; close('confirmVeil'); await load(); toast('分组已删除', 'ok');
+        state.selected = 'public'; closeVeil('confirmVeil'); await load(); toast('分组已删除', 'ok');
       }); return;
     }
     if (act === 'rotate-key') {
@@ -250,7 +251,7 @@ document.addEventListener('click', async e => {
     if (act === 'proxy-save') {
       const body = { type: state.proxyType, host: $('proxyHost').value.trim(), port: parseInt($('proxyPort').value, 10) || 0, username: $('proxyUser').value.trim(), password: $('proxyPass').value };
       await api('groups/' + state.proxyGroup + '/proxy', { method: 'PUT', body: JSON.stringify(body) });
-      close('proxyVeil'); await load(); toast('代理已保存', 'ok'); return;
+      closeVeil('proxyVeil'); await load(); toast('代理已保存', 'ok'); return;
     }
     if (act === 'proxy-test') {
       const body = { type: state.proxyType, host: $('proxyHost').value.trim(), port: parseInt($('proxyPort').value, 10) || 0, username: $('proxyUser').value.trim(), password: $('proxyPass').value };
@@ -269,11 +270,11 @@ document.addEventListener('click', async e => {
       const fd = new FormData(); fd.append('file', new Blob([JSON.stringify(arr)], { type: 'application/json' }), 'accounts.json');
       if (state.importGroup) fd.append('group', state.importGroup);
       const r = await api('import/cockpit', { method: 'POST', body: fd });
-      close('importVeil'); await load(); if (r.errors && r.errors.length) console.warn('import errors:', r.errors);
+      closeVeil('importVeil'); await load(); if (r.errors && r.errors.length) console.warn('import errors:', r.errors);
       toast('导入完成：成功 ' + r.imported + '，跳过 ' + r.skipped + (r.errors && r.errors.length ? '（' + r.errors[0] + '）' : ''), r.imported ? 'ok' : 'warn'); return;
     }
     if (act === 'add-account') {
-      const g = selectedGroup(); $('addGroupName').textContent = g ? '· ' + g.name : '· 公共号池'; $('addWait').hidden = true; open('addVeil');
+      const g = selectedGroup(); $('addGroupName').textContent = g ? '· ' + g.name : '· 公共号池'; $('addWait').hidden = true; openVeil('addVeil');
       state.addGroup = g ? g.id : ''; return;
     }
     if (act === 'start-login') {
@@ -283,7 +284,7 @@ document.addEventListener('click', async e => {
       const timer = setInterval(async () => {
         try {
           const p = await api('login/poll?state=' + encodeURIComponent(r.state));
-          if (p.done) { clearInterval(timer); close('addVeil'); await load(); toast('账号已添加' + (p.group ? '到分组' : '到公共池'), 'ok'); }
+          if (p.done) { clearInterval(timer); closeVeil('addVeil'); await load(); toast('账号已添加' + (p.group ? '到分组' : '到公共池'), 'ok'); }
         } catch (e) { /* 继续轮询 */ }
       }, 3000);
       return;
@@ -311,13 +312,13 @@ document.addEventListener('click', async e => {
     if (act === 'remove-account') {
       const uid = el.dataset.uid;
       openConfirm('移除账号', '<div class="hint">移除 ' + esc(uid) + ' 将删除池状态与 auths/ 下的凭证文件，且不可恢复。</div>', '移除', async () => {
-        await api('accounts/' + encodeURIComponent(uid) + '/remove', { method: 'POST' }); close('confirmVeil'); await load(); toast('账号已移除', 'ok');
+        await api('accounts/' + encodeURIComponent(uid) + '/remove', { method: 'POST' }); closeVeil('confirmVeil'); await load(); toast('账号已移除', 'ok');
       }); return;
     }
-    if (act === 'close') { close(el.dataset.target); return; }
+    if (act === 'close') { closeVeil(el.dataset.target); return; }
     if (act === 'confirm-yes') { const fn = state.confirm; state.confirm = null; if (fn) await fn(); return; }
     if (act === 'copy-key') { copyText($('keyBig').textContent); return; }
-    if (act === 'gate-ok') { const v = $('gateKey').value.trim(); if (!v) return; localStorage.setItem('wb2api.key', v); close('keyGate'); load(); return; }
+    if (act === 'gate-ok') { const v = $('gateKey').value.trim(); if (!v) return; localStorage.setItem('wb2api.key', v); closeVeil('keyGate'); load(); return; }
   } catch (err) { toast(err.message || String(err), 'err'); }
 });
 

@@ -426,7 +426,8 @@ function renderAccountGroups(list, groups) {
   const fold = accFoldState(), now = Date.now();
   const maxCred = Math.max(1, ...list.map(s => s.credits || 0));
   // 固定列宽：各卡片的列上下对齐。
-  const cols = '<colgroup><col style="width:3px"><col style="width:190px"><col style="width:150px"><col style="width:100px"><col style="width:90px"><col style="width:54px"><col style="width:260px"><col style="width:92px"><col></colgroup>';
+  // 账号列不设宽度，吸收剩余空间；操作列必须显式给宽——表头 .c-acts 的 width:1px 在 fixed 布局下会把它压成 1px，按钮溢出盖住左侧列。
+  const cols = '<colgroup><col style="width:4px"><col><col style="width:200px"><col style="width:100px"><col style="width:90px"><col style="width:50px"><col style="width:300px"><col style="width:90px"><col style="width:400px"></colgroup>';
   const head = '<thead><tr><th class="mark" aria-hidden="true"></th><th>账号</th><th>状态</th><th>积分</th><th>成功 / 失败</th><th>在途</th><th>用量</th><th>最近成功</th><th class="c-acts"></th></tr></thead>';
   const tag = (n, cls, label) => n ? '<span class="tag ' + cls + '">' + label + ' ' + n + '</span>' : '';
   $('accGroups').innerHTML = groupAccountsForView(list, groups).map(b => {
