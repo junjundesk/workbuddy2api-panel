@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/groups"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/panel"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
@@ -92,6 +93,19 @@ func main() {
 	p.RestoreFromSnapshot() // 择新恢复：Redis 快照比本地新才采用，否则本地优先
 	p.SyncToDir(auths)      // 与 auths 目录对齐：新账号加入、已删除文件账号剔除（状态保留）
 
+	// 分组注册表：members 是账号归属的权威来源，独立于 auth 文件与 pool 运行态。
+	// 必须在 SyncToDir 之后应用，未知 uid 会被忽略（不会凭空造账号）。
+	groupStore, err := groups.Load(stateSibling(cfg.StateFile, "groups.json"))
+	if err != nil {
+		log.Fatalf("load groups: %v", err)
+	}
+	p.SetGroups(groupStore.Membership())
+	groupMeta := map[string]pool.GroupMeta{}
+	for id, m := range groupStore.Meta() {
+		groupMeta[id] = pool.GroupMeta{Shared: m.Shared, CallPublic: m.CallPublic}
+	}
+	p.SetGroupMeta(groupMeta)
+
 	// 熔断器 + 在途上限（含 global 分档）+ 连败降权 + 闲置补偿调优（从 config 注入，
 	// 非正值回退默认）。
 	p.SetBreaker(cfg.Pool.BreakerThreshold, cfg.BreakerCooldownDur, cfg.BreakerCooldownMaxD)
@@ -132,6 +146,18 @@ func main() {
 	}
 
 	up := upstream.New()
+	// 分组代理：按账号运行期 group 查 groups.json。无代理配置返回 nil = 直连；
+	// 配置非法时 upstream 内部 fail-closed，不会回落到直连。
+	up.SetGroupProxyFunc(func(groupID string) *upstream.ProxyConfig {
+		g, ok := groupStore.Get(groupID)
+		if !ok || g.Proxy == nil {
+			return nil
+		}
+		return &upstream.ProxyConfig{
+			Type: g.Proxy.Type, Host: g.Proxy.Host, Port: g.Proxy.Port,
+			Username: g.Proxy.Username, Password: g.Proxy.Password,
+		}
+	})
 
 	// 积分保底的「收费」兜底判据：接上游模型目录的积分倍率表。本地实测台账无观测
 	// 时用它判收费——否则「没学过」恒等于「放行」，高价新模型会把触底号一笔打穿
@@ -273,6 +299,7 @@ func main() {
 		RedisMode:   redisMode,
 		StickyCount: sessCount,
 		Version:     appVersion,
+		Groups:      groupStore,
 		Live:        live,
 		// 模型上限探测数据（scripts/probe_max_tokens.py --panel-out 写入）：
 		// 与 state 文件同目录，缺省 data/output_probes.json。
@@ -295,6 +322,7 @@ func main() {
 		Pool:         p,
 		Upstream:     up,
 		APIKey:       cfg.APIKey,
+		Groups:       groupStore,
 		Session:      sessRouter,
 		StickyCount:  sessCount,
 		RedisMode:    redisMode,

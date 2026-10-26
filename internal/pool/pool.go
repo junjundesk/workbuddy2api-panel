@@ -71,6 +71,9 @@ type Pool struct {
 	// persistFails 本地 state.json 连续落盘失败计数（仅 saveLocked 在持锁下读写，无需 atomic）。
 	// 用于落盘失败的日志节流：首败/每 N 次提醒/恢复各打一条，避免磁盘满时刷屏。
 	persistFails int
+	// groupMeta 分组策略快照（shared / call_public），由 SetGroupMeta 注入。
+	// 只在持 p.mu 时读取；nil = 没有分组，公共池退化为全部账号。
+	groupMeta map[string]GroupMeta
 	// pickSeq 单调递增的选号序号：每次 pick 选中账号时自增并记到 entry.usedSeq，
 	// 为 LRU 兜底/防惊群提供与 time.Now() 精度无关的严格全序（Windows ~0.5ms 精度下
 	// lastUsed 墙钟会全等）。仅 pick 写锁路径读写，无需 atomic。
@@ -382,6 +385,7 @@ func (p *Pool) Remove(uid string) *auth.Auth {
 func (p *Pool) upsertLocked(a *auth.Auth) {
 	if e, ok := p.byUID[a.UID]; ok {
 		e.a = a // 保留 credits/cooling 状态
+		a.SetGroup(e.group)
 		return
 	}
 	p.byUID[a.UID] = &entry{a: a}

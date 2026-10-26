@@ -36,45 +36,58 @@ const wafIPThreshold = 2
 
 // wafIPGate WAF IP 级拦截状态机（Handler 内嵌，零值可用）。
 type wafIPGate struct {
-	mu    sync.Mutex
+	mu     sync.Mutex
+	scopes map[string]*wafIPScope
+}
+
+// wafIPScope 单个作用域（公共池或某个分组）的 IP 级状态。不同分组代理出口不同，
+// 必须隔离，否则 A 组代理被 WAF 拦截会误伤 B 组。
+type wafIPScope struct {
 	hits  map[string]time.Time // uid → 最近一次 WAF 403 时刻（判定窗内，惰性剪枝）
 	until time.Time            // IP 级拦截激活截止；零值 = 未激活
 }
 
-// noteWaf 记一次某账号的 WAF 403，返回记账后 IP 级拦截是否激活（调用方据此
-// fail-fast 终止轮转，优先于 rotateBackoff 退避）。
-//   - 已激活（now < until）：不续期、不记账（窗口期内不重置——保守自然解除）→ true；
-//   - 未激活：记 hits[uid]=now（同号重复命中覆盖不累计，判定口径是「不同号数」），
-//     剪掉窗外的过期命中；不同 UID 数达 wafIPThreshold → 激活到 now+wafIPWindow
-//     （打一条 WARN 供观测），清空判定窗（解除后需全新命中重新判定，不叠旧账）。
-func (g *wafIPGate) noteWaf(uid string) bool {
+func (g *wafIPGate) scopeLocked(name string) *wafIPScope {
+	if g.scopes == nil {
+		g.scopes = map[string]*wafIPScope{}
+	}
+	s := g.scopes[name]
+	if s == nil {
+		s = &wafIPScope{}
+		g.scopes[name] = s
+	}
+	return s
+}
+
+func (g *wafIPGate) noteWaf(scope, uid string) bool {
 	now := time.Now()
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if now.Before(g.until) {
-		return true // 激活期内新命中：不续期（自然解除语义，任务书第 3 条）
+	s := g.scopeLocked(scope)
+	if now.Before(s.until) {
+		return true
 	}
-	if g.hits == nil {
-		g.hits = map[string]time.Time{}
+	if s.hits == nil {
+		s.hits = map[string]time.Time{}
 	}
-	g.hits[uid] = now
-	for u, t := range g.hits {
+	s.hits[uid] = now
+	for u, t := range s.hits {
 		if now.Sub(t) > wafIPWindow {
-			delete(g.hits, u)
+			delete(s.hits, u)
 		}
 	}
-	if len(g.hits) >= wafIPThreshold {
-		g.until = now.Add(wafIPWindow)
-		log.Printf("WARN: [server] waf ip-level block: %d accounts hit waf 403 within %s, rotate fail-fast until %s", len(g.hits), wafIPWindow, g.until.Format(time.RFC3339))
-		g.hits = map[string]time.Time{}
+	if len(s.hits) >= wafIPThreshold {
+		s.until = now.Add(wafIPWindow)
+		log.Printf("WARN: [server] waf ip-level block scope=%q: %d accounts hit waf 403 within %s, rotate fail-fast until %s", scope, len(s.hits), wafIPWindow, s.until.Format(time.RFC3339))
+		s.hits = map[string]time.Time{}
 		return true
 	}
 	return false
 }
 
-// active 报告 IP 级拦截是否激活（末端错误文案区分 IP 级/账号级措辞用）。
-func (g *wafIPGate) active() bool {
+func (g *wafIPGate) active(scope string) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return time.Now().Before(g.until)
+	s := g.scopeLocked(scope)
+	return time.Now().Before(s.until)
 }

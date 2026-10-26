@@ -38,6 +38,10 @@ type Auth struct {
 	Nickname     string
 	FilePath     string // 来源文件；refresh 后原子写回此处
 
+	// group 运行期分组归属（分组 ID，空 = 公共池）。不写入 auth 文件，
+	// 权威来源是 data/groups.json 的 members；pool 在应用分组时同步写入。
+	group string
+
 	// DeviceToken 设备风控 Token（X-Device-Token 头），来源 auth 文件的 device_token 键。
 	// 缺省为空 = 不注入该头（容器内无桌面端 Turing SDK 的常见部署）。
 	// 手写扁平形 auth 文件可直接写 "device_token": "..."；插件 OAuth 嵌套形
@@ -50,6 +54,27 @@ func (a *Auth) Lock() { a.mu.Lock() }
 
 // Unlock 释放 a.Lock 获取的锁。
 func (a *Auth) Unlock() { a.mu.Unlock() }
+
+// Group 返回运行期分组 ID（空 = 公共池）。分组归属来自 groups.json，
+// 由 pool 应用到账号对象；不落 auth 文件。
+func (a *Auth) Group() string {
+	if a == nil {
+		return ""
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.group
+}
+
+// SetGroup 设置运行期分组 ID（空 = 公共池）。
+func (a *Auth) SetGroup(group string) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	a.group = group
+	a.mu.Unlock()
+}
 
 // AccessTokenValue 加锁读取 AccessToken（出站请求头一律经此取值，勿直读字段）。
 //

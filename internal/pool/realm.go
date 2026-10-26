@@ -12,6 +12,32 @@ const expiringVirtualSlots = 3
 
 // AvailableUIDsForRealm 同 AvailableUIDs，但仅返回 Realm()==realm 的账号。
 // realm=="" 退化为 AvailableUIDs（现状语义）。
+// AvailableUIDsForRealmScoped 同 AvailableUIDsForRealm，并叠加分组作用域。
+// group 非空 = 本组；group=="" = 公共池（未分组 + shared 分组）。
+func (p *Pool) AvailableUIDsForRealmScoped(realm, group string) []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	now := time.Now()
+	uids := make([]string, 0, len(p.byUID))
+	for uid, e := range p.byUID {
+		if !p.scopeMatch(e, GroupScope{Group: group, Public: group == ""}) {
+			continue
+		}
+		if realm != "" && e.a.Realm() != realm {
+			continue
+		}
+		if !e.healthy(now) {
+			continue
+		}
+		if p.inFlightFull(e) {
+			continue
+		}
+		uids = append(uids, uid)
+	}
+	sort.Strings(uids)
+	return uids
+}
+
 func (p *Pool) AvailableUIDsForRealm(realm string) []string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -77,6 +103,33 @@ func (p *Pool) WeightedAvailableUIDsForModelRealm(model, realm string) []string 
 
 // AvailableUIDsForModelRealm 同 AvailableUIDsForModel，但仅返回 Realm()==realm 的账号
 // （6004 模型豁免照常生效）。realm=="" 退化为 AvailableUIDsForModel。
+// AvailableUIDsForModelRealmScoped 同 AvailableUIDsForModelRealm，并叠加分组作用域。
+// group=="" = 公共池（未分组 + shared 分组）；供公共池会话粘性可用集使用，
+// 避免把未共享分组的私有账号绑定进公共会话。
+func (p *Pool) AvailableUIDsForModelRealmScoped(model, realm, group string) []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	now := time.Now()
+	uids := make([]string, 0, len(p.byUID))
+	for uid, e := range p.byUID {
+		if !p.scopeMatch(e, GroupScope{Group: group, Public: group == ""}) {
+			continue
+		}
+		if realm != "" && e.a.Realm() != realm {
+			continue
+		}
+		if !e.healthyForModel(now, model) {
+			continue
+		}
+		if p.inFlightFull(e) {
+			continue
+		}
+		uids = append(uids, uid)
+	}
+	sort.Strings(uids)
+	return uids
+}
+
 func (p *Pool) AvailableUIDsForModelRealm(model, realm string) []string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()

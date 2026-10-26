@@ -41,6 +41,7 @@ type storedResponses struct {
 	items   []any
 	full    map[string]any
 	created time.Time
+	owner   string // 分组 ID；空 = 公共池（主密钥/匿名）
 }
 
 type responsesStore struct {
@@ -53,14 +54,18 @@ func newResponsesStore() *responsesStore {
 	return &responsesStore{byID: map[string]*storedResponses{}}
 }
 
-func (s *responsesStore) put(id string, items []any, full map[string]any) {
+func (s *responsesStore) put(id string, items []any, full map[string]any, owners ...string) {
 	if s == nil || id == "" {
 		return
+	}
+	owner := ""
+	if len(owners) > 0 {
+		owner = owners[0]
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.evictLocked()
-	s.byID[id] = &storedResponses{items: items, full: full, created: time.Now()}
+	s.byID[id] = &storedResponses{items: items, full: full, created: time.Now(), owner: owner}
 	s.order = append(s.order, id)
 }
 
@@ -87,14 +92,21 @@ func (s *responsesStore) evictLocked() {
 	}
 }
 
-func (s *responsesStore) get(id string) *storedResponses {
+func (s *responsesStore) get(id string, owners ...string) *storedResponses {
 	if s == nil || id == "" {
 		return nil
+	}
+	owner := ""
+	if len(owners) > 0 {
+		owner = owners[0]
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	st := s.byID[id]
 	if st == nil {
+		return nil
+	}
+	if owner != "" && st.owner != owner {
 		return nil
 	}
 	if time.Since(st.created) > responsesStoreTTL {
@@ -106,13 +118,20 @@ func (s *responsesStore) get(id string) *storedResponses {
 
 // findItem 按 item id 反查（item_reference 展开）。存储规模有界（<=512 响应），
 // 直接线性扫描，不额外维护反向索引。
-func (s *responsesStore) findItem(id string) any {
+func (s *responsesStore) findItem(id string, owners ...string) any {
 	if s == nil || id == "" {
 		return nil
+	}
+	owner := ""
+	if len(owners) > 0 {
+		owner = owners[0]
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, st := range s.byID {
+		if owner != "" && st.owner != owner {
+			continue
+		}
 		for _, it := range st.items {
 			if m := jMap(it); m != nil && jStr(m["id"]) == id {
 				return it
@@ -999,7 +1018,8 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "invalid JSON body: "+err.Error())
 		return
 	}
-	chat, custom, dropped, err := responsesChatRequest(req, h.respStore)
+	scope := scopeFrom(r)
+	chat, custom, dropped, err := responsesChatRequest(req, h.respStore, scope.GroupID)
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
@@ -1026,14 +1046,14 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 
 	if run.persist && run.final != nil {
 		items := append(append([]any{}, run.inputItems()...), run.outputList()...)
-		h.respStore.put(run.id, items, run.final)
+		h.respStore.put(run.id, items, run.final, scope.GroupID)
 	}
 }
 
 // getResponse GET /v1/responses/{id}：取回收存在内存里的响应（TTL 1h，最多 512 条）。
 func (h *Handler) getResponse(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	st := h.respStore.get(id)
+	st := h.respStore.get(id, scopeFrom(r).GroupID)
 	if st == nil {
 		writeOpenAIError(w, http.StatusNotFound, "not_found",
 			"response "+id+" not found (in-memory store, TTL 1h)")

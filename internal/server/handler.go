@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/groups"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/logfmt"
@@ -50,6 +51,9 @@ type Config struct {
 	// Live 运行期可变配置（面板在线改 api_key / soft_rate / 脱敏开关时立即生效）。
 	// nil 时回退静态字段（测试与裸用场景）。
 	Live *livecfg.Holder
+
+	// Groups 分组注册表（可选；nil = 无分组，全部账号走公共池）。
+	Groups *groups.Store
 
 	// PromptMode "custom"（网关用自有提示词替换 system）/ "passthrough"（透传）。
 	PromptMode string
@@ -177,12 +181,40 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !httpauth.VerifyBearer(r, h.loadLive().APIKey) {
+		scope, ok := h.resolveScope(r)
+		if !ok {
 			writeOpenAIError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid API key")
 			return
 		}
-		next(w, r)
+		next(w, withScope(r, scope))
 	}
+}
+
+// resolveScope 把 Bearer 解析为公共池或分组作用域：
+//   - 主 api_key → 公共池（含 shared 分组）；
+//   - 分组密钥 → 仅该分组（call_public 时允许回源公共池）；
+//   - 主 api_key 为空时保持现有匿名公共池行为，但 sk-grp- 无效密钥返回 401，
+//     避免误落到公共池。
+func (h *Handler) resolveScope(r *http.Request) (authScope, bool) {
+	mainKey := h.loadLive().APIKey
+	tok := bearerToken(r)
+	if mainKey != "" {
+		if httpauth.VerifyBearer(r, mainKey) {
+			return authScope{Main: true}, true
+		}
+	} else if tok == "" {
+		return authScope{Main: true}, true
+	}
+	if tok != "" && h.cfg.Groups != nil {
+		if g, ok := h.cfg.Groups.ResolveKey(tok); ok {
+			return authScope{GroupID: g.ID, CallPublic: g.CallPublic}, true
+		}
+	}
+	if mainKey == "" && tok != "" && !strings.HasPrefix(tok, "sk-grp-") {
+		// 兼容旧行为：未启用主密钥时，任意非分组前缀 Bearer 仍视为匿名公共池。
+		return authScope{Main: true}, true
+	}
+	return authScope{}, false
 }
 
 func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
@@ -210,46 +242,56 @@ func (h *Handler) healthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) status(w http.ResponseWriter, r *http.Request) {
+	scope := scopeFrom(r)
+	accounts := h.cfg.Pool.List()
 	total, healthy, cooling, disabled, inFlightFull := h.cfg.Pool.CountsDetailed()
 	sticky := 0
 	if h.cfg.StickyCount != nil {
 		sticky = h.cfg.StickyCount()
 	}
+	realmTotals := map[string]map[string]int{
+		"cn":     countsMapFrom(h.cfg.Pool.CountsDetailedForRealm("cn")),
+		"global": countsMapFrom(h.cfg.Pool.CountsDetailedForRealm("global")),
+	}
+	modelLocks := h.cfg.Pool.ModelLockView()
+	if scope.GroupID != "" {
+		filtered := make([]pool.Status, 0, len(accounts))
+		for _, a := range accounts {
+			if a.Group == scope.GroupID {
+				filtered = append(filtered, a)
+			}
+		}
+		accounts = filtered
+		total, healthy, cooling, disabled, _ = countStatusList(filtered)
+		inFlightFull = 0
+		realmTotals = realmCountsMap(filtered)
+		modelLocks = nil // 不向分组密钥暴露其他分组的模型锁明细
+		sticky = 0
+	}
 	redisMode := h.cfg.RedisMode
 	if redisMode == "" {
 		redisMode = "noop"
 	}
-	// cost_explore 探索台账（issue #136 §5 可观测性）：累计探索事件数 + 各
-	// (域, 模型) 的最近探索时刻（键 "realm|model"）。与 accounts[].model_costs
-	// 行对照即可读出「探索→毕业」全链路（单一事实来源，不做双表示）。零回归只增键。
 	exploreEvents, exploreLast := h.cfg.Pool.CostExploreStatus()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"accounts":       h.cfg.Pool.List(),
-		"total":          total,
-		"healthy":        healthy,
-		"cooling":        cooling,
-		"disabled":       disabled,
-		"in_flight_full": inFlightFull,
-		// realm_totals 按域分组的计数汇总（双 realm 并存时运维一眼看到各域可用性）：
-		// 只新增字段，既有 total/healthy/cooling/disabled/in_flight_full 汇总键不变（零回归）。
-		"realm_totals": map[string]map[string]int{
-			"cn":     countsMapFrom(h.cfg.Pool.CountsDetailedForRealm("cn")),
-			"global": countsMapFrom(h.cfg.Pool.CountsDetailedForRealm("global")),
-		},
+		"accounts":        accounts,
+		"total":           total,
+		"healthy":         healthy,
+		"cooling":         cooling,
+		"disabled":        disabled,
+		"in_flight_full":  inFlightFull,
+		"realm_totals":    realmTotals,
 		"sticky_sessions": sticky,
 		"redis_mode":      redisMode,
-		// model_locks 当前有未过期模型级限流的 (域, 模型) 全清单：账号池视图回答
-		// 「哪些号不能用」，本键回答「哪些模型不能用、锁了几个号、还要锁多久」。
-		// 与 ModelBlocked（请求失败时的单模型判定）互补；无锁时为 null。零回归只增键。
-		"model_locks": h.cfg.Pool.ModelLockView(),
-		// credit_floor 生效的积分保底值（0 = 关闭）。与 accounts[].credits +
-		// model_costs 对照即可判定「某号为何对某模型不出票」。零值也显式写出
-		// （运维口径：缺失会让人误以为没记录）。
-		"credit_floor": h.cfg.Pool.CreditFloor(),
-		// cost_explore 事件与 per-model 时间戳（时间值由 encoding/json 写 RFC3339）。
+		"model_locks":     modelLocks,
+		"credit_floor":    h.cfg.Pool.CreditFloor(),
 		"cost_explore": map[string]any{
 			"events_total": exploreEvents,
 			"per_model":    exploreLast,
+		},
+		"scope": map[string]any{
+			"group":       scope.GroupID,
+			"call_public": scope.CallPublic,
 		},
 	})
 }
@@ -284,10 +326,77 @@ const (
 // models 返回模型列表：纯动态（缓存 10min），失败/无号返回空列表（无静态兜底——
 // 拉不出目录即意味着上游不可用，假名单只会让客户端选到 11102 的模型）。
 func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
+	scope := scopeFrom(r)
+	data := h.modelList()
+	if scope.GroupID != "" {
+		data = h.modelListForGroup(scope)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"object": "list",
-		"data":   h.modelList(),
+		"data":   data,
 	})
+}
+
+// modelListForGroup 分组密钥可见的模型目录：只用本组账号探测；开启 call_public
+// 且本组无可用号时回落公共池账号。不读全局 dynamicModelsCache（那是公共池口径，
+// 直接复用会把公共池模型泄漏给分组）。
+func (h *Handler) modelListForGroup(scope authScope) []map[string]any {
+	out := make([]map[string]any, 0)
+	cnUIDs := h.cfg.Pool.AvailableUIDsForRealmScoped("cn", scope.GroupID)
+	if len(cnUIDs) == 0 && scope.CallPublic {
+		cnUIDs = h.cfg.Pool.AvailableUIDsForRealmScoped("cn", "")
+	}
+	if len(cnUIDs) > 0 {
+		if acct := h.cfg.Pool.AuthByUID(cnUIDs[0]); acct != nil {
+			if infos, err := h.cfg.Upstream.FetchModels(acct); err == nil {
+				for _, mi := range infos {
+					out = append(out, h.modelEntry("cn", mi))
+				}
+			}
+		}
+	}
+	if h.cfg.GlobalEnabled {
+		globalUIDs := h.cfg.Pool.AvailableUIDsForRealmScoped("global", scope.GroupID)
+		if len(globalUIDs) == 0 && scope.CallPublic {
+			globalUIDs = h.cfg.Pool.AvailableUIDsForRealmScoped("global", "")
+		}
+		if len(globalUIDs) > 0 {
+			if acct := h.cfg.Pool.AuthByUID(globalUIDs[0]); acct != nil {
+				for _, mi := range h.cfg.Upstream.FetchGlobalModelInfos(acct) {
+					out = append(out, h.modelEntry("global", mi))
+				}
+			}
+		}
+	}
+	return out
+}
+
+// modelEntry 单个模型条目（分组路径与主路径的字段口径保持一致）。
+func (h *Handler) modelEntry(realm string, mi upstream.ModelInfo) map[string]any {
+	prefix := "cn:"
+	if realm == "global" {
+		prefix = "global:"
+	}
+	entry := map[string]any{
+		"id":       prefix + mi.ID,
+		"object":   "model",
+		"created":  1753600000,
+		"owned_by": "workbuddy",
+	}
+	if cw := upstream.ContextWindowListingV4(mi.ID, mi.ContextWindow, h.cfg.Upstream.HTTP); cw > 0 {
+		entry["context_length"] = cw
+	}
+	if mo, ok := upstream.MaxOutputTokensListingV4(mi.ID, mi.MaxTokens, h.cfg.Upstream.HTTP); ok {
+		entry["max_output_tokens"] = mo
+	}
+	entry = applyModelInfoFields(entry, mi)
+	if efforts, def := upstream.EffortListing(realm, mi.ID, mi.Efforts, mi.DefaultEffort); efforts != nil {
+		entry["reasoning_supported_efforts"] = efforts
+		if def != "" {
+			entry["reasoning_default_effort"] = def
+		}
+	}
+	return entry
 }
 
 // fmtCreditsPrefix 从上游 credits 原文提取倍率并格式化为 "[x0.05 credit]"。
@@ -449,7 +558,7 @@ func (h *Handler) modelList() []map[string]any {
 // FetchGlobalModels 共享缓存，不会触发第二次上游探测）。
 // GlobalEnabled=false 时 modelList 已不进入本分支（逃生门在调用方 gate）。
 func (h *Handler) fetchGlobalModels() ([]string, *auth.Auth) {
-	acct := h.cfg.Pool.PickExcludingForRealm(nil, "", "global")
+	acct := h.cfg.Pool.PickExcludingForRealmScoped(nil, "", "global", "", false)
 	if acct == nil {
 		return nil, nil
 	}
@@ -479,7 +588,7 @@ func (h *Handler) fetchDynamicModels() []upstream.ModelInfo {
 	}
 	dynamicModelsCache.RUnlock()
 
-	uids := h.cfg.Pool.AvailableUIDsForRealm("cn")
+	uids := h.cfg.Pool.AvailableUIDsForRealmScoped("cn", "")
 	if len(uids) == 0 {
 		return nil
 	}
@@ -521,6 +630,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 客户端 IP 提取（按请求传递到 ChatStream，不透传时 upstream 侧忽略）；
 	// 消除早年共享字段方案的并发交叉污染（issue：ClientIP 竞态）。
 	clientIP := upstream.ExtractClientIP(r)
+	scope := scopeFrom(r)
 	// 请求体无大小上限（max_body_mb 已移除，对齐上游）：完整读入，超限类问题交由
 	// 上游自然返回错误（其响应经既有错误分类链路透出，信息量更大）。#41 的截断
 	// 防御语义保留在读错误路径——移除预拦截后，截断只可能来自客户端自己断流，
@@ -573,7 +683,9 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 会话级（RequestIDForKey(sessKey)），不悄悄退化成轮级——提取本身与粘性无关。
 	sessKey := session.ExtractKey(body)
 	stickyUID := ""
-	if h.cfg.Session != nil && sessKey != "" {
+	// 分组请求暂不启用全局粘性：Router 的可用集是公共池口径，跨组绑定会泄漏；
+	// 分组内部仍由 PickScoped 做加权轮换，后续可升级为每分组 Router。
+	if scope.GroupID == "" && h.cfg.Session != nil && sessKey != "" {
 		// 按模型解析：绑定号在**当前模型**被 6004 限额时视为不可用 → 重新分配，
 		// 而不是钉在限额号上反复失败（"限额后换不动号"的正解）。
 		if uid, ok := h.cfg.Session.ResolveForModel(sessKey, peek.Model); ok {
@@ -746,7 +858,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		var acct *auth.Auth
 		if stickyUID != "" {
 			acct = h.cfg.Pool.PickByUIDForModel(stickyUID, bareModel)
-			if acct == nil || (realm != "" && acct.Realm() != realm) {
+			if acct == nil || (realm != "" && acct.Realm() != realm) || !h.groupAllowsAccount(scope, acct) {
 				// 粘性号在当前模型不可用（冷却/占满/该模型被 6004 限额）或 realm 不符 → 解绑，
 				// 本次回落普通轮换。
 				unbindSticky()
@@ -756,7 +868,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if acct == nil {
 			// 模型感知 + realm 感知选号：模型非空时启用 6004 模型级冷却豁免
 			// （healthyForModel），realm 谓词过滤跨域账号。
-			acct = h.cfg.Pool.PickExcludingForRealm(tried, bareModel, realm)
+			acct = h.cfg.Pool.PickExcludingForRealmScoped(tried, bareModel, realm, scope.GroupID, scope.CallPublic)
 		}
 		if acct == nil {
 			st.status = http.StatusServiceUnavailable
@@ -953,7 +1065,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 该次 WAF 403 喂入 IP 级状态机，若激活（短窗多号命中，IP 被拦而非账号）
 			// 则立即终止轮转——继续换号只会把请求放大 MaxRotate 倍打同一出口 IP，
 			// 加重风控。账号级软冷却已在上方 applyErrorPolicy 照常记账。
-			if kind == upstream.ErrWafBlock && h.wafIP.noteWaf(acct.UID) {
+			if kind == upstream.ErrWafBlock && h.wafIP.noteWaf(scope.GroupID, acct.UID) {
 				break
 			}
 			if !rotateBackoff(i, r.Context()) {
@@ -1146,7 +1258,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			code = "rate_limit_exceeded"
 			msg = "rate limited: all accounts are cooling down, please wait a moment and try again"
 		case upstream.ErrWafBlock:
-			if h.wafIP.active() {
+			if h.wafIP.active(scope.GroupID) {
 				// IP 级拦截措辞（fail-fast 终止路径）：网关出口 IP 被 WAF 拦截、
 				// 轮转已止损、窗口过后自动解除。客户端提前重试无意义（换号不换 IP）；
 				// 有上游原文时原文优先（下方统一）。

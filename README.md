@@ -59,6 +59,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 |---|---|
 | 🔑 **OAuth 一键登录** | `login.sh` 设备授权流程，自动落盘凭证并重启容器加载新账号 |
 | 🔄 **多账号池** | 快过期积分加权 + 成本分层 + 加权随机选号，Top-5 候选 + 防惊群 |
+| 🗂️ **号池分组** | 公共池 + 多个独立分组；分组独立密钥、独立代理（HTTP/SOCKS5/SOCKS5H）、独立账号导入；两个共享方向（进入公共池 / 调用公共池）默认关闭 |
 | 🛡️ **熔断与冷却** | 429 软冷却 600s 起指数退避（封顶 `soft_rate_max`）、404 固定 60s 短冷却、402 硬冷却至次日 04:00、连续失败熔断、在途租约限流 |
 | 🧲 **会话粘性** | 同一会话（`conversation_id`）尽量绑定同一账号，TTL 滚动续期，失败自动解绑，可镜像 Redis 防重启丢失 |
 | ⏰ **定时任务** | 签到（09/21 点，末尾自动跑**连登管家**：兑换已解锁档位 + 抽完抽奖次数）+ 活跃上报（10 点，点亮连登 / 解锁领养 + streak 自检）+ 猫猫旅行（09/21 点，独立排程）+ token 保活（22 点），四类独立开关 |
@@ -676,6 +677,18 @@ http://127.0.0.1:7863/panel/
 
 来源信息比 token 计数敏感（IP 属个人信息），因此由 `logging.request_client_info` 控制，**缺省开启、热生效、面板「配置 → 日志」可关**；关闭后归档与面板都不再出现来源字段（老归档里没有该字段的条目显示 `—`）。
 
+### 号池分组
+
+面板左侧「号池分组」页（`/panel/groups`）提供公共池之外的分组号池：
+
+- **账号归属唯一**：未分组账号属于公共池；一个账号只能属于一个分组，归属持久化在 `data/groups.json`（与 `state_file` 同目录，0600），auth 文件仍平铺在 `auths/`。
+- **两个共享开关，默认都关闭**：
+  - `允许本组账号进入公共池`：公共池请求可命中本组账号；
+  - `允许本组调用公共池账号`：本组账号优先，本组无可用账号时才回源公共池。
+- **分组密钥**：创建/轮换时显示一次，服务端只保存 SHA-256；`Authorization: Bearer <分组密钥>` 只能访问本组账号，不能访问面板或公共池。主 `api_key` 仍走公共池。
+- **分组代理**：支持 HTTP / SOCKS5（本地 DNS）/ SOCKS5H（远程 DNS）；覆盖聊天、OAuth、余额、模型探测以及签到/保活/旅行/活跃等全部出站请求。代理不可用时直接失败，不回落直连。
+- **分组导入/添加**：分组页支持单账号或批量 JSON 导入、浏览器 OAuth 添加账号；删除分组时可选「账号移到公共池」或「完全删除（含 auth 文件）」。
+
 **配置热生效**：保存配置后，`api_key`、`cooldown.soft_rate`、`features.sanitize_blacklist_fingerprints`、
 `logging.request_client_info`、`pool.*`（熔断/在途/权重）、`schedule.*`（时点/开关/余额刷新间隔）**立即生效，无需重启**；
 涉及进程装配期依赖的字段（`listen`、`auth_dir`、`state_file`、`upstream.*`、`upstash.*`、`session_sticky.ttl`）
@@ -692,6 +705,7 @@ http://127.0.0.1:7863/panel/
 | 账号运维 | `POST accounts/{uid}/checkin` · `balance` · `revive` · `disable` · `remove`；`POST checkin_all` · `travel_all` · `activity_all` · `keepalive_all` · `balance_all` |
 | 任务 | `GET accounts/{uid}/tasks`；`POST accounts/{uid}/tasks/accept` · `accept_all` · `claim` · `auto` · `auto_all`；`POST tasks/scan_all` · `tasks/run_queue` |
 | 添加账号 | `POST login/start` · `GET login/poll` · `GET login/regions` · `POST import/cockpit` |
+| 号池分组 | `GET groups` · `POST groups` · `PATCH groups/{id}` · `DELETE groups/{id}?account_action=move\|delete` · `POST groups/{id}/key/rotate` · `PUT groups/{id}/proxy` · `POST groups/{id}/proxy/test` · `POST accounts/{uid}/group` |
 | 写入 | `POST config`（校验 → 落盘 → 热应用，返回需重启字段清单）· `POST usage/save`（立即把内存用量落盘） |
 
 账号运维操作均落到池既有入口（`Revive`/`Disable`/`Remove` 等），与 `/status` 观测口径一致。

@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WorkBuddy2API · 号池分组</title>
+<style>
+:root { --bg:#0c0e14; --surface:#14171f; --surface-2:#1a1e28; --raise:#202531; --line:#262c3a; --line-soft:#1e232e; --ink:#e8ebf2; --ink-2:#a8b0c2; --ink-3:#6b7488; --accent:#5b7cfa; --accent-ink:#fff; --accent-soft:rgba(91,124,250,.13); --ok:#3ddc97; --ok-soft:rgba(61,220,151,.12); --warn:#f5b544; --warn-soft:rgba(245,181,68,.12); --bad:#f0655f; --bad-soft:rgba(240,101,95,.12); --violet:#c084fc; --violet-soft:rgba(192,132,252,.12); --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px -12px rgba(0,0,0,.5); --mono:ui-monospace,"Cascadia Mono","SF Mono",Consolas,monospace; --sans:system-ui,-apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif; }
+[data-theme="light"] { --bg:#f4f5f8; --surface:#fff; --surface-2:#f8f9fb; --raise:#fff; --line:#e2e5ec; --line-soft:#eceef3; --ink:#14171f; --ink-2:#545c6e; --ink-3:#8b93a5; --accent:#3d5fe0; --accent-soft:rgba(61,95,224,.09); --ok:#0f9d63; --ok-soft:rgba(15,157,99,.1); --warn:#b47611; --warn-soft:rgba(180,118,17,.11); --bad:#cf3b34; --bad-soft:rgba(207,59,52,.09); --violet:#7c3aed; --violet-soft:rgba(124,58,237,.09); --shadow:0 1px 2px rgba(16,20,32,.06),0 8px 24px -14px rgba(16,20,32,.14); }
+* { box-sizing:border-box; margin:0; padding:0; }
+body { background:var(--bg); color:var(--ink); font:14px/1.55 var(--sans); -webkit-font-smoothing:antialiased; }
+[hidden] { display:none!important; }
+button { font:inherit; color:var(--ink); background:var(--surface-2); border:1px solid var(--line); border-radius:7px; padding:7px 13px; cursor:pointer; }
+button:hover:not(:disabled) { border-color:var(--accent); }
+button:disabled { opacity:.5; cursor:default; }
+button.primary { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:550; }
+button.ghost { background:transparent; }
+button.danger { color:var(--bad); }
+button.xs { padding:3px 8px; font-size:12px; border-radius:6px; white-space:nowrap; }
+input,select,textarea { font:inherit; color:var(--ink); background:var(--surface-2); border:1px solid var(--line); border-radius:7px; padding:7px 10px; width:100%; }
+input:focus,select:focus,textarea:focus { outline:none; border-color:var(--accent); }
+.shell { display:grid; grid-template-columns:208px 1fr; min-height:100vh; }
+.nav { background:var(--surface); border-right:1px solid var(--line); display:flex; flex-direction:column; position:sticky; top:0; height:100vh; }
+.brand { padding:20px 18px 16px; border-bottom:1px solid var(--line-soft); }
+.brand .name { font-weight:650; font-size:15px; }
+.brand .sub { color:var(--ink-3); font-size:11.5px; font-family:var(--mono); margin-top:3px; }
+.nav ul { list-style:none; padding:10px 8px; flex:1; }
+.nav a { display:flex; align-items:center; gap:10px; padding:8px 11px; margin-bottom:2px; color:var(--ink-2); text-decoration:none; border-radius:7px; font-size:13.5px; }
+.nav a:hover { background:var(--surface-2); color:var(--ink); }
+.nav a.on { background:var(--accent-soft); color:var(--accent); font-weight:550; }
+.nav .sig { padding:12px 16px; border-top:1px solid var(--line-soft); font-size:11.5px; color:var(--ink-3); }
+.main { min-width:0; }
+.topbar { display:flex; align-items:center; gap:12px; padding:14px 24px; border-bottom:1px solid var(--line); background:var(--surface); position:sticky; top:0; z-index:20; flex-wrap:wrap; }
+.topbar h2 { font-size:15.5px; font-weight:620; white-space:nowrap; }
+.topbar .meta { color:var(--ink-3); font-size:12px; font-family:var(--mono); white-space:nowrap; }
+.topbar .grow { flex:1; }
+.view { padding:22px 24px 64px; max-width:1560px; margin:0 auto; }
+.notice { display:flex; gap:10px; padding:11px 14px; border:1px solid color-mix(in srgb,var(--accent) 24%,var(--line)); background:var(--accent-soft); border-radius:10px; margin-bottom:16px; font-size:12.5px; color:var(--ink-2); line-height:1.6; }
+.notice b { color:var(--ink); }
+.stats { display:grid; grid-template-columns:repeat(5,1fr); border:1px solid var(--line); border-radius:11px; background:var(--surface); overflow:hidden; margin-bottom:18px; box-shadow:var(--shadow); }
+.stat { padding:13px 16px; border-right:1px solid var(--line-soft); }
+.stat:last-child { border-right:none; }
+.stat .v { font:600 25px/1.15 var(--mono); white-space:nowrap; }
+.stat .k { color:var(--ink-3); font-size:11.5px; margin-top:5px; }
+.stat .k span { display:block; font-size:10.5px; opacity:.8; margin-top:1px; }
+.stat.accent .v { color:var(--accent); } .stat.good .v { color:var(--ok); } .stat.warn .v { color:var(--warn); }
+.box { background:var(--surface); border:1px solid var(--line); border-radius:11px; box-shadow:var(--shadow); overflow:hidden; }
+.gp-layout { display:grid; grid-template-columns:276px minmax(0,1fr); gap:18px; align-items:start; }
+.gp-layout > * { min-width:0; }
+.gp-rail { position:sticky; top:82px; }
+.rail-head { padding:13px 14px 10px; border-bottom:1px solid var(--line-soft); }
+.rail-head .t { font-size:13px; font-weight:620; }
+.rail-head .d { color:var(--ink-3); font-size:11px; margin-top:3px; }
+.rail-list { padding:8px; }
+.pool-item { width:100%; display:grid; grid-template-columns:7px minmax(0,1fr) auto; gap:9px; align-items:center; text-align:left; padding:9px; border:1px solid transparent; background:transparent; border-radius:8px; margin-bottom:3px; color:var(--ink-2); }
+.pool-item:hover { background:var(--surface-2); border-color:transparent; color:var(--ink); }
+.pool-item.on { background:var(--accent-soft); border-color:color-mix(in srgb,var(--accent) 30%,transparent); color:var(--ink); }
+.pool-item .gdot { width:7px; height:7px; border-radius:50%; background:var(--c,var(--ink-3)); }
+.pool-item.public .gdot { background:var(--accent); }
+.pool-item b { display:block; font-size:13px; font-weight:550; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.pool-item em { display:block; font-style:normal; font-size:10.5px; color:var(--ink-3); margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.pool-item .cnt { font:600 12px var(--mono); color:var(--ink-3); }
+.rail-sec { display:flex; align-items:center; gap:6px; padding:13px 14px 5px; color:var(--ink-3); font-size:10.5px; letter-spacing:.06em; }
+.rail-sec button { margin-left:auto; padding:1px 7px; font-size:14px; background:transparent; border-color:transparent; }
+.detail-head { display:flex; align-items:flex-start; gap:14px; margin-bottom:14px; flex-wrap:wrap; }
+.dh-title { display:flex; align-items:flex-start; gap:11px; min-width:0; }
+.group-mark { width:11px; height:11px; border-radius:50%; background:var(--c); margin-top:7px; flex:none; }
+.dh-title h1 { font-size:19px; font-weight:650; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.dh-title .sub { font-size:11.5px; color:var(--ink-3); margin-top:3px; font-family:var(--mono); }
+.dh-acts { display:flex; gap:6px; align-items:center; margin-left:auto; flex-wrap:wrap; }
+.tag { display:inline-flex; align-items:center; gap:5px; padding:1px 9px; border-radius:999px; font-size:11.5px; white-space:nowrap; }
+.tag.ok { background:var(--ok-soft); color:var(--ok); } .tag.warn { background:var(--warn-soft); color:var(--warn); } .tag.bad { background:var(--bad-soft); color:var(--bad); } .tag.mute { background:var(--surface-2); color:var(--ink-3); border:1px solid var(--line); } .tag.accent { background:var(--accent-soft); color:var(--accent); }
+.gp-cards { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; margin-bottom:18px; }
+.card { background:var(--surface); border:1px solid var(--line); border-radius:11px; box-shadow:var(--shadow); padding:14px 15px 12px; display:flex; flex-direction:column; min-width:0; }
+.card-h { display:flex; align-items:center; gap:7px; margin-bottom:10px; flex-wrap:wrap; }
+.card-h h3 { font-size:13px; font-weight:600; white-space:nowrap; }
+.card-h .tag { margin-left:auto; }
+.card .hint { font-size:11px; color:var(--ink-3); line-height:1.55; margin-top:8px; }
+.card-f { display:flex; align-items:center; gap:8px; margin-top:auto; padding-top:11px; border-top:1px solid var(--line-soft); font-size:10.5px; color:var(--ink-3); }
+.card-f .grow { flex:1; }
+.card-f button { padding:2px 7px; font-size:11px; }
+.kline { display:flex; align-items:center; gap:5px; background:var(--surface-2); border:1px solid var(--line); border-radius:8px; padding:6px 7px; }
+.kline code { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font:11.5px var(--mono); color:var(--accent); }
+.kline button { padding:2px 7px; font-size:11px; flex:none; }
+.proxy-line { display:flex; align-items:center; gap:8px; min-width:0; }
+.proxy-line code { font:12px var(--mono); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.proto { padding:2px 7px; border-radius:4px; font:600 10px var(--mono); flex:none; }
+.proto.http { color:#7aa2ff; background:rgba(91,124,250,.15); } .proto.socks5 { color:var(--violet); background:var(--violet-soft); } .proto.socks5h { color:var(--ok); background:var(--ok-soft); } .proto.direct { color:var(--ink-3); background:var(--surface-2); border:1px solid var(--line); }
+.switch-row { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:4px 0 2px; cursor:pointer; }
+.switch-row + .switch-row { border-top:1px dashed var(--line-soft); margin-top:6px; padding-top:9px; }
+.switch-row .sw-text b { display:block; font-size:12.5px; font-weight:550; color:var(--ink-2); }
+.switch-row .sw-text em { display:block; font-style:normal; font-size:10.5px; color:var(--ink-3); margin-top:2px; }
+.switch-row input { position:absolute; opacity:0; width:1px; height:1px; }
+.switch-row .track { width:36px; height:21px; border-radius:999px; background:var(--line); position:relative; flex:none; }
+.switch-row .track i { position:absolute; top:3px; left:3px; width:15px; height:15px; border-radius:50%; background:#fff; transition:transform .15s; }
+.switch-row input:checked + .track { background:var(--accent); } .switch-row input:checked + .track i { transform:translateX(15px); }
+.acc-wrap { max-height:560px; overflow:auto; }
+.acc { width:100%; border-collapse:collapse; font-size:12.5px; min-width:820px; }
+.acc th { text-align:left; font-size:11px; font-weight:500; color:var(--ink-3); padding:8px 10px; border-bottom:1px solid var(--line); position:sticky; top:0; background:var(--surface); z-index:1; white-space:nowrap; }
+.acc td { padding:9px 10px; border-bottom:1px solid var(--line-soft); vertical-align:middle; }
+.acc tbody tr:hover { background:var(--surface-2); }
+.acc .mark { width:3px; padding:0; } .acc .mark i { display:block; width:3px; min-height:34px; background:var(--ok); } .acc tr.cool .mark i { background:var(--warn); } .acc tr.off .mark i { background:var(--bad); } .acc tr.paused .mark i { background:var(--ink-3); }
+.who { min-width:130px; max-width:220px; } .who .nm { font-weight:550; } .who .id { font:10.5px var(--mono); color:var(--ink-3); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.num { font-family:var(--mono); font-size:12px; white-space:nowrap; }
+.acts { display:flex; gap:4px; justify-content:flex-end; }
+.box > header { display:flex; align-items:center; gap:10px; padding:12px 16px; border-bottom:1px solid var(--line-soft); flex-wrap:wrap; }
+.box > header h3 { font-size:13.5px; font-weight:600; white-space:nowrap; }
+.box > header .hint { font-size:11.5px; color:var(--ink-3); font-weight:400; }
+.box > header .grow { flex:1; }
+.box > header input { width:190px; }
+.empty { padding:40px 20px; text-align:center; color:var(--ink-3); }
+.empty .big { color:var(--ink-2); font-weight:550; font-size:14px; margin-bottom:5px; }
+.table-foot { padding:9px 16px; border-top:1px solid var(--line-soft); background:var(--surface-2); font-size:11px; color:var(--ink-3); }
+.veil { position:fixed; inset:0; background:rgba(6,8,13,.66); display:none; z-index:60; }
+.veil.on { display:flex; align-items:center; justify-content:center; padding:20px; }
+.dlg { background:var(--surface); border:1px solid var(--line); border-radius:13px; width:560px; max-width:100%; max-height:88vh; display:flex; flex-direction:column; box-shadow:0 24px 64px -24px rgba(0,0,0,.6); }
+.dlg header { padding:16px 20px 12px; border-bottom:1px solid var(--line-soft); }
+.dlg header h3 { font-size:15px; font-weight:620; }
+.dlg header .hint { color:var(--ink-3); font-size:12px; margin-top:5px; line-height:1.55; }
+.dlg .body { padding:17px 20px; overflow:auto; }
+.dlg footer { padding:12px 20px; border-top:1px solid var(--line-soft); display:flex; gap:9px; align-items:center; }
+.dlg footer .grow { flex:1; }
+.fld { display:block; margin-bottom:14px; } .fld .lb { display:block; font-size:12.5px; color:var(--ink-2); margin-bottom:5px; }
+.grid2 { display:grid; grid-template-columns:1fr 1fr; gap:0 14px; }
+.swatches { display:flex; gap:8px; }
+.swatch { width:24px; height:24px; border-radius:50%; border:2px solid transparent; background:var(--c); padding:0; }
+.swatch.on { border-color:var(--ink); }
+.seg { display:inline-flex; gap:2px; background:var(--surface-2); border:1px solid var(--line); border-radius:9px; padding:3px; margin-bottom:8px; }
+.seg button { border:0; background:transparent; padding:6px 16px; border-radius:7px; color:var(--ink-3); font:600 12px var(--mono); }
+.seg button.on { background:var(--surface); color:var(--ink); }
+.proxy-hint { font-size:11.5px; color:var(--ink-3); line-height:1.55; margin-bottom:14px; }
+.testbox { border:1px solid var(--line); background:var(--surface-2); border-radius:8px; padding:9px 11px; font-size:11.5px; margin:4px 0 10px; }
+.testbox.ok { border-color:var(--ok); background:var(--ok-soft); color:var(--ok); } .testbox.err { border-color:var(--bad); background:var(--bad-soft); color:var(--bad); }
+.code-area { width:100%; font:11.5px/1.6 var(--mono); background:var(--surface-2); border:1px solid var(--line); border-radius:8px; padding:10px; min-height:120px; margin-top:8px; }
+.key-big { background:var(--surface-2); border:1px solid var(--line); border-radius:8px; padding:12px; font:13px/1.5 var(--mono); color:var(--accent); word-break:break-all; user-select:all; margin-bottom:12px; }
+.radio { display:flex; gap:8px; padding:8px 10px; border:1px solid var(--line); border-radius:8px; margin-bottom:7px; font-size:12.5px; cursor:pointer; }
+.radio input { width:auto; margin-top:2px; }
+.modal-warn { border:1px solid color-mix(in srgb,var(--bad) 30%,var(--line)); background:var(--bad-soft); color:var(--bad); border-radius:8px; padding:9px 11px; font-size:11.5px; line-height:1.55; }
+.tabs { display:inline-flex; gap:2px; background:var(--surface-2); border-radius:9px; padding:3px; }
+.tabs .tab { border:0; background:transparent; padding:4px 14px; border-radius:7px; color:var(--ink-3); font:550 12.5px var(--sans); }
+.tabs .tab.on { background:var(--surface); color:var(--ink); }
+.url { background:var(--surface-2); border:1px solid var(--line); border-radius:8px; padding:10px; font:11.5px var(--mono); color:var(--accent); word-break:break-all; margin:8px 0 10px; user-select:all; }
+.state { font-size:12.5px; color:var(--ink-2); } .state.ok { color:var(--ok); } .state.err { color:var(--bad); }
+.dots::after { content:"…"; animation:blink 1.2s steps(4) infinite; } @keyframes blink { 50% { opacity:.3; } }
+#toasts { position:fixed; right:20px; bottom:20px; z-index:90; display:flex; flex-direction:column; gap:8px; align-items:flex-end; }
+.tst { background:var(--raise); border:1px solid var(--line); border-left:3px solid var(--ink-3); border-radius:8px; padding:10px 15px; font-size:13px; box-shadow:var(--shadow); max-width:400px; }
+.tst.ok { border-left-color:var(--ok); } .tst.err { border-left-color:var(--bad); } .tst.warn { border-left-color:var(--warn); }
+@media (max-width:1200px) { .gp-layout { grid-template-columns:1fr; } .gp-rail { position:static; } .rail-list { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:2px 6px; } .rail-list .pool-item.public,.rail-sec { grid-column:1/-1; } .gp-cards { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+@media (max-width:760px) { .shell { grid-template-columns:1fr; } .nav { position:static; height:auto; }
+.nav ul { display:flex; overflow-x:auto; } .nav a { white-space:nowrap; } .nav .sig,.brand { display:none; }
+.topbar { padding:11px 14px; } .view { padding:16px 14px 48px; } .stats { grid-template-columns:repeat(2,1fr); } .stat { border-bottom:1px solid var(--line-soft); } .gp-cards { grid-template-columns:1fr; } .grid2 { grid-template-columns:1fr; } .dh-acts { width:100%; margin-left:0; } }
+</style>
+</head>
+<body>
+<div class="shell">
+  <nav class="nav">
+    <div class="brand"><div class="name">WorkBuddy2API</div><div class="sub">账号池 · 分组</div></div>
+    <ul><li><a href="/panel/">← 返回控制台</a></li><li><a href="/panel/groups" class="on">号池分组</a></li></ul>
+    <div class="sig"><span id="navState">连接中…</span></div>
+  </nav>
+  <div class="main">
+    <div class="topbar">
+      <h2>号池分组</h2><span class="meta" id="topMeta">加载中…</span><span class="grow"></span>
+      <button class="ghost" id="btnTheme">切换主题</button>
+      <button id="btnRefresh">刷新</button>
+      <button class="primary" data-act="new-group">＋ 新建分组</button>
+    </div>
+    <div class="view">
+      <div class="notice"><div><b>分组与公共池默认双向隔离。</b>「进入公共池」与「调用公共池」是两个独立开关，默认关闭。分组密钥只能命中本组；开启调用后本组无可用号时才回源公共池。</div></div>
+      <div class="stats" id="stats"></div>
+      <div class="gp-layout">
+        <aside class="box gp-rail">
+          <div class="rail-head"><div class="t">号池</div><div class="d">按访问密钥隔离</div></div>
+          <div class="rail-list" id="railList"></div>
+        </aside>
+        <div id="detail"></div>
+      </div>
+    </div>
+  </div>
+</div>
+<div id="toasts"></div>
+
+<div class="veil" id="groupVeil"><div class="dlg" style="width:520px"><header><h3 id="groupTitle">新建分组</h3><div class="hint">分组拥有独立密钥、代理与账号集合。</div></header><div class="body"><label class="fld"><span class="lb">分组名称</span><input id="groupName" maxlength="32" placeholder="例如：客户 A · 生产"></label><div class="fld"><span class="lb">识别色</span><div class="swatches" id="groupColors"></div></div><label class="switch-row"><span class="sw-text"><b>允许本组账号进入公共池</b><em>默认关闭</em></span><input type="checkbox" id="groupShared"><span class="track"><i></i></span></label><label class="switch-row"><span class="sw-text"><b>允许本组调用公共池账号</b><em>本组无可用号时回源公共池；默认关闭</em></span><input type="checkbox" id="groupCallPublic"><span class="track"><i></i></span></label></div><footer><span class="grow"></span><button data-act="close" data-target="groupVeil">取消</button><button class="primary" data-act="group-save">保存</button></footer></div></div>
+
+<div class="veil" id="proxyVeil"><div class="dlg" style="width:600px"><header><h3>网络代理</h3><div class="hint">本组全部出站请求（聊天、OAuth、余额、模型探测、签到/保活/旅行/活跃任务）都走此代理。</div></header><div class="body"><div class="seg" id="proxyTypes"><button data-type="http" data-act="proxy-type">HTTP</button><button data-type="socks5" data-act="proxy-type">SOCKS5</button><button data-type="socks5h" data-act="proxy-type">SOCKS5H</button></div><div class="proxy-hint" id="proxyHint"></div><div class="grid2"><label class="fld"><span class="lb">主机</span><input id="proxyHost" placeholder="127.0.0.1"></label><label class="fld"><span class="lb">端口</span><input id="proxyPort" type="number" placeholder="1080"></label></div><div class="grid2"><label class="fld"><span class="lb">用户名（可选）</span><input id="proxyUser"></label><label class="fld"><span class="lb">密码（可选）</span><input id="proxyPass" type="password"></label></div><div class="testbox" id="proxyTestBox" hidden></div><div class="hint">代理不可用时本组请求直接失败，不回落直连。</div></div><footer><button class="ghost" data-act="proxy-test">测试连接</button><span class="grow"></span><button data-act="close" data-target="proxyVeil">取消</button><button class="primary" data-act="proxy-save">保存代理</button></footer></div></div>
+
+<div class="veil" id="importVeil"><div class="dlg" style="width:680px"><header><h3>导入账号 <span id="importGroupName" class="hint"></span></h3><div class="tabs"><button class="tab on" data-act="import-tab" data-tab="single">单账号 JSON</button><button class="tab" data-act="import-tab" data-tab="batch">批量 JSON</button></div></header><div class="body"><div id="importSinglePanel"><div class="hint">粘贴单个账号对象，兼容 cockpit 与 auth 原始字段。</div><textarea id="importSingle" class="code-area" rows="8" placeholder='{"uid":"...","access_token":"...","refresh_token":"..."}'></textarea></div><div id="importBatchPanel" hidden><div class="hint">数组 [...] 或 {"accounts":[...]}；选择文件也可。</div><input type="file" id="importFile" accept=".json,application/json" style="margin:8px 0"><textarea id="importBatch" class="code-area" rows="8" placeholder='[{"uid":"...","access_token":"..."}]'></textarea></div><div class="hint" id="importParse" style="margin-top:8px">等待输入…</div></div><footer><span class="grow"></span><button data-act="close" data-target="importVeil">取消</button><button class="primary" data-act="import-do">开始导入</button></footer></div></div>
+
+<div class="veil" id="addVeil"><div class="dlg" style="width:560px"><header><h3>添加账号 <span id="addGroupName" class="hint"></span></h3></header><div class="body"><div class="hint">浏览器 OAuth 登录，账号会直接落入当前分组；OAuth 请求走该组代理。</div><div style="height:10px"></div><label class="fld"><span class="lb">版本</span><select id="addRealm"><option value="cn">国内版 CN</option><option value="global">国际版 Global</option></select></label><button class="primary" data-act="start-login">获取授权链接</button><div id="addWait" hidden><div class="url" id="addUrl"></div><div class="state"><span class="dots">等待授权完成</span></div></div></div><footer><span class="grow"></span><button data-act="close" data-target="addVeil">关闭</button></footer></div></div>
+
+<div class="veil" id="keyVeil" data-lock="1"><div class="dlg" style="width:560px"><header><h3>分组密钥</h3><div class="hint">只显示这一次，请立即保存；重新生成后旧密钥立即失效。</div></header><div class="body"><div class="key-big" id="keyBig"></div><div class="modal-warn">此密钥只能访问本组账号，不能访问公共池或其他分组。</div></div><footer><button class="ghost" data-act="copy-key">复制密钥</button><span class="grow"></span><button class="primary" data-act="close" data-target="keyVeil">我已保存</button></footer></div></div>
+
+<div class="veil" id="confirmVeil" data-lock="1"><div class="dlg" style="width:500px"><header><h3 id="confirmTitle">确认</h3></header><div class="body" id="confirmBody"></div><footer><span class="grow"></span><button data-act="close" data-target="confirmVeil">取消</button><button class="danger" id="confirmYes" data-act="confirm-yes">确认</button></footer></div></div>
+
+<div class="veil" id="keyGate" data-lock="1"><div class="dlg" style="width:420px"><header><h3>需要访问密钥</h3><div class="hint">请输入 config.json 中的 api_key。</div></header><div class="body"><input type="password" id="gateKey" placeholder="api_key"><div class="state err" id="gateErr" hidden>密钥无效</div></div><footer><span class="grow"></span><button class="primary" data-act="gate-ok">进入</button></footer></div></div>
+
+<script src="/panel/groups.js"></script>
+</body>
+</html>

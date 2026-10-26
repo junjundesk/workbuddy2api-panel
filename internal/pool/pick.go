@@ -39,12 +39,40 @@ func (p *Pool) PickExcludingForRealm(tried map[string]bool, reqModel, realm stri
 	return p.pick(tried, reqModel, realm)
 }
 
+// PickExcludingForRealmScoped 在 realm 过滤之外叠加分组作用域。
+// group 非空 = 只选本组账号；group=="" = 公共池（未分组 + shared 分组）。
+// callPublic 仅对 group 生效：本组无可用号时再尝试公共池（两段式，本组优先）。
+func (p *Pool) PickExcludingForRealmScoped(tried map[string]bool, reqModel, realm, group string, callPublic bool) *auth.Auth {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	firstScope := GroupScope{Group: group}
+	if group == "" {
+		firstScope = GroupScope{Public: true}
+	}
+	a := p.pickLocked(tried, reqModel, realm, firstScope, true)
+	if a == nil && group != "" && callPublic {
+		a = p.pickLocked(tried, reqModel, realm, GroupScope{Public: true}, true)
+	}
+	if a == nil && group != "" {
+		// 公共池也不可用时，允许回落到本组冷却账号（与旧全冷却兜底语义一致）。
+		a = p.pickLocked(tried, reqModel, realm, GroupScope{Group: group}, true)
+	}
+	return a
+}
+
 // pick 在 healthy 候选集中按权重加权随机选出账号，并记录 lastUsed（防并发撞号）。
 // reqModel 非空时把健康口径换成 healthyForModel（6004 模型豁免生效）。
 // realm 非空时候选过滤叠加 Realm()==realm 谓词（分池选号域）。
 func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	return p.pickLocked(tried, reqModel, realm, GroupScope{}, true)
+}
+
+// pickLocked 是 pick 的持锁实现；scope 为空时等价于旧行为。
+// allowFallback=false 表示无 healthy 候选时返回 nil（分组第一段用，避免拿本组
+// 冷却号挡住公共池回源）。调用方必须已持 p.mu。
+func (p *Pool) pickLocked(tried map[string]bool, reqModel, realm string, scope GroupScope, allowFallback bool) *auth.Auth {
 	now := time.Now()
 	realmOK := func(e *entry) bool { return realm == "" || e.a.Realm() == realm }
 	healthyOf := func(e *entry) bool { return realmOK(e) && e.healthy(now) }
@@ -57,6 +85,9 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 	var cands []*entry
 	for uid, e := range p.byUID {
 		if tried != nil && tried[uid] {
+			continue
+		}
+		if !p.scopeMatch(e, scope) {
 			continue
 		}
 		// 惰性清理过期的模型级冷却与成本台账（两者的 map 都不无限膨胀；
@@ -75,9 +106,12 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 		cands = append(cands, e)
 	}
 	if len(cands) == 0 {
+		if !allowFallback {
+			return nil
+		}
 		// 全冷却兜底：无 healthy 候选时，从冷却账号里选 until 最早到期的一个
 		// （熔断/冷却共用 expiry 口径，取较早截止者）。禁用的账号永不参与兜底。
-		return p.pickEarliestExpiryLocked(tried, now, realm, reqModel)
+		return p.pickEarliestExpiryLocked(tried, now, realm, reqModel, scope)
 	}
 	// top5 短名单按权重降序截断（而非 credits 单纯降序）：否则闲置补偿根本进不了
 	// 短名单决策，低 credits 但久置的账号会永远排不进 top5。
@@ -295,10 +329,13 @@ func (p *Pool) floorBlockedForRealmModel(e *entry, model, realm string, now time
 // 这里，若兜底不看保底，触底号会被「捞回来」继续接收费模型——表现为同一条
 // floor WARN 反复刷同一个号（实测：credits=1 < floor=150 仍持续中选）。
 // 兜底是**最后一道**选号路径，保底在它之前挡不住就等于没挡。
-func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, realm, model string) *auth.Auth {
+func (p *Pool) pickEarliestExpiryLocked(tried map[string]bool, now time.Time, realm, model string, scope GroupScope) *auth.Auth {
 	var best *entry
 	for uid, e := range p.byUID {
 		if tried != nil && tried[uid] {
+			continue
+		}
+		if !p.scopeMatch(e, scope) {
 			continue
 		}
 		if realm != "" && e.a.Realm() != realm {

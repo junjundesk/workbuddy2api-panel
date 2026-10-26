@@ -108,7 +108,11 @@ func dedupStrings(in []string) []string {
 
 // responsesChatRequest 把 Responses 请求体转换成 chat/completions 请求体。
 // 返回值：chat body / custom 工具名集合（响应方向据此还原 custom_tool_call）/ 被忽略字段清单。
-func responsesChatRequest(req map[string]any, store *responsesStore) (map[string]any, map[string]bool, []string, error) {
+func responsesChatRequest(req map[string]any, store *responsesStore, owners ...string) (map[string]any, map[string]bool, []string, error) {
+	owner := ""
+	if len(owners) > 0 {
+		owner = owners[0]
+	}
 	dropped := []string{}
 	inputItems := responsesInputItems(req["input"])
 
@@ -128,15 +132,15 @@ func responsesChatRequest(req map[string]any, store *responsesStore) (map[string
 		messages = append(messages, map[string]any{"role": "system", "content": inst})
 	}
 	if prev := strings.TrimSpace(jStr(req["previous_response_id"])); prev != "" {
-		stored := store.get(prev)
+		stored := store.get(prev, owner)
 		if stored == nil {
 			return nil, custom, dropped, fmt.Errorf("previous_response_id %q not found (unknown or expired)", prev)
 		}
 		messages = append(messages, responsesItemsToMessages(
-			responsesExpandReferences(stored.items, store, &dropped), custom, &dropped)...)
+			responsesExpandReferences(stored.items, store, owner, &dropped), custom, &dropped)...)
 	}
 	messages = append(messages, responsesItemsToMessages(
-		responsesExpandReferences(inputItems, store, &dropped), custom, &dropped)...)
+		responsesExpandReferences(inputItems, store, owner, &dropped), custom, &dropped)...)
 
 	chat := map[string]any{"model": jStr(req["model"]), "messages": messages}
 	if jBool(req["stream"], false) {
@@ -189,11 +193,11 @@ func responsesInputItems(raw any) []any {
 
 // responsesExpandReferences 展开 input 里的 item_reference（指向先前响应存储中的条目）。
 // 找不到（未存/过期）时丢弃并记账，不编造内容。
-func responsesExpandReferences(items []any, store *responsesStore, dropped *[]string) []any {
+func responsesExpandReferences(items []any, store *responsesStore, owner string, dropped *[]string) []any {
 	out := make([]any, 0, len(items))
 	for _, it := range items {
 		if m := jMap(it); m != nil && jStr(m["type"]) == "item_reference" {
-			if found := store.findItem(strings.TrimSpace(jStr(m["id"]))); found != nil {
+			if found := store.findItem(strings.TrimSpace(jStr(m["id"])), owner); found != nil {
 				out = append(out, found)
 				continue
 			}

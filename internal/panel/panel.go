@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/linguo2625469/workbuddy2api-panel/internal/groups"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/httpauth"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/livecfg"
 	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
@@ -37,6 +38,7 @@ type Config struct {
 	Upstream  *upstream.Client
 	Scheduler *scheduler.Scheduler // 手动触发签到/保活；nil 时对应接口返回 501
 	AuthDir   string               // OAuth 登录完成后凭证落盘目录
+	Groups    *groups.Store        // 分组注册表；nil = 不提供分组功能
 	APIKey    string               // 空 = 不鉴权（与主服务同语义）；与 Live 同时给出时 Live 优先
 	RedisMode string               // "upstash" / "noop"，仅观测透出
 	Version   string               // 面板版本号（展示用）
@@ -131,6 +133,7 @@ const loginTTL = 15 * time.Minute
 type loginSession struct {
 	created time.Time
 	realm   string // "cn" / "global"，缺省 cn
+	group   string // 分组 ID；空 = 公共池
 }
 
 // New 构建面板。
@@ -155,6 +158,8 @@ func (p *Panel) Logs() *Ring { return p.logs }
 func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/{$}", p.index)
 	p.mux.HandleFunc("GET /panel/app.js", p.appScript)
+	p.mux.HandleFunc("GET /panel/groups", p.groupsPage)
+	p.mux.HandleFunc("GET /panel/groups.js", p.groupsScript)
 	p.mux.HandleFunc("GET /panel/api/overview", p.withAuth(p.overview))
 	p.mux.HandleFunc("GET /panel/api/logs", p.withAuth(p.logsHandler))
 	p.mux.HandleFunc("GET /panel/api/request_metrics", p.withAuth(p.requestMetrics))
@@ -191,6 +196,14 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/usage", p.withAuth(p.usage))
 	p.mux.HandleFunc("POST /panel/api/usage/save", p.withAuth(p.usageSave))
 	p.mux.HandleFunc("GET /panel/api/model_probes", p.withAuth(p.modelProbes))
+	p.mux.HandleFunc("GET /panel/api/groups", p.withAuth(p.groupsList))
+	p.mux.HandleFunc("POST /panel/api/groups", p.withAuth(p.groupCreate))
+	p.mux.HandleFunc("PATCH /panel/api/groups/{id}", p.withAuth(p.groupUpdate))
+	p.mux.HandleFunc("DELETE /panel/api/groups/{id}", p.withAuth(p.groupDelete))
+	p.mux.HandleFunc("POST /panel/api/groups/{id}/key/rotate", p.withAuth(p.groupRotateKey))
+	p.mux.HandleFunc("PUT /panel/api/groups/{id}/proxy", p.withAuth(p.groupSetProxy))
+	p.mux.HandleFunc("POST /panel/api/groups/{id}/proxy/test", p.withAuth(p.groupTestProxy))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/group", p.withAuth(p.accountSetGroup))
 	p.mux.HandleFunc("GET /panel/api/config", p.withAuth(p.getConfig))
 	p.mux.HandleFunc("POST /panel/api/config", p.withAuth(p.saveConfig))
 }
@@ -714,6 +727,13 @@ func (p *Panel) accountRemove(w http.ResponseWriter, r *http.Request) {
 	if a == nil {
 		writeErr(w, http.StatusNotFound, "account not found")
 		return
+	}
+	if p.cfg.Groups != nil {
+		if gid := p.cfg.Groups.GroupOf(uid); gid != "" {
+			if err := p.cfg.Groups.RemoveMember(gid, uid); err != nil {
+				log.Printf("panel: remove group member uid=%s group=%s: %v", uid, gid, err)
+			}
+		}
 	}
 	fileMsg := ""
 	if a.FilePath != "" {

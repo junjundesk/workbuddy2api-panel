@@ -612,6 +612,13 @@ type Client struct {
 	// 与 HTTP 共享同一个 *http.Transport 实例，连接池不重复。
 	ChatHTTP *http.Client
 
+	// proxyMu / proxyOf / groupClients 分组代理客户端缓存。
+	// proxyOf 返回分组代理配置；nil 或空 = 直连。每个分组独立 Transport，配置变更
+	// 由 InvalidateGroup 清空缓存并关闭空闲连接。
+	proxyMu      sync.RWMutex
+	proxyOf      func(group string) *ProxyConfig
+	groupClients map[string]*groupClient
+
 	// HeaderTimeout 聊天 SSE 首字节前（响应头）超时；<=0 表示未设置（回落 HTTP.Timeout）。
 	HeaderTimeout time.Duration
 	// IdleTimeout 聊天 SSE 流中空闲超时；<=0 表示禁用空闲监控。
@@ -704,6 +711,136 @@ func New() *Client {
 	}
 	c.SanitizeFingerprints.Store(true)
 	return c
+}
+
+type groupClient struct {
+	http *http.Client
+	chat *http.Client
+}
+
+type errorRoundTripper struct{ err error }
+
+func (e errorRoundTripper) RoundTrip(*http.Request) (*http.Response, error) { return nil, e.err }
+
+// SetGroupProxyFunc 注入分组代理解析器（main 从 groups.Store 读取）。
+// 传 nil 表示关闭分组代理；变更会清空全部分组 client 缓存。
+func (c *Client) SetGroupProxyFunc(fn func(group string) *ProxyConfig) {
+	c.proxyMu.Lock()
+	for _, gc := range c.groupClients {
+		closeClientIdle(gc.http)
+		closeClientIdle(gc.chat)
+	}
+	c.proxyOf = fn
+	c.groupClients = nil
+	c.proxyMu.Unlock()
+}
+
+// InvalidateGroup 在分组代理配置变更后关闭旧连接并删除缓存，下一请求重建。
+func (c *Client) InvalidateGroup(group string) {
+	c.proxyMu.Lock()
+	if gc := c.groupClients[group]; gc != nil {
+		closeClientIdle(gc.http)
+		closeClientIdle(gc.chat)
+		delete(c.groupClients, group)
+	}
+	c.proxyMu.Unlock()
+}
+
+func closeClientIdle(hc *http.Client) {
+	if hc == nil || hc.Transport == nil {
+		return
+	}
+	if ci, ok := hc.Transport.(interface{ CloseIdleConnections() }); ok {
+		ci.CloseIdleConnections()
+	}
+}
+
+// baseTransport 取出默认 HTTP client 的底层 *http.Transport（保留加固参数）。
+func (c *Client) baseTransport() *http.Transport {
+	if c.HTTP != nil && c.HTTP.Transport != nil {
+		switch t := c.HTTP.Transport.(type) {
+		case *modelFallbackTransport:
+			if tr, ok := t.base.(*http.Transport); ok {
+				return tr
+			}
+		case *http.Transport:
+			return t
+		}
+	}
+	return newTransport()
+}
+
+// clientFor 返回分组专用 client；无代理配置时回落默认 client（公共池直连）。
+// 代理配置非法时返回永远报错的 client（fail-closed，不回落直连）。
+func (c *Client) clientFor(group string, chat bool) *http.Client {
+	c.proxyMu.RLock()
+	proxyFn := c.proxyOf
+	c.proxyMu.RUnlock()
+	if group == "" || proxyFn == nil {
+		if chat {
+			return c.chatHTTP()
+		}
+		return c.HTTP
+	}
+	c.proxyMu.RLock()
+	if c.groupClients != nil {
+		if gc := c.groupClients[group]; gc != nil {
+			c.proxyMu.RUnlock()
+			if chat {
+				return gc.chat
+			}
+			return gc.http
+		}
+	}
+	c.proxyMu.RUnlock()
+	p := proxyFn(group)
+	if p == nil {
+		if chat {
+			return c.chatHTTP()
+		}
+		return c.HTTP
+	}
+	var rt http.RoundTripper
+	tr, err := newTransportWithProxy(c.baseTransport(), *p)
+	if err != nil {
+		rt = errorRoundTripper{err: fmt.Errorf("group %s proxy: %w", group, err)}
+	} else {
+		rt = &modelFallbackTransport{base: tr}
+	}
+	gc := &groupClient{
+		http: &http.Client{Timeout: c.HTTP.Timeout, Transport: rt},
+		chat: &http.Client{Timeout: 0, Transport: rt},
+	}
+	c.proxyMu.Lock()
+	if c.groupClients == nil {
+		c.groupClients = map[string]*groupClient{}
+	}
+	c.groupClients[group] = gc
+	c.proxyMu.Unlock()
+	if chat {
+		return gc.chat
+	}
+	return gc.http
+}
+
+// httpFor 按账号运行期分组选择 client；公共池走默认直连 client。
+func (c *Client) httpFor(a *auth.Auth) *http.Client {
+	if a == nil {
+		return c.HTTP
+	}
+	return c.clientFor(a.Group(), false)
+}
+
+func (c *Client) chatHTTPFor(a *auth.Auth) *http.Client {
+	if a == nil {
+		return c.chatHTTP()
+	}
+	return c.clientFor(a.Group(), true)
+}
+
+// HTTPForGroup 供面板 OAuth 登录等无账号场景按分组选 client。
+func (c *Client) HTTPForGroup(group string) *http.Client {
+	return c.clientFor(group, false)
 }
 
 // chatHTTP 返回聊天专用 client；未设置（如测试只注入 HTTP）时回落 HTTP。
@@ -864,8 +1001,8 @@ func (c *Client) webBase(a *auth.Auth) string {
 // doJSON 发请求并解信封；HTTP 非 2xx 或业务 code != 0 时返回带 body 片段的 *Error。
 // body 读失败（连接中断/空闲掐流/截断）返回普通错误（非 *Error）——半截 body 不进
 // Classify，不参与账号惩罚（传输层故障不该喂熔断误罚号）。
-func (c *Client) doJSON(req *http.Request) (json.RawMessage, error) {
-	resp, err := c.HTTP.Do(req)
+func (c *Client) doJSON(a *auth.Auth, req *http.Request) (json.RawMessage, error) {
+	resp, err := c.httpFor(a).Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -945,7 +1082,7 @@ func (c *Client) RefreshToken(a *auth.Auth) error {
 	c.RefreshHeaders(req, &hdrSnapshot)
 
 	// 网络 I/O（锁外，30s 上限）。
-	data, err := c.doJSON(req)
+	data, err := c.doJSON(a, req)
 	if err != nil {
 		return err
 	}
@@ -1024,6 +1161,7 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 		ctx = context.Background()
 	}
 	prepared := c.prepareBody(body, a.Realm(), a.UID, meta.ConversationID)
+	chatClient := c.chatHTTPFor(a)
 	if c.globalOn(a) {
 		prepared = ensureConsoleSystem(prepared)
 	}
@@ -1041,14 +1179,14 @@ func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byt
 		// 同时 monitorBody.Close 仍能独立 cancel 本分支（空闲掐流）。
 		reqCtx, cancel := context.WithCancel(ctx)
 		req = req.WithContext(reqCtx)
-		resp, err := c.chatHTTP().Do(req)
+		resp, err := chatClient.Do(req)
 		if err != nil {
 			cancel()
 			log.Printf("ERR: [upstream] chat_stream acct=%s: transport error: %v", logfmt.Label(a.UID, a.Nickname), err)
 			// 传输层失败 → 清空共享连接池的空闲连接（连接层加固）：失败连接可能仍
 			// 留在空闲池里，下一个请求会继续捡到它——仅靠 IdleConnTimeout 等过期
 			// 不够，主动清池才断根。
-			roundTripCloseIdle(c.chatHTTP().Transport)
+			roundTripCloseIdle(chatClient.Transport)
 			return nil, 0, nil, err
 		}
 		if resp.StatusCode >= 400 {
@@ -1330,7 +1468,7 @@ func (c *Client) fetchEnterpriseModels(a *auth.Auth) ([]ModelInfo, error) {
 	c.CommonHeaders(req, a) // 复用共享请求头（Origin/Referer/UA/Accept/Content-Type）
 	// AccessToken 加锁快照（见 auth.AccessTokenValue：keepalive 刷新在 a.mu 内改写）。
 	req.Header.Set("Authorization", "Bearer "+a.AccessTokenValue())
-	resp, err := c.HTTP.Do(req)
+	resp, err := c.httpFor(a).Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -1684,7 +1822,7 @@ func (c *Client) fetchV3ConfigModelMap(a *auth.Auth, ua string) (map[string]Mode
 	}
 	req.Header.Set("User-Agent", ua)
 	c.injectCodeBuddyRequest(req)
-	resp, err := c.HTTP.Do(req)
+	resp, err := c.httpFor(a).Do(req)
 	if err != nil {
 		return nil, err
 	}

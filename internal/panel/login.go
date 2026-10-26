@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
@@ -85,7 +86,7 @@ type apiEnvelope struct {
 }
 
 // doJSON 发一次 JSON 请求并解信封。origin 为 Origin/Referer 基础域（随 realm 切）。
-func doJSON(method, fullURL, bearer string, body io.Reader, origin string) (json.RawMessage, int, error) {
+func doJSON(client *http.Client, method, fullURL, bearer string, body io.Reader, origin string) (json.RawMessage, int, error) {
 	req, err := http.NewRequest(method, fullURL, body)
 	if err != nil {
 		return nil, 0, err
@@ -94,7 +95,7 @@ func doJSON(method, fullURL, bearer string, body io.Reader, origin string) (json
 	if bearer != "" {
 		req.Header.Set("Authorization", "Bearer "+bearer)
 	}
-	resp, err := loginHTTP.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -113,22 +114,50 @@ func doJSON(method, fullURL, bearer string, body io.Reader, origin string) (json
 	return env.Data, resp.StatusCode, nil
 }
 
+// loginHTTPFor 返回分组 OAuth 专用 client（30s 超时，复用分组代理 Transport）。
+func (p *Panel) loginHTTPFor(group string) *http.Client {
+	if group == "" || p.cfg.Upstream == nil {
+		return loginHTTP
+	}
+	hc := p.cfg.Upstream.HTTPForGroup(group)
+	if hc == nil {
+		return loginHTTP
+	}
+	cp := *hc
+	cp.Timeout = 30 * time.Second
+	return &cp
+}
+
 // loginStart 发起设备授权：POST auth/state 拿授权 URL。
 // body 可带 {"realm":"global"}（缺省 cn）；state 会话记 realm，poll 同 realm 落盘。
 func (p *Panel) loginStart(w http.ResponseWriter, r *http.Request) {
 	realm := "cn"
+	groupID := ""
 	if r.Body != nil {
 		var reqBody struct {
 			Realm string `json:"realm"`
+			Group string `json:"group"`
 		}
 		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<12)).Decode(&reqBody); err == nil {
 			if reqBody.Realm == "global" {
 				realm = "global"
 			}
+			groupID = strings.TrimSpace(reqBody.Group)
 		}
 	}
+	if groupID != "" {
+		if p.cfg.Groups == nil {
+			writeErr(w, http.StatusBadRequest, "groups not available")
+			return
+		}
+		if _, ok := p.cfg.Groups.Get(groupID); !ok {
+			writeErr(w, http.StatusBadRequest, "unknown group")
+			return
+		}
+	}
+	client := p.loginHTTPFor(groupID)
 	epState, _, _, origin := loginEndpoints(realm)
-	data, status, err := doJSON(http.MethodPost, epState, "", bytes.NewReader([]byte("{}")), origin)
+	data, status, err := doJSON(client, http.MethodPost, epState, "", bytes.NewReader([]byte("{}")), origin)
 	if err != nil {
 		writeErr(w, http.StatusBadGateway, fmt.Sprintf("auth state (upstream %d): %v", status, err))
 		return
@@ -148,7 +177,7 @@ func (p *Panel) loginStart(w http.ResponseWriter, r *http.Request) {
 			delete(p.logins, s)
 		}
 	}
-	p.logins[st.State] = loginSession{created: time.Now(), realm: realm}
+	p.logins[st.State] = loginSession{created: time.Now(), realm: realm, group: groupID}
 	p.loginMu.Unlock()
 	log.Printf("panel: 发起 OAuth 添加账号 realm=%s（state=%s...）", realm, st.State[:min(8, len(st.State))])
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "url": st.AuthURL, "state": st.State, "realm": realm})
@@ -169,9 +198,10 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, epToken, epAcct, origin := loginEndpoints(sess.realm)
+	client := p.loginHTTPFor(sess.group)
 
 	// auth/token 是权威登录状态端点：pending 时业务 code 非 0（"login ing"）。
-	tokRaw, _, err := doJSON(http.MethodGet, epToken+state, "", nil, origin)
+	tokRaw, _, err := doJSON(client, http.MethodGet, epToken+state, "", nil, origin)
 	if err != nil {
 		// pending / 未完成：面板前端继续轮询。
 		writeJSON(w, http.StatusOK, map[string]any{"done": false, "message": err.Error()})
@@ -194,7 +224,7 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		EnterpriseID string `json:"enterpriseId"`
 		Nickname     string `json:"nickname"`
 	}
-	if acctRaw, _, err := doJSON(http.MethodGet, epAcct+state, tok.AccessToken, nil, origin); err == nil {
+	if acctRaw, _, err := doJSON(client, http.MethodGet, epAcct+state, tok.AccessToken, nil, origin); err == nil {
 		_ = json.Unmarshal(acctRaw, &acct)
 	}
 	if acct.UID == "" {
@@ -239,6 +269,12 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p.cfg.Pool.Add(a)
+	if sess.group != "" && p.cfg.Groups != nil {
+		if err := p.cfg.Groups.AddMember(sess.group, acct.UID); err != nil {
+			log.Printf("panel: login add group member uid=%s group=%s: %v", acct.UID, sess.group, err)
+		}
+		p.cfg.Pool.SetGroup(acct.UID, sess.group)
+	}
 	p.cfg.Pool.Revive(acct.UID) // 全新登录 = 人工恢复口径：清掉旧号遗留的禁用/冷却/熔断
 
 	// 顺带签到 + 余额刷新（幂等；失败不影响登录结果，只体现在返回字段里）。
@@ -285,6 +321,7 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 		"uid":             acct.UID,
 		"nickname":        acct.Nickname,
 		"realm":           sess.realm,
+		"group":           sess.group,
 		"credits":         remain,
 		"credits_total":   total,
 		"checkin_message": checkinMsg,
