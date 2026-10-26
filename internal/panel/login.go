@@ -272,8 +272,9 @@ func (p *Panel) loginPoll(w http.ResponseWriter, r *http.Request) {
 	if sess.group != "" && p.cfg.Groups != nil {
 		if err := p.cfg.Groups.AddMember(sess.group, acct.UID); err != nil {
 			log.Printf("panel: login add group member uid=%s group=%s: %v", acct.UID, sess.group, err)
+		} else {
+			p.cfg.Pool.SetGroup(acct.UID, sess.group)
 		}
-		p.cfg.Pool.SetGroup(acct.UID, sess.group)
 	}
 	p.cfg.Pool.Revive(acct.UID) // 全新登录 = 人工恢复口径：清掉旧号遗留的禁用/冷却/熔断
 

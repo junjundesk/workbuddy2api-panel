@@ -98,6 +98,14 @@ func (p *Panel) importCockpit(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
+		if groupID != "" && p.cfg.Groups != nil {
+			if existing := p.cfg.Groups.GroupOf(uid); existing != "" && existing != groupID {
+				skipped++
+				errs = append(errs, fmt.Sprintf("uid=%s: already in another group (%s); move it explicitly first", uid, existing))
+				continue
+			}
+		}
+
 		// 按 domain 推断 realm：workbuddy.ai 家族 → global，否则 cn。
 		realm := auth.ResolveRealm("", acc.Domain)
 

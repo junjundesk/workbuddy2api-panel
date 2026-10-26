@@ -19,6 +19,6 @@ import (
 func realmAwareAvailableForModel(p *pool.Pool) func(model string) []string {
 	return func(model string) []string {
 		realm, bare := server.ResolveModel(model)
-		return p.AvailableUIDsForModelRealmScoped(bare, realm, "")
+		return p.WeightedAvailableUIDsForModelRealmScoped(bare, realm, "")
 	}
 }
