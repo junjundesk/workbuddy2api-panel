@@ -175,7 +175,11 @@ func (p *Panel) tasksRunQueue(w http.ResponseWriter, r *http.Request) {
 	case !started:
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": false, "message": msg})
 	default:
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true, "total": total, "seq": seq})
+		q := p.queue()
+		q.mu.Lock()
+		conc := q.conc // 实际生效并发（已夹到有待办的账号数）
+		q.mu.Unlock()
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true, "total": total, "seq": seq, "conc": conc})
 	}
 }
 

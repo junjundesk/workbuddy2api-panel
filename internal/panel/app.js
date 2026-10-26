@@ -670,14 +670,15 @@ async function runGroupTasks(btn) {
   const bucket = groupAccountsForView(d.accounts || [], d.groups || []).find(b => b.key === btn.dataset.gtask);
   const items = (bucket ? bucket.items : []).filter(taskEligible);
   if (!items.length) { toast('本组没有可执行成长任务的账号', 'err'); return; }
-  const conc = Math.min(items.length, Number($('qcConc').value) || 1);
+  // 分组执行：并发 = 本组可执行账号数（每号一路，账号内串行），不跟任务中心下拉框走。
+  const conc = items.length;
   if (!confirm('扫描「' + bucket.name + '」' + items.length + ' 个账号的待办并排队执行（账号并发 ' + conc + '，账号内串行）。\n含真实对话的任务耗时较长，确认继续？')) return;
   btn.disabled = true;
   try {
     const r = await api('tasks/run_queue', { method: 'POST', body: JSON.stringify({ concurrency: conc, uids: items.map(s => s.uid), label: bucket.name }) });
     if (!r.started) { toast(r.message || '本组没有待办任务', 'ok'); return; }
     lastQueueSeq = r.seq || 0;
-    toast(bucket.name + '：队列已启动 ' + r.total + ' 项（并发 ' + conc + '）', 'ok');
+    toast(bucket.name + '：队列已启动 ' + r.total + ' 项（并发 ' + (r.conc || conc) + '）', 'ok');
     go('taskscenter'); history.replaceState(null, '', '#taskscenter');
     startQueuePolling();
   } catch (e) { toast(e.message, 'err'); }
