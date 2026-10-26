@@ -127,8 +127,18 @@ function rowsHtml(list, mode) {
     return '<tr class="' + st.cls + '"><td class="mark"><i></i></td><td><div class="who"><div class="nm">' + esc(a.nickname || a.uid.slice(0, 8)) + tags + '</div><div class="id">' + esc(a.uid) + '</div></div></td><td><span class="tag ' + st.tag + '">' + st.text + '</span>' + note + '</td><td class="num">' + credText(a) + '</td><td class="num">' + fmt(a.success_count) + ' / ' + fmt(a.err_total) + '</td><td class="num">' + (a.in_flight || 0) + '</td><td class="num">' + (a.token_usage && a.token_usage.total_tokens ? fmtTokens(a.token_usage.total_tokens) : '—') + '</td><td class="num">' + (a.realm || 'cn').toUpperCase() + '</td><td><div class="acts">' + acts + '</div></td></tr>';
   }).join('');
 }
+// 分组批量操作，与主页分组卡片同口径：签到跳过禁用 / 企业版；任务执行只跑能做成长任务的号。
+function taskEligible(a) { return !a.disabled && !a.enterprise && a.realm !== 'global'; }
+function groupBulkBtns(list) {
+  if (!list.length) return '';
+  let h = '';
+  if (list.some(taskEligible)) h += '<button class="xs primary" data-act="group-tasks" title="扫描本组账号的成长任务待办并排队执行（并发 = 本组账号数），进度在任务中心查看">任务执行</button>';
+  h += '<button class="xs" data-act="group-bulk" data-what="checkin" title="逐个签到本组账号（跳过禁用 / 企业版）">本组签到</button>';
+  h += '<button class="xs" data-act="group-bulk" data-what="balance" title="逐个刷新本组账号余额">本组余额</button>';
+  return h;
+}
 function accountsBox(list, mode) {
-  return '<div class="box"><header><h3>' + (mode === 'group' ? '分组账号' : '公共池账号') + ' <span class="hint">' + (mode === 'group' ? '仅本组密钥可见' : '未分组 + 共享') + '</span></h3><span class="grow"></span><button class="xs" data-act="add-account">添加账号</button><button class="xs" data-act="import">导入 JSON</button></header><div class="acc-wrap"><table class="acc"><thead><tr><th class="mark"></th><th>账号</th><th>状态</th><th>积分</th><th>成功 / 失败</th><th>在途</th><th>用量</th><th>域</th><th></th></tr></thead><tbody>' + rowsHtml(list, mode) + '</tbody></table></div><div class="table-foot">共 ' + list.length + ' 个账号</div></div>';
+  return '<div class="box"><header><h3>' + (mode === 'group' ? '分组账号' : '公共池账号') + ' <span class="hint">' + (mode === 'group' ? '仅本组密钥可见' : '未分组 + 共享') + '</span></h3><span class="grow"></span>' + (mode === 'group' ? groupBulkBtns(list) : '') + '<button class="xs" data-act="add-account">添加账号</button><button class="xs" data-act="import">导入 JSON</button></header><div class="acc-wrap"><table class="acc"><thead><tr><th class="mark"></th><th>账号</th><th>状态</th><th>积分</th><th>成功 / 失败</th><th>在途</th><th>用量</th><th>域</th><th></th></tr></thead><tbody>' + rowsHtml(list, mode) + '</tbody></table></div><div class="table-foot">共 ' + list.length + ' 个账号</div></div>';
 }
 function renderDetail() {
   const g = selectedGroup();
@@ -302,6 +312,40 @@ document.addEventListener('click', async e => {
         else if (a === 'resume') { await api(p + 'resume', { method: 'POST' }); toast('已恢复选号', 'ok'); }
         else if (a === 'disable') { await api(p + 'disable', { method: 'POST' }); toast('已禁用', 'ok'); }
       } finally { el.disabled = false; await load(); }
+      return;
+    }
+    if (act === 'group-bulk') {
+      const g = selectedGroup(); if (!g || el.disabled) return;
+      const what = el.dataset.what;
+      const items = groupAccounts(g.id).filter(a => !a.disabled && !(what === 'checkin' && a.enterprise));
+      if (!items.length) { toast('本组没有可执行的账号', 'err'); return; }
+      const label = el.textContent; el.disabled = true;
+      let ok = 0, fail = 0;
+      try {
+        for (let i = 0; i < items.length; i++) {
+          el.textContent = label + ' ' + (i + 1) + '/' + items.length;
+          try { await api('accounts/' + encodeURIComponent(items[i].uid) + '/' + what, { method: 'POST' }); ok++; } catch (e2) { fail++; }
+        }
+      } finally { el.disabled = false; el.textContent = label; }
+      toast(label + '完成：成功 ' + ok + (fail ? '，失败 ' + fail : ''), fail ? 'err' : 'ok');
+      await load(); return;
+    }
+    if (act === 'group-tasks') {
+      const g = selectedGroup(); if (!g || el.disabled) return;
+      const items = groupAccounts(g.id).filter(taskEligible);
+      if (!items.length) { toast('本组没有可执行成长任务的账号', 'err'); return; }
+      const conc = items.length; // 并发 = 本组可执行账号数，账号内串行
+      if (!confirm('扫描「' + g.name + '」' + items.length + ' 个账号的待办并排队执行（账号并发 ' + conc + '，账号内串行）。\n含真实对话的任务耗时较长，确认继续？')) return;
+      // 先同步开空白标签页，避免 await 之后再 window.open 被浏览器当弹窗拦截。
+      const tab = window.open('about:blank', '_blank');
+      el.disabled = true;
+      try {
+        const r = await api('tasks/run_queue', { method: 'POST', body: JSON.stringify({ concurrency: conc, uids: items.map(a => a.uid), label: g.name }) });
+        if (!r.started) { if (tab) tab.close(); toast(r.message || '本组没有待办任务', 'ok'); return; }
+        toast(g.name + '：队列已启动 ' + r.total + ' 项（并发 ' + (r.conc || conc) + '），进度见任务中心', 'ok');
+        if (tab) tab.location.href = '/panel/#taskscenter'; else window.open('/panel/#taskscenter', '_blank');
+      } catch (e2) { if (tab) tab.close(); throw e2; }
+      finally { el.disabled = false; }
       return;
     }
     if (act === 'move-account') {
