@@ -3,7 +3,7 @@ package panel
 import (
 	"testing"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
+	"github.com/junjundesk/workbuddy2api-panel/internal/upstream"
 )
 
 // TestExpertIDFromJumpURL 任务 jump_url 的 expertId 藏在两层 URL 编码里：

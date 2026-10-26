@@ -3,7 +3,7 @@ package pool
 import (
 	"testing"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/junjundesk/workbuddy2api-panel/internal/auth"
 )
 
 func addTestAccount(p *Pool, uid string) {

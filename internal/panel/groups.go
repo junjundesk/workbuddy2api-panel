@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/groups"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
+	"github.com/junjundesk/workbuddy2api-panel/internal/groups"
+	"github.com/junjundesk/workbuddy2api-panel/internal/pool"
+	"github.com/junjundesk/workbuddy2api-panel/internal/upstream"
 )
 
 type proxyView struct {

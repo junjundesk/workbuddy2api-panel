@@ -12,9 +12,9 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
+	"github.com/junjundesk/workbuddy2api-panel/internal/auth"
+	"github.com/junjundesk/workbuddy2api-panel/internal/pool"
+	"github.com/junjundesk/workbuddy2api-panel/internal/upstream"
 )
 
 // rtFunc 假 RoundTripper（避免依赖 net 连接）。

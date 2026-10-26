@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
+	"github.com/junjundesk/workbuddy2api-panel/internal/auth"
+	"github.com/junjundesk/workbuddy2api-panel/internal/pool"
 )
 
 // authScope 一次请求的号池作用域。Main=true 表示主密钥/匿名公共池。

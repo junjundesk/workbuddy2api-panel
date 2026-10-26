@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/pool"
-	"github.com/linguo2625469/workbuddy2api-panel/internal/upstream"
+	"github.com/junjundesk/workbuddy2api-panel/internal/auth"
+	"github.com/junjundesk/workbuddy2api-panel/internal/pool"
+	"github.com/junjundesk/workbuddy2api-panel/internal/upstream"
 )
 
 // ---------- 测试辅助 ----------

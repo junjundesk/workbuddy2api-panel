@@ -11,7 +11,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/linguo2625469/workbuddy2api-panel/internal/auth"
+	"github.com/junjundesk/workbuddy2api-panel/internal/auth"
 )
 
 // hostFake 按请求主机分派响应并记录访问序列。status=0 表示模拟连接层失败。

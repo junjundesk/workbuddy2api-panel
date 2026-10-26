@@ -150,15 +150,27 @@ function openImportModal() {
   state.importGroup = state.selected === 'public' ? null : state.selected;
   $('importGroupName').textContent = state.importGroup ? '· ' + groupOf(state.importGroup).name : '· 公共号池';
   $('importSingle').value = ''; $('importBatch').value = ''; $('importFile').value = '';
-  switchImportTab('single'); open('importVeil');
+  switchImportTab('single'); updateImportParse(); open('importVeil');
 }
-function switchImportTab(t) { state.importTab = t; document.querySelectorAll('#importVeil .tab').forEach(b => b.classList.toggle('on', b.dataset.tab === t)); $('importSinglePanel').hidden = t !== 'single'; $('importBatchPanel').hidden = t !== 'batch'; }
+function switchImportTab(t) { state.importTab = t; document.querySelectorAll('#importVeil .tab').forEach(b => b.classList.toggle('on', b.dataset.tab === t)); $('importSinglePanel').hidden = t !== 'single'; $('importBatchPanel').hidden = t !== 'batch'; if ($('importParse')) updateImportParse(); }
 function parseAccounts(text) {
   try {
     const d = JSON.parse(text); let arr = Array.isArray(d) ? d : (d && Array.isArray(d.accounts) ? d.accounts : (d && typeof d === 'object' ? [d] : []));
     return arr.filter(x => x && (x.uid || (x.account && x.account.uid)) && (x.access_token || x.accessToken || (x.auth && x.auth.accessToken)));
   } catch (e) { return []; }
 }
+// 实时提示识别到的账号数；文件选择后读入批量文本框（原先选文件没有任何效果）。
+function updateImportParse() {
+  const text = state.importTab === 'single' ? $('importSingle').value : $('importBatch').value;
+  const n = text.trim() ? parseAccounts(text).length : -1;
+  $('importParse').textContent = n < 0 ? '等待输入…' : (n ? '识别到 ' + n + ' 个账号' : '没有识别到有效账号（需要 uid + access_token/accessToken）');
+}
+$('importSingle').addEventListener('input', updateImportParse);
+$('importBatch').addEventListener('input', updateImportParse);
+$('importFile').addEventListener('change', async () => {
+  const file = $('importFile').files[0]; if (!file) return;
+  $('importBatch').value = await file.text(); updateImportParse();
+});
 function openConfirm(title, body, label, fn) { $('confirmTitle').textContent = title; $('confirmBody').innerHTML = body; $('confirmYes').textContent = label; state.confirm = fn; open('confirmVeil'); }
 
 document.addEventListener('click', async e => {
@@ -221,7 +233,8 @@ document.addEventListener('click', async e => {
       const fd = new FormData(); fd.append('file', new Blob([JSON.stringify(arr)], { type: 'application/json' }), 'accounts.json');
       if (state.importGroup) fd.append('group', state.importGroup);
       const r = await api('import/cockpit', { method: 'POST', body: fd });
-      close('importVeil'); await load(); toast('导入完成：成功 ' + r.imported + '，跳过 ' + r.skipped, r.imported ? 'ok' : 'warn'); return;
+      close('importVeil'); await load(); if (r.errors && r.errors.length) console.warn('import errors:', r.errors);
+      toast('导入完成：成功 ' + r.imported + '，跳过 ' + r.skipped + (r.errors && r.errors.length ? '（' + r.errors[0] + '）' : ''), r.imported ? 'ok' : 'warn'); return;
     }
     if (act === 'add-account') {
       const g = selectedGroup(); $('addGroupName').textContent = g ? '· ' + g.name : '· 公共号池'; $('addWait').hidden = true; open('addVeil');
