@@ -18,6 +18,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -191,6 +192,33 @@ func BenchmarkResponsesConvertLarge(b *testing.B) {
 		}
 		if _, err := json.Marshal(chat); err != nil {
 			b.Fatal(err)
+		}
+	}
+}
+
+// TestInboundAllocBudget 入站分配量回归闸门（分配量比耗时稳定，跨机器可比）。
+// 默认跳过（基准要跑数秒）；CI/本地性能检查：PERF_BUDGET=1 go test ./internal/server -run TestInboundAllocBudget
+func TestInboundAllocBudget(t *testing.T) {
+	if os.Getenv("PERF_BUDGET") == "" {
+		t.Skip("set PERF_BUDGET=1 to enforce inbound allocation budgets")
+	}
+	cases := []struct {
+		name  string
+		bench func(*testing.B)
+		max   uint64
+	}{
+		{"chat_small", BenchmarkInboundChatSmall, 140_000},
+		{"chat_large", BenchmarkInboundChatLarge, 2_800_000},
+		{"responses_small", BenchmarkInboundResponsesSmall, 170_000},
+		{"responses_large", BenchmarkInboundResponsesLarge, 3_200_000},
+	}
+	for _, c := range cases {
+		res := testing.Benchmark(c.bench)
+		got := uint64(res.AllocedBytesPerOp())
+		if got > c.max {
+			t.Errorf("%s: alloc=%d B/op > budget %d（入站分配回退）", c.name, got, c.max)
+		} else {
+			t.Logf("%s: alloc=%d B/op (budget %d)", c.name, got, c.max)
 		}
 	}
 }
