@@ -1,0 +1,35 @@
+{
+  "messages": [
+    {
+      "content": [
+        {
+          "text": "what",
+          "type": "text"
+        },
+        {
+          "image_url": {
+            "url": "https://x/y.png"
+          },
+          "type": "image_url"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": "ok",
+      "reasoning": "think",
+      "reasoning_content": "think",
+      "role": "assistant"
+    }
+  ],
+  "model": "deepseek-v4.1-flash",
+  "prompt_cache_key": "wb2a-u1-33574bbebfa074e58f34f23840b43905",
+  "reasoning_effort": "max",
+  "stream": true,
+  "stream_options": {
+    "include_usage": true
+  },
+  "thinking": {
+    "type": "enabled"
+  }
+}

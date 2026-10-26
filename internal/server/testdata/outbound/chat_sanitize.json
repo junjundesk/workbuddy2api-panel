@@ -1,0 +1,18 @@
+{
+  "messages": [
+    {
+      "content": "You are Claude Code, Anthropic's official CLI tool for Claude. Default branch (you will usually use this for PRs).",
+      "role": "system"
+    },
+    {
+      "content": "hi 11-128",
+      "role": "user"
+    }
+  ],
+  "model": "glm-5.2",
+  "prompt_cache_key": "wb2a-u1-33574bbebfa074e58f34f23840b43905",
+  "stream": true,
+  "stream_options": {
+    "include_usage": true
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "messages": [
+    {
+      "content": null,
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{}",
+            "name": "f1"
+          },
+          "id": "a",
+          "type": "function"
+        },
+        {
+          "function": {
+            "arguments": "{}",
+            "name": "f2"
+          },
+          "id": "b",
+          "type": "function"
+        }
+      ]
+    },
+    {
+      "content": "1",
+      "role": "tool",
+      "tool_call_id": "a"
+    },
+    {
+      "content": "2",
+      "role": "tool",
+      "tool_call_id": "b"
+    },
+    {
+      "content": "go on",
+      "role": "user"
+    }
+  ],
+  "model": "glm-5.2",
+  "prompt_cache_key": "wb2a-u1-33574bbebfa074e58f34f23840b43905",
+  "stream": true,
+  "stream_options": {
+    "include_usage": true
+  }
+}

@@ -78,6 +78,20 @@ type Config struct {
 	// 来自 logging.request_client_info（缺省 true）；关闭时 reqlog 事件的来源字段
 	// 保持为空，归档与面板都不出现来源信息。
 	RecordClientInfo bool
+
+	// ResponsesEarlyCreated /v1/responses 流式请求是否在**受理时**立即发
+	// response.created / response.in_progress（OpenAI 语义：首事件不等上游首帧）。
+	// nil = 默认 true（感知时延最优）；显式 false = 旧行为（收到上游第一帧才发）。
+	// 开局后上游/调度错误一律转成 response.failed 事件（HTTP 已是 200）。
+	ResponsesEarlyCreated *bool
+}
+
+// responsesEarlyCreated 解析提前开局开关（缺省 true）。
+func (h *Handler) responsesEarlyCreated() bool {
+	if h.cfg.ResponsesEarlyCreated != nil {
+		return *h.cfg.ResponsesEarlyCreated
+	}
+	return true
 }
 
 // loadLive 返回当前运行期快照；Live 为 nil 时用静态字段合成。
@@ -157,8 +171,11 @@ func NewHandler(cfg Config) *Handler {
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if h.cfg.RequestLog != nil && r.Method == http.MethodPost && r.URL.Path == "/v1/chat/completions" {
-		trace := &requestTrace{id: reqlog.NewRequestID(), start: time.Now()}
+	// 两条 OpenAI 兼容入口都进请求归档：/v1/responses 走 chat 管线但请求语义不同，
+	// 不记这一半流量会让面板统计与排障缺失。
+	if h.cfg.RequestLog != nil && r.Method == http.MethodPost &&
+		(r.URL.Path == "/v1/chat/completions" || r.URL.Path == "/v1/responses") {
+		trace := &requestTrace{id: reqlog.NewRequestID(), start: time.Now(), path: r.URL.Path, protocol: requestProtocol(r.URL.Path)}
 		if h.loadLive().RecordClientInfo {
 			trace.captureClientInfo(r)
 		}
@@ -626,11 +643,10 @@ func cachedModelsSnapshot() []upstream.ModelInfo {
 	return dynamicModelsCache.ids
 }
 
+// chatCompletions 读入入站 body 后交给 chatCompletionsIn 处理。
+// 独立出来的原因是 /v1/responses 适配层需要复用整条 chat 管线：它已经持有
+// 转换后的 body（以及后续的解析结果），不应再走一次 io.ReadAll。
 func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
-	// 客户端 IP 提取（按请求传递到 ChatStream，不透传时 upstream 侧忽略）；
-	// 消除早年共享字段方案的并发交叉污染（issue：ClientIP 竞态）。
-	clientIP := upstream.ExtractClientIP(r)
-	scope := scopeFrom(r)
 	// 请求体无大小上限（max_body_mb 已移除，对齐上游）：完整读入，超限类问题交由
 	// 上游自然返回错误（其响应经既有错误分类链路透出，信息量更大）。#41 的截断
 	// 防御语义保留在读错误路径——移除预拦截后，截断只可能来自客户端自己断流，
@@ -640,30 +656,38 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", "read body: "+err.Error())
 		return
 	}
-	var peek struct {
-		Stream bool   `json:"stream"`
-		Model  string `json:"model"`
-	}
-	_ = json.Unmarshal(body, &peek)
+	h.chatCompletionsIn(w, r, parseChatInbound(body), nil)
+}
+
+// chatCompletionsIn 是 chat 入站核心：解析 → 改写 → 轮转 → 响应。
+//
+// sink 非 nil 时，非流式成功响应不写 JSON，而是把聚合后的 chat 响应对象交给调用方
+// （/v1/responses 用它省掉「缓冲 JSON → 再 Unmarshal」的一次整响应往返）。
+func (h *Handler) chatCompletionsIn(w http.ResponseWriter, r *http.Request, in *chatInbound, sink func(map[string]any)) {
+	body := in.raw
+	// 客户端 IP 提取（按请求传递到 ChatStream，不透传时 upstream 侧忽略）；
+	// 消除早年共享字段方案的并发交叉污染（issue：ClientIP 竞态）。
+	clientIP := upstream.ExtractClientIP(r)
+	scope := scopeFrom(r)
 
 	// 工具名名单：上游在没有 tools 的请求里会把工具调用吐成原生标记文本
 	// （见 upstream/dsml.go），修复层用它做严格判定。名单来自「本请求声明的 tools」
 	// 与「会话历史里出现过的工具名」两个来源——实测 tools 声明会在中转环节丢失，
 	// 只认前者会让修复层在最需要它的场景下失效。
 	// 在提示词/模型名改写之前取（那些改写不动 tools / messages[].tool_calls 子树）。
-	declaredTools := upstream.ToolNameAllowlist(body)
+	declaredTools := in.tools
 
 	// realm 前缀解析（D6）：model 名可能带 "[realm:]" 前缀。剥出 realm + bareModel，
 	// bareModel 用于选号/粘性/出站 body 重写（前缀是网关侧路由协议，上游只认裸名）。
 	// 裸名 → ("cn", 原串)，CN 现状零回归。
-	realm, bareModel := resolveModel(peek.Model)
+	realm, bareModel := resolveModel(in.model)
 	modelRate := ""
 	if h.cfg.Upstream != nil {
 		modelRate = h.cfg.Upstream.ModelRate(realm, bareModel)
 	}
 
 	// 请求级统计：出口即打一行表格日志（任何路径都会走到）。
-	st := newChatStat(time.Now(), body, peek.Stream)
+	st := newChatStat(time.Now(), in.model, in.stream)
 	if tr := requestTraceFrom(r); tr != nil {
 		tr.stat = st
 		// 来源在 ServeHTTP 入口采集（此时才知道开关与请求头），此处转交给统计对象，
@@ -681,14 +705,14 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 会话粘性：从请求体提取会话键并解析绑定号（找不到/无效则 stickyUID 为空，走普通轮换）。
 	// ExtractKey 与粘性开关解耦（issue #35 侧）：关闭粘性时会话头族的聚合主键仍按
 	// 会话级（RequestIDForKey(sessKey)），不悄悄退化成轮级——提取本身与粘性无关。
-	sessKey := session.ExtractKey(body)
+	sessKey := in.sessKey
 	stickyUID := ""
 	// 分组请求暂不启用全局粘性：Router 的可用集是公共池口径，跨组绑定会泄漏；
 	// 分组内部仍由 PickScoped 做加权轮换，后续可升级为每分组 Router。
 	if scope.GroupID == "" && h.cfg.Session != nil && sessKey != "" {
 		// 按模型解析：绑定号在**当前模型**被 6004 限额时视为不可用 → 重新分配，
 		// 而不是钉在限额号上反复失败（"限额后换不动号"的正解）。
-		if uid, ok := h.cfg.Session.ResolveForModel(sessKey, peek.Model); ok {
+		if uid, ok := h.cfg.Session.ResolveForModel(sessKey, in.model); ok {
 			stickyUID = uid
 		}
 	}
@@ -699,11 +723,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	// 清空重生成），故不再限 sessKey=="" 才计算；sessKey 由下方派生处以复合键方式
 	// 入键（防不同会话同轮文本互撞）。
 	// 必须在下方 prompt.Rewrite 之前取——改写会动 messages 内容，之后取会让键漂移。
-	turnKey := session.TurnKey(body)
+	turnKey := in.turnKey
 
 	// gateway_hint 判定所需的请求形态（image_url part）：在改写前取（与 turnKey
 	// 同理）。11133「模型不支持图片」指向的前提。
-	reqHasImage := hasImagePart(body)
+	reqHasImage := in.hasImage
 
 	// 在途租约：成功选中即占名额；函数出口（含成功 return 与 panic）统一释放。
 	var heldUID string
@@ -751,7 +775,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		delta.Model = bareModel
 		if delta.Model == "" {
-			delta.Model = peek.Model
+			delta.Model = in.model
 		}
 		latency := time.Since(started)
 		latencyMs := latency.Milliseconds()
@@ -809,20 +833,41 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	//   - passthrough / append 非降级期：透传客户端原始 system（append 则再插一条网关 system）。
 	// 降级裁决：append 在降级期退化为 replace（Rewrite(Degraded)）——append 带
 	// 指纹原文重试是确定性再撞墙，replace 是一次性最小抢救（issue #129 设计 §4）。
+	// 入站对象：只解析一次。提示词/模型名改写与出站归一化都在同一 map 上原地完成，
+	// 最终由 upstream 序列化一次（旧管线是 4 次完整 decode + 4 次 encode）。
+	obj := in.obj
+	if obj == nil && len(body) > 0 {
+		var parsed map[string]any
+		if json.Unmarshal(body, &parsed) == nil {
+			obj = parsed
+			in.obj = obj
+		}
+	}
+
 	degradedApplied := false
-	if h.cfg.PromptMode == "custom" && h.cfg.PromptText != "" {
-		body = prompt.Rewrite(body, h.cfg.PromptText)
-	} else if h.cfg.PromptMode == "append" && h.cfg.PromptText != "" && !h.degrade.Active() {
-		body = prompt.Append(body, h.cfg.PromptText)
+	if obj != nil {
+		switch {
+		case h.cfg.PromptMode == "custom" && h.cfg.PromptText != "":
+			prompt.RewriteObject(obj, h.cfg.PromptText)
+		case h.cfg.PromptMode == "append" && h.cfg.PromptText != "" && !h.degrade.Active():
+			prompt.AppendObject(obj, h.cfg.PromptText)
+		case (h.cfg.PromptMode == "passthrough" || h.cfg.PromptMode == "append") && h.degrade.Active():
+			prompt.RewriteObject(obj, prompt.Degraded)
+			degradedApplied = true
+		}
 	} else if (h.cfg.PromptMode == "passthrough" || h.cfg.PromptMode == "append") && h.degrade.Active() {
-		body = prompt.Rewrite(body, prompt.Degraded)
+		// 坏 JSON：改写函数本来就原样返回，这里只保留降级状态语义。
 		degradedApplied = true
 	}
 
 	// outbound model 名重写为 bareModel（D6）：realm 前缀是网关侧路由协议，
-	// 上游不认前缀（global 账号也请求裸模型名）。裸名时 bareModel==peek.Model 恒等。
-	if bareModel != peek.Model {
-		body = rewriteModel(body, bareModel)
+	// 上游不认前缀（global 账号也请求裸模型名）。裸名时 bareModel==in.model 恒等。
+	if bareModel != in.model {
+		if obj != nil {
+			obj["model"] = bareModel
+		} else {
+			body = rewriteModel(body, bareModel)
+		}
 	}
 
 	// 会话头族（issue #35）：后台按 X-Conversation-Request-ID（对话轮级）聚合请求，
@@ -835,7 +880,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	//     粘性 key 进程内稳定生成；粘性 key 也空时走轮级兜底（TurnKey/TurnRequestID），
 	//     无 user 消息时退化成本请求级随机——轮转内捕获一次即共享；
 	//   - messageID 在 ChatHeaders 内每条消息生成（消息级独立，无需外部可见）。
-	chatMeta := upstream.ChatMeta{ConversationID: session.ResolveConversationID(body)}
+	chatMeta := upstream.ChatMeta{ConversationID: in.convID}
 	if v := r.Header.Get("X-Conversation-Request-ID"); v != "" {
 		chatMeta.ConversationRequestID = v
 	} else if turnKey != "" && sessKey != "" {
@@ -924,7 +969,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 		// 客户端 IP 按请求传递（PassthroughIP 开启时注入；消除共享字段竞态）。
 		attemptStarted := time.Now()
-		rc, status, respBody, terr := h.cfg.Upstream.ChatStreamContext(r.Context(), acct, body, clientIP, chatMeta)
+		rc, status, respBody, terr := h.cfg.Upstream.ChatStreamParsed(r.Context(), acct, body, obj, clientIP, chatMeta)
 		// 分类信封一次成型：upstream 已在错误路径返回 *upstream.Error（Kind +
 		// Retry-After 头解析）。传输层错误（非 *Error）走抖动换号分支；防御分支
 		// （terr 为 nil 但 status>=400，如 ErrNone 兜底）回落本地 Classify，双保险。
@@ -983,7 +1028,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			// 内容问题非账号问题：applyErrorPolicy 不罚账号（见 ErrContentBlocked 分支）。
 			if kind == upstream.ErrContentBlocked && (h.cfg.PromptMode == "passthrough" || h.cfg.PromptMode == "append") && !degradedApplied {
 				h.degrade.Trigger()
-				body = prompt.Rewrite(body, prompt.Degraded)
+				if obj != nil {
+					prompt.RewriteObject(obj, prompt.Degraded)
+				} else {
+					body = prompt.Rewrite(body, prompt.Degraded)
+				}
 				degradedApplied = true
 				delete(tried, acct.UID) // 单账号池也能拿到重试机会（降级重试占一次名额）
 				releaseHeld()
@@ -1077,7 +1126,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		// 上游「200 已开流 + 一帧 error」是真实形态（6004 限流、内容拦截、审核），
 		// 此前在读第一帧之前就 NoteSuccess + 清 11102 负缓存 + 绑粘性 → 被限流的号
 		// 记成健康、粘性把会话钉死在它身上，后续每一轮都打同一个限流号。
-		if peek.Stream {
+		if in.stream {
 			// 流式：透传结束后立即关闭上游 body，避免 defer 在轮转场景下堆积 fd。
 			st.status = http.StatusOK
 			stats := newChatStatsReaderSince(rc, st.start)
@@ -1210,7 +1259,11 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		if st.hasCache {
 			cacheMissWarn.noteCacheTokens(bareModel, st.promptTokens, st.cacheHit, st.cacheMiss)
 		}
-		writeJSON(w, http.StatusOK, resp)
+		if sink != nil {
+			sink(resp)
+		} else {
+			writeJSON(w, http.StatusOK, resp)
+		}
 		st.status = http.StatusOK
 		st.outcome = reqlog.OutcomeSuccess
 		st.toks = completionTokens(resp)
@@ -1586,30 +1639,6 @@ func writeOpenAIErrorHint(w http.ResponseWriter, status int, code, msg, hint str
 			"gateway_hint": hint,
 		},
 	})
-}
-
-// hasImagePart 报告聊天请求体是否携带多模态 image_url part（OpenAI 兼容形态
-// messages[].content[] {type:"image_url"}）。畸形/其他形态一律 false（hint 侧
-// 宁缺勿滥：判不出带图就不给「模型不支持图片」指向）。
-func hasImagePart(body []byte) bool {
-	var peek struct {
-		Messages []struct {
-			Content []struct {
-				Type string `json:"type"`
-			} `json:"content"`
-		} `json:"messages"`
-	}
-	if json.Unmarshal(body, &peek) != nil {
-		return false
-	}
-	for _, m := range peek.Messages {
-		for _, p := range m.Content {
-			if p.Type == "image_url" {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // hintContext 组装 chatCompletions 的 gateway_hint 判定上下文：请求裸模型名 +

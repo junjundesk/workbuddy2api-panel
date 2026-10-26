@@ -1,0 +1,26 @@
+{
+  "messages": [
+    {
+      "content": "client sys",
+      "role": "system"
+    },
+    {
+      "content": "dev",
+      "role": "system"
+    },
+    {
+      "content": "APPENDED",
+      "role": "system"
+    },
+    {
+      "content": "hi",
+      "role": "user"
+    }
+  ],
+  "model": "glm-5.2",
+  "prompt_cache_key": "wb2a-u1-33574bbebfa074e58f34f23840b43905",
+  "stream": true,
+  "stream_options": {
+    "include_usage": true
+  }
+}

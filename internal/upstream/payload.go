@@ -35,6 +35,18 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 	if err := json.Unmarshal(src, &obj); err != nil {
 		return src
 	}
+	prepareBodyObject(obj, sanitize, efforts, defaultEfforts)
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return src
+	}
+	return out
+}
+
+// prepareBodyObject 是出站归一化的对象形态：在已解析 map 上原地执行全部变换。
+// 供入站管线复用「一次 decode」的结果（提示词/模型名/prepareBody/缓存键 合并为
+// 一次 decode + 一次 encode），语义与字节入口逐条一致。
+func prepareBodyObject(obj map[string]any, sanitize bool, efforts map[string][]string, defaultEfforts map[string]string) {
 	obj["stream"] = true
 	// max_completion_tokens → max_tokens 翻译（吸收上游 PR #116，Closes #117）：
 	// OpenAI 规范里 max_tokens 已 deprecated、max_completion_tokens 是新字段；
@@ -54,9 +66,9 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 	normalizeImageURL(obj)
 	// tool 配对三步（见 tool_pairing.go）：先合并再重排再清理。所有模型一律执行（独立于
 	// deepseek-only 的 sanitize 开关）。这是「让请求通过」的安全网——不完整配对的
-	// tool_calls/tool 结果会让上游对之后每条消息都返 400，必须先行剔除；
-	// 插在结果中间的非 tool 消息（Codex image_resize_notice）同样判配对断裂，
-	// 先 repack 挪后，再 cleanup 删孤儿，两侧同口径。
+	// tool_calls/tool 结果会让上游对之后每条消息都返 400，必须先行剔除；插在结果
+	// 中间的非 tool 消息（Codex image_resize_notice）同样判配对断裂，先 repack 挪后，
+	// 再 cleanup 删孤儿，两侧同口径。
 	//
 	// 顺序不能换：mergeAdjacentToolCalls 必须最先跑——它把「背靠背的两条
 	// assistant.tool_calls」合成一条（部分 agent 客户端回放并行调用的报文形状），是上游
@@ -84,11 +96,6 @@ func PrepareBodyOptWithEffortsAndDefault(src []byte, sanitize bool, efforts map[
 			sanitizeMessages(msgs)
 		}
 	}
-	out, err := json.Marshal(obj)
-	if err != nil {
-		return src
-	}
-	return out
 }
 
 // translateMaxCompletionTokens 把 OpenAI 别名 max_completion_tokens 翻译为上游
@@ -303,22 +310,33 @@ func ensureConsoleSystem(body []byte) []byte {
 	if err := json.Unmarshal(body, &obj); err != nil {
 		return body
 	}
-	msgs, ok := obj["messages"].([]any)
-	if !ok || len(msgs) == 0 {
+	if !ensureConsoleSystemObject(obj) {
 		return body
 	}
-	first, ok := msgs[0].(map[string]any)
-	if ok {
-		if role, _ := first["role"].(string); strings.EqualFold(strings.TrimSpace(role), "system") {
-			return body // 首条已是 system：不注入
-		}
-	}
-	obj["messages"] = append([]any{map[string]any{"role": "system", "content": "You are a helpful assistant."}}, msgs...)
 	out, err := json.Marshal(obj)
 	if err != nil {
 		return body
 	}
 	return out
+}
+
+// ensureConsoleSystemObject 是 ensureConsoleSystem 的对象形态（原地改，返回是否改动）。
+func ensureConsoleSystemObject(obj map[string]any) bool {
+	if obj == nil {
+		return false
+	}
+	msgs, ok := obj["messages"].([]any)
+	if !ok || len(msgs) == 0 {
+		return false
+	}
+	first, ok := msgs[0].(map[string]any)
+	if ok {
+		if role, _ := first["role"].(string); strings.EqualFold(strings.TrimSpace(role), "system") {
+			return false
+		}
+	}
+	obj["messages"] = append([]any{map[string]any{"role": "system", "content": "You are a helpful assistant."}}, msgs...)
+	return true
 }
 
 // normalizeToolChoice 按上游 Go struct（string 类型）改写 OpenAI tool_choice。

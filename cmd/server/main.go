@@ -338,6 +338,8 @@ func main() {
 		RecordClientInfo: cfg.Logging.RequestClientInfo,
 		// handler 侧第三道闸（global realm）：false（显式逃生门）时不列 global: 模型名。
 		GlobalEnabled: cfg.Global.Enabled,
+		// Responses 流式首事件提前开局（缺省 true，server.responses_early_created 可关）。
+		ResponsesEarlyCreated: &cfg.Server.ResponsesEarlyCreated,
 	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

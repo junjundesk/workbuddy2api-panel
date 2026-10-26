@@ -333,6 +333,7 @@ func (p *Panel) requestLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	q := r.URL.Query()
 	rows, err := p.cfg.RequestLog.ReadArchive(limit, reqlog.Filter{
+		Protocol:  q.Get("protocol"),
 		Outcome:   q.Get("outcome"),
 		Account:   q.Get("account"),
 		Model:     q.Get("model"),

@@ -37,8 +37,20 @@ func jStr(v any) string {
 }
 
 func jArr(v any) []any {
-	a, _ := v.([]any)
-	return a
+	switch t := v.(type) {
+	case []any:
+		return t
+	case []map[string]any:
+		// chat 聚合层用 []map[string]any 构造 tool_calls（不是 []any）。直接把聚合
+		// 结果喂给 Responses 转换（非流式 sink 路径）时必须兼容，否则工具调用会被
+		// 当成空数组丢掉。
+		out := make([]any, len(t))
+		for i := range t {
+			out[i] = t[i]
+		}
+		return out
+	}
+	return nil
 }
 
 func jBool(v any, def bool) bool {

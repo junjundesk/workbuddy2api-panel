@@ -74,12 +74,15 @@ type chatStat struct {
 }
 
 // newChatStat 以请求进入 handler 的时刻为起点构造统计对象；toks 默认 -1（usage 缺失）。
-func newChatStat(now time.Time, body []byte, stream bool) *chatStat {
+func newChatStat(now time.Time, model string, stream bool) *chatStat {
 	mode := "sync"
 	if stream {
 		mode = "stream"
 	}
-	return &chatStat{start: now, model: parseModelFromBody(body), mode: mode, toks: -1}
+	if model == "" {
+		model = "-"
+	}
+	return &chatStat{start: now, model: model, mode: mode, toks: -1}
 }
 
 // done 幂等落一行表格日志。
@@ -342,9 +345,11 @@ type requestTraceKey struct{}
 
 // requestTrace 在一次 chat 请求内共享标识与最终统计，ServeHTTP 出口统一记账。
 type requestTrace struct {
-	id    string
-	start time.Time
-	stat  *chatStat
+	id       string
+	start    time.Time
+	path     string // 入站路径（/v1/chat/completions 或 /v1/responses）
+	protocol string // chat / responses
+	stat     *chatStat
 	// 调用来源，进入 handler 时一次性采集（见 ServeHTTP / captureClientInfo）。
 	clientIP  string
 	userAgent string
@@ -388,6 +393,14 @@ func dashIfEmpty(s string) string {
 	return s
 }
 
+// requestProtocol 入站路径 → 归档协议标记。
+func requestProtocol(path string) string {
+	if path == "/v1/responses" {
+		return "responses"
+	}
+	return "chat"
+}
+
 func requestTraceFrom(r *http.Request) *requestTrace {
 	if r == nil {
 		return nil
@@ -400,7 +413,8 @@ func (t *requestTrace) event(status int) reqlog.Event {
 	e := reqlog.Event{
 		Time:      t.start,
 		RequestID: t.id,
-		Path:      "/v1/chat/completions",
+		Path:      t.path,
+		Protocol:  t.protocol,
 		Status:    status,
 	}
 	duration := time.Since(t.start)

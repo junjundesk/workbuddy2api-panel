@@ -232,7 +232,14 @@ func (t *responsesRun) writeEvent(out io.Writer, event string, payload map[strin
 	if err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(out, "event: %s\ndata: %s\n\n", event, raw); err != nil {
+	// 手工拼帧，避免 fmt.Fprintf 的反射格式化开销（逐 token 热路径）。
+	buf := make([]byte, 0, len(event)+len(raw)+16)
+	buf = append(buf, "event: "...)
+	buf = append(buf, event...)
+	buf = append(buf, "\ndata: "...)
+	buf = append(buf, raw...)
+	buf = append(buf, "\n\n"...)
+	if _, err := out.Write(buf); err != nil {
 		return err
 	}
 	return nil
@@ -282,13 +289,15 @@ func (t *responsesRun) emitStarted(out io.Writer) error {
 		return nil
 	}
 	t.started = true
+	// 同一份 in_progress 骨架复用到两个事件，省一次 20+ 字段 map 构造。
+	scaffold := t.scaffold("in_progress")
 	if err := t.writeEvent(out, "response.created", map[string]any{
-		"response": t.scaffold("in_progress"),
+		"response": scaffold,
 	}); err != nil {
 		return err
 	}
 	return t.writeEvent(out, "response.in_progress", map[string]any{
-		"response": t.scaffold("in_progress"),
+		"response": scaffold,
 	})
 }
 
@@ -784,71 +793,81 @@ func (t *responsesRun) absorbChatCompletion(chat map[string]any) map[string]any 
 }
 
 // feedFrame 处理 chat SSE 的一帧 payload（已去掉 data: 前缀）。
+// chatStreamFrame 流式帧的轻量视图：只解 Responses 转换需要的字段。
+// 相比 map[string]any 全量解码，少建大量 map/切片，逐 token 帧成本显著下降。
+type chatStreamFrame struct {
+	Choices []struct {
+		Delta struct {
+			Content          string `json:"content"`
+			ReasoningContent string `json:"reasoning_content"`
+			Refusal          string `json:"refusal"`
+			ToolCalls        []struct {
+				Index    int    `json:"index"`
+				ID       string `json:"id"`
+				Function struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				} `json:"function"`
+			} `json:"tool_calls"`
+		} `json:"delta"`
+		FinishReason *string `json:"finish_reason"`
+	} `json:"choices"`
+	Usage json.RawMessage `json:"usage"`
+	Error json.RawMessage `json:"error"`
+}
+
+// absorbUsageRaw 只在帧里真的带 usage 时解码（仅末帧），避免每帧都建 map。
+func (t *responsesRun) absorbUsageRaw(raw json.RawMessage) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return
+	}
+	var u map[string]any
+	if json.Unmarshal(raw, &u) == nil {
+		t.absorbUsage(u)
+	}
+}
+
+// feedFrame 处理 chat SSE 的一帧 payload（已去掉 data: 前缀）。
 func (t *responsesRun) feedFrame(out io.Writer, payload string) error {
 	payload = strings.TrimSpace(payload)
 	if payload == "" || payload == "[DONE]" {
 		return t.emitCompleted(out)
 	}
-	var obj map[string]any
+	var obj chatStreamFrame
 	if json.Unmarshal([]byte(payload), &obj) != nil {
 		return nil // 非 JSON 帧：忽略（上游噪声）
 	}
-	if errObj, hasErr := obj["error"]; hasErr && errObj != nil {
-		m := jMap(errObj)
-		if m == nil {
-			m = map[string]any{"message": jStr(errObj), "type": "api_error"}
-		}
-		return t.emitFailed(out, m)
+	if len(obj.Error) > 0 && string(obj.Error) != "null" {
+		return t.emitFailed(out, responsesErrorObject(obj.Error))
 	}
 	if t.completed {
-		t.absorbUsage(jMap(obj["usage"])) // 收尾后的帧只补 usage
+		t.absorbUsageRaw(obj.Usage) // 收尾后的帧只补 usage
 		return nil
 	}
 	if err := t.emitStarted(out); err != nil {
 		return err
 	}
-	t.absorbUsage(jMap(obj["usage"]))
-	choices := jArr(obj["choices"])
-	if len(choices) == 0 {
+	t.absorbUsageRaw(obj.Usage)
+	if len(obj.Choices) == 0 {
 		return nil
 	}
-	ch := jMap(choices[0])
-	if ch == nil {
-		return nil
+	ch := obj.Choices[0]
+	if err := t.reasoningDelta(out, ch.Delta.ReasoningContent); err != nil {
+		return err
 	}
-	if delta := jMap(ch["delta"]); delta != nil {
-		if err := t.reasoningDelta(out, jStr(delta["reasoning_content"])); err != nil {
+	if err := t.textDelta(out, ch.Delta.Content); err != nil {
+		return err
+	}
+	if err := t.textDelta(out, ch.Delta.Refusal); err != nil {
+		return err
+	}
+	for _, tc := range ch.Delta.ToolCalls {
+		if err := t.toolDelta(out, tc.Index, tc.ID, tc.Function.Name, tc.Function.Arguments); err != nil {
 			return err
-		}
-		if err := t.textDelta(out, jStr(delta["content"])); err != nil {
-			return err
-		}
-		if err := t.textDelta(out, jStr(delta["refusal"])); err != nil {
-			return err
-		}
-		for _, raw := range jArr(delta["tool_calls"]) {
-			tc := jMap(raw)
-			if tc == nil {
-				continue
-			}
-			idx := 0
-			if v, ok := jInt(tc["index"]); ok {
-				idx = int(v)
-			}
-			fn := jMap(tc["function"])
-			name := ""
-			args := ""
-			if fn != nil {
-				name = jStr(fn["name"])
-				args = jStr(fn["arguments"])
-			}
-			if err := t.toolDelta(out, idx, jStr(tc["id"]), name, args); err != nil {
-				return err
-			}
 		}
 	}
-	if fr := jStr(ch["finish_reason"]); fr != "" {
-		t.finishReason = fr
+	if ch.FinishReason != nil && *ch.FinishReason != "" {
+		t.finishReason = *ch.FinishReason
 		return t.emitCompleted(out)
 	}
 	return nil
@@ -861,6 +880,9 @@ const (
 	respModeJSON
 	respModeStream
 	respModePass
+	// respModeFailed 已提前开局（200 已发出）后收到 4xx：不能改状态码，
+	// 缓冲错误 JSON，收尾时翻译成 response.failed 事件。
+	respModeFailed
 )
 
 // responsesWriter 接在 chat handler 与真实 ResponseWriter 之间：
@@ -885,8 +907,19 @@ func newResponsesWriter(real http.ResponseWriter, run *responsesRun) *responsesW
 
 func (w *responsesWriter) Header() http.Header { return w.real.Header() }
 
+// markStarted 标记「已提前开局」：头已由 responses() 直接写出并发了 created。
+// 之后 chat 管线再调 WriteHeader 一律忽略状态码（4xx 转 response.failed）。
+func (w *responsesWriter) markStarted() {
+	w.headerSent = true
+	w.status = http.StatusOK
+	w.mode = respModeStream
+}
+
 func (w *responsesWriter) WriteHeader(code int) {
 	if w.headerSent {
+		if code >= 400 && w.mode == respModeStream {
+			w.mode = respModeFailed
+		}
 		return
 	}
 	w.headerSent = true
@@ -907,6 +940,10 @@ func (w *responsesWriter) Write(p []byte) (int, error) {
 	switch w.mode {
 	case respModePass:
 		return w.real.Write(p)
+	case respModeFailed:
+		// 错误 JSON 先缓冲，finalize 统一翻译成 response.failed。
+		w.jsonBuf.Write(p)
+		return len(p), nil
 	case respModeJSON:
 		w.jsonBuf.Write(p)
 		return len(p), nil
@@ -949,9 +986,7 @@ func (w *responsesWriter) appendStream(p []byte) error {
 			break
 		}
 		frame := string(raw[:idx])
-		rest := append([]byte{}, raw[idx+2:]...)
-		w.sseBuf.Reset()
-		w.sseBuf.Write(rest)
+		w.sseBuf.Next(idx + 2) // 游标消费，避免每帧拷贝剩余缓冲
 		payload := sseFramePayload(frame)
 		if payload == "" {
 			continue
@@ -997,11 +1032,53 @@ func (w *responsesWriter) finalize() {
 			return
 		}
 		writeJSON(w.real, http.StatusOK, w.run.absorbChatCompletion(chat))
+	case respModeFailed:
+		// 已开局后收到 4xx：HTTP 状态改不了，按 Responses 协议发失败事件。
+		if errObj := responsesErrorObject(w.jsonBuf.Bytes()); errObj != nil {
+			if err := w.run.emitFailed(w.real, errObj); err != nil {
+				log.Printf("[responses] stream failed finalize: %v", err)
+			}
+		}
+		if w.flusher != nil {
+			w.flusher.Flush()
+		}
 	case respModePass:
 		// 已透传，无需处理
 	default:
 		writeOpenAIError(w.real, http.StatusBadGateway, "upstream_parse", "empty upstream response")
 	}
+}
+
+// responsesErrorObject 把 chat 错误响应体（{"error":{message,type,code}}）翻译成
+// response.failed 的 error 对象；空体/非 JSON 时给最小可读兜底（不吞掉原文）。
+func responsesErrorObject(raw []byte) map[string]any {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		return map[string]any{"message": "upstream request failed", "type": "api_error"}
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil && s != "" {
+		return map[string]any{"message": s, "type": "api_error"}
+	}
+	var env map[string]any
+	if json.Unmarshal(raw, &env) == nil {
+		if m := jMap(env["error"]); m != nil {
+			return m
+		}
+		if s := jStr(env["message"]); s != "" {
+			return map[string]any{"message": s, "type": "api_error"}
+		}
+	}
+	return map[string]any{"message": string(raw), "type": "api_error"}
+}
+
+// writeResponsesSSEHeaders 提前开局时直接写 SSE 头（与 upstream.StreamHint 同口径）。
+func writeResponsesSSEHeaders(w http.ResponseWriter) {
+	h := w.Header()
+	h.Set("Content-Type", "text/event-stream")
+	h.Set("Cache-Control", "no-cache")
+	h.Set("Connection", "keep-alive")
+	h.Set("X-Accel-Buffering", "no")
 }
 
 // ---------- HTTP 入口 ----------
@@ -1039,10 +1116,32 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 	synth.ContentLength = int64(len(chatBody))
 	synth.Header.Set("Content-Type", "application/json")
 
-	sw := newResponsesWriter(w, run)
-	defer sw.finalize()
-	h.chatCompletions(sw, synth)
-	sw.finalize()
+	if run.stream {
+		sw := newResponsesWriter(w, run)
+		// 提前开局（OpenAI 语义）：created/in_progress 在**受理时**发出，不等上游首帧。
+		// 这是 Responses 客户端唯一能感知到的协议层时延差（否则首事件 = 上游 TTFT）。
+		if h.responsesEarlyCreated() {
+			writeResponsesSSEHeaders(w)
+			w.WriteHeader(http.StatusOK)
+			if err := run.emitStarted(w); err != nil {
+				log.Printf("[responses] early created: %v", err)
+				return
+			}
+			sw.markStarted()
+		}
+		defer sw.finalize()
+		h.chatCompletionsIn(sw, synth, parseChatInboundWithObject(chatBody, chat), nil)
+		sw.finalize()
+	} else {
+		// 非流式：直接吃聚合后的 chat 响应对象，省掉「写 JSON → 再 Unmarshal」往返。
+		var out map[string]any
+		h.chatCompletionsIn(w, synth, parseChatInboundWithObject(chatBody, chat), func(resp map[string]any) {
+			out = run.absorbChatCompletion(resp)
+		})
+		if out != nil {
+			writeJSON(w, http.StatusOK, out)
+		}
+	}
 
 	if run.persist && run.final != nil {
 		items := append(append([]any{}, run.inputItems()...), run.outputList()...)

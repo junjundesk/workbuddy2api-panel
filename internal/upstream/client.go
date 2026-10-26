@@ -926,18 +926,36 @@ func (c *Client) chatBase(a *auth.Auth) string {
 // prepareBody 组装出站请求体（脱敏开关由 Client.SanitizeFingerprints 控制）。
 // realm 为账号 Realm()（cn/global），供 efforts 缓存分桶（跨域 effort 集合不互相污染）。
 func (c *Client) prepareBody(body []byte, realm, uid, conversationID string) []byte {
+	var obj map[string]any
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return body
+	}
+	if out := c.prepareBodyFromObject(obj, realm, uid, conversationID, false); out != nil {
+		return out
+	}
+	return body
+}
+
+// prepareBodyFromObject 在已解析对象上完成全部出站改写并序列化一次。
+// 顺序与旧字节管线严格一致：PrepareBody 变换 → prompt_cache_key → global 兜底 system。
+func (c *Client) prepareBodyFromObject(obj map[string]any, realm, uid, conversationID string, global bool) []byte {
 	efforts, defs := c.effortsSnapshot(realm), c.defaultEffortsSnapshot(realm)
 	if realmKey(realm) == "global" {
 		// global 域降级源 = 远端探测桶（权威）∪ 产品静态兜底表（全局 21 名内档位如
 		// deepseek-v4.1-flash ['high']）。当前探测桶为空时也按静态表降级，不全程透传
-		//（issue #84：往 WorkBuddy 上游发 low/max 非法，须降级到 high）。
+		// （issue #84：往 WorkBuddy 上游发 low/max 非法，须降级到 high）。
 		efforts, defs = globalEffortMap(efforts, defs)
 	}
-	body = PrepareBodyOptWithEffortsAndDefault(body, c.SanitizeFingerprints.Load(), efforts, defs)
-	// prompt_cache_key 注入（P0 费用优化，费用降 ~17×）：按账号隔离的稳定缓存键，
-	// 让同一客户端对同一账号的连续请求命中上游前缀缓存。
-	body = InjectPromptCacheKey(body, uid, conversationID)
-	return body
+	prepareBodyObject(obj, c.SanitizeFingerprints.Load(), efforts, defs)
+	injectPromptCacheKeyObject(obj, uid, conversationID)
+	if global {
+		ensureConsoleSystemObject(obj)
+	}
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return nil
+	}
+	return out
 }
 
 // effortsSnapshot 返回 effort 能力缓存副本；nil 表示未知（透传不降级）。
@@ -1157,14 +1175,27 @@ func (c *Client) ChatStream(a *auth.Auth, body []byte, clientIP string, meta Cha
 // #119 后 global 出站固定 /v2，该兜底保留——上游对 /v2 是否需要 system 无实测
 // 反证，删了无回滚路径）。
 func (c *Client) ChatStreamContext(ctx context.Context, a *auth.Auth, body []byte, clientIP string, meta ChatMeta) (rc io.ReadCloser, status int, respBody []byte, err error) {
+	var obj map[string]any
+	if len(body) > 0 {
+		_ = json.Unmarshal(body, &obj)
+	}
+	return c.ChatStreamParsed(ctx, a, body, obj, clientIP, meta)
+}
+
+// ChatStreamParsed 同 ChatStreamContext，但接受调用方已解析好的 body 对象：
+// 入站管线只 decode 一次，出站改写在该对象上原地完成并只序列化一次。
+// obj 为 nil（坏 JSON）时按 raw 原样发送，与既有语义一致。
+func (c *Client) ChatStreamParsed(ctx context.Context, a *auth.Auth, raw []byte, obj map[string]any, clientIP string, meta ChatMeta) (rc io.ReadCloser, status int, respBody []byte, err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	prepared := c.prepareBody(body, a.Realm(), a.UID, meta.ConversationID)
-	chatClient := c.chatHTTPFor(a)
-	if c.globalOn(a) {
-		prepared = ensureConsoleSystem(prepared)
+	prepared := raw
+	if obj != nil {
+		if out := c.prepareBodyFromObject(obj, a.Realm(), a.UID, meta.ConversationID, c.globalOn(a)); out != nil {
+			prepared = out
+		}
 	}
+	chatClient := c.chatHTTPFor(a)
 	// reqCtx 的 cancel 在每个出口显式调用（Do 失败 / ≥400 / 成功分支移交 monitorBody），
 	// 循环本身各分支必 return——无循环尾兜底代码（此前外层 var cancel 从未赋值 +
 	// 尾部不可达 cancel() 是潜伏 nil-panic，已删；chatPaths 恒非空由构造保证）。

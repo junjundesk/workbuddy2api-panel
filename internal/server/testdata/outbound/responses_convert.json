@@ -1,0 +1,93 @@
+{
+  "max_tokens": 64,
+  "messages": [
+    {
+      "content": "be brief",
+      "role": "system"
+    },
+    {
+      "content": "dev",
+      "role": "system"
+    },
+    {
+      "content": [
+        {
+          "text": "weather?",
+          "type": "text"
+        },
+        {
+          "image_url": {
+            "url": "https://x/y.png"
+          },
+          "type": "image_url"
+        }
+      ],
+      "role": "user"
+    },
+    {
+      "content": null,
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "function": {
+            "arguments": "{}",
+            "name": "get_weather"
+          },
+          "id": "c1",
+          "type": "function"
+        }
+      ]
+    },
+    {
+      "content": "sunny",
+      "role": "tool",
+      "tool_call_id": "c1"
+    }
+  ],
+  "model": "glm-5.2",
+  "prompt_cache_key": "wb2a-u1-33574bbebfa074e58f34f23840b43905",
+  "reasoning_effort": "high",
+  "response_format": {
+    "json_schema": {
+      "name": "s",
+      "schema": {
+        "type": "object"
+      }
+    },
+    "type": "json_schema"
+  },
+  "stream": true,
+  "stream_options": {
+    "include_usage": true
+  },
+  "tool_choice": "shell",
+  "tools": [
+    {
+      "function": {
+        "name": "get_weather",
+        "parameters": {
+          "type": "object"
+        }
+      },
+      "type": "function"
+    },
+    {
+      "function": {
+        "description": "run",
+        "name": "shell",
+        "parameters": {
+          "properties": {
+            "input": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "input"
+          ],
+          "type": "object"
+        }
+      },
+      "type": "function"
+    }
+  ]
+}

@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/junjundesk/workbuddy2api-panel/internal/redisstore"
+	"github.com/junjundesk/workbuddy2api-panel/internal/wire"
 )
 
 // entry 单条会话绑定。
@@ -333,37 +334,11 @@ func hashIndex(key string, n int) int {
 // 此闸，只发 user_id 的请求会借内容哈希重新获得粘性，使该契约在 fallback 路径失效
 // （上游 #169 同款回归修正）。这类客户端回落加权轮换。
 func ExtractKey(body []byte) string {
-	if len(body) == 0 {
+	c, err := wire.ParseChat(body)
+	if err != nil {
 		return ""
 	}
-	var obj map[string]any
-	if err := json.Unmarshal(body, &obj); err != nil {
-		return ""
-	}
-	if meta, ok := obj["metadata"].(map[string]any); ok {
-		if v := strOrEmpty(meta["conversation_id"]); v != "" {
-			return v
-		}
-		if v := strOrEmpty(meta["conversationId"]); v != "" {
-			return v
-		}
-	}
-	if v := strOrEmpty(obj["conversation_id"]); v != "" {
-		return v
-	}
-	if v := strOrEmpty(obj["conversationId"]); v != "" {
-		return v
-	}
-	// 5. prompt_cache_key：OpenAI 系的会话级前缀缓存键，语义就是"同一会话复用同一
-	//    前缀"，与粘性诉求同源。放显式会话键之后、派生键之前，不抢占优先级。
-	if v := strOrEmpty(obj["prompt_cache_key"]); v != "" {
-		return v
-	}
-	// 派生回退闸：带 user 维度标识的请求不派生（契约见上）。
-	if hasUserIDKey(obj) {
-		return ""
-	}
-	return deriveKey(obj)
+	return ExtractKeyWire(c)
 }
 
 // hasUserIDKey 报告已解析 body 是否携带 user 维度标识（metadata.user_id 或顶层

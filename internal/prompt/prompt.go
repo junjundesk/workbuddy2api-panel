@@ -56,14 +56,25 @@ func Rewrite(body []byte, systemPrompt string) []byte {
 	if err := json.Unmarshal(body, &obj); err != nil {
 		return body
 	}
+	RewriteObject(obj, systemPrompt)
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+// RewriteObject 是 Rewrite 的对象形态（原地改，返回是否改动）。供入站管线在
+// **同一次解析**上完成提示词改写，避免 decode→encode→再 decode 的重复往返。
+func RewriteObject(obj map[string]any, systemPrompt string) bool {
+	if obj == nil || systemPrompt == "" {
+		return false
+	}
 	msgs, ok := obj["messages"].([]any)
 	if !ok {
 		// 无 messages 字段或类型不符 → 插入单条 system 后原样保留其余字段。
 		obj["messages"] = []any{map[string]any{"role": "system", "content": systemPrompt}}
-		if out, err := json.Marshal(obj); err == nil {
-			return out
-		}
-		return body
+		return true
 	}
 	// 过滤掉所有 system/developer 消息，保留 user/assistant/tool 及其他角色。
 	kept := make([]any, 0, len(msgs)+1)
@@ -80,16 +91,11 @@ func Rewrite(body []byte, systemPrompt string) []byte {
 		kept = append(kept, m)
 	}
 	// 头部插入单条 system 消息（prepend 避免整体重排语义）。
-	rewritten := append(
+	obj["messages"] = append(
 		[]any{map[string]any{"role": "system", "content": systemPrompt}},
 		kept...,
 	)
-	obj["messages"] = rewritten
-	out, err := json.Marshal(obj)
-	if err != nil {
-		return body
-	}
-	return out
+	return true
 }
 
 // Append 解析 OpenAI 请求体并在"开头连续 system/developer 块"之后插入一条
@@ -107,7 +113,7 @@ func Rewrite(body []byte, systemPrompt string) []byte {
 // 边界判定须显式同时匹配 system 与 developer：归一（developer→system）在
 // 下游 prepareBody 的 normalizeRoles，Append 执行时开头块里的 developer
 // 还是 developer。网关消息角色用 system 而非 developer——上游 role 白名单
-// 不含 developer，插 developer 等于制造一次必然归一与多余的 11128 风险窗口。
+// 不含 developer，插 developer 等于制造一次必然归一与多余的 11-128 风险窗口。
 func Append(body []byte, systemPrompt string) []byte {
 	if len(body) == 0 || systemPrompt == "" {
 		return body
@@ -116,14 +122,23 @@ func Append(body []byte, systemPrompt string) []byte {
 	if err := json.Unmarshal(body, &obj); err != nil {
 		return body
 	}
+	AppendObject(obj, systemPrompt)
+	out, err := json.Marshal(obj)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+// AppendObject 是 Append 的对象形态（原地改，返回是否改动）。
+func AppendObject(obj map[string]any, systemPrompt string) bool {
+	if obj == nil || systemPrompt == "" {
+		return false
+	}
 	msgs, ok := obj["messages"].([]any)
 	if !ok {
-		// 无 messages 字段或类型不符 → 插入单条 system 后原样保留其余字段。
 		obj["messages"] = []any{map[string]any{"role": "system", "content": systemPrompt}}
-		if out, err := json.Marshal(obj); err == nil {
-			return out
-		}
-		return body
+		return true
 	}
 	// 扫描开头连续 system/developer 块，遇第一条非 system/developer 即停。
 	insertAt := 0
@@ -145,9 +160,5 @@ func Append(body []byte, systemPrompt string) []byte {
 	rewritten = append(rewritten, gw)
 	rewritten = append(rewritten, msgs[insertAt:]...)
 	obj["messages"] = rewritten
-	out, err := json.Marshal(obj)
-	if err != nil {
-		return body
-	}
-	return out
+	return true
 }

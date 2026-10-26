@@ -51,6 +51,12 @@ type Config struct {
 		// 400 "read body: ... i/o timeout"。缺省 "300s"；"0" = 不限制
 		//（慢速 body 可无限占用连接，自担风险）；改动需重启进程。
 		ReadTimeout string `json:"read_timeout"` // "300s"；"0" = 不限制
+
+		// ResponsesEarlyCreated /v1/responses 流式请求是否在**受理时**立即发
+		// response.created / response.in_progress（OpenAI 语义，缺省 true）。
+		// false = 旧行为：收到上游第一帧才发首事件（首事件时延 = 上游 TTFT）。
+		// 开局后调度/上游错误一律转成 response.failed 事件（HTTP 已是 200）。
+		ResponsesEarlyCreated bool `json:"responses_early_created"`
 	} `json:"server"`
 
 	Cooldown struct {
@@ -241,6 +247,8 @@ func Default() *Config {
 	c.Cooldown.SoftRate = "600s"
 	c.Cooldown.SoftRateMax = "2h"
 	c.Server.ReadTimeout = "300s"
+	c.Server.ResponsesEarlyCreated = true
+	c.Server.ResponsesEarlyCreated = true
 	c.Panel.PackageDetailLimit = 5
 	c.Logging.RequestArchiveEnabled = true
 	c.Logging.RequestRetentionDays = 7

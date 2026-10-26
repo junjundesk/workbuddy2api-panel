@@ -42,6 +42,7 @@ package upstream
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/junjundesk/workbuddy2api-panel/internal/wire"
 	"regexp"
 	"strings"
 	"time"
@@ -344,59 +345,11 @@ func parseMarkupParams(body string) (string, bool) {
 // 两个来源都为空 → 返回 nil，由调用方决定是否启用弱判定（见 NewMarkupRepair）。
 // 解析失败按空处理（不编造名单）。
 func ToolNameAllowlist(body []byte) map[string]bool {
-	var req struct {
-		Tools []struct {
-			Name     string `json:"name"`
-			Function *struct {
-				Name string `json:"name"`
-			} `json:"function"`
-		} `json:"tools"`
-		Functions []struct {
-			Name string `json:"name"`
-		} `json:"functions"`
-		Messages []struct {
-			ToolCalls []struct {
-				Function *struct {
-					Name string `json:"name"`
-				} `json:"function"`
-			} `json:"tool_calls"`
-			FunctionCall *struct {
-				Name string `json:"name"`
-			} `json:"function_call"`
-		} `json:"messages"`
-	}
-	if json.Unmarshal(body, &req) != nil {
+	c, err := wire.ParseChat(body)
+	if err != nil {
 		return nil
 	}
-	names := map[string]bool{}
-	for _, t := range req.Tools {
-		if t.Function != nil && t.Function.Name != "" {
-			names[t.Function.Name] = true
-			continue
-		}
-		if t.Name != "" {
-			names[t.Name] = true
-		}
-	}
-	for _, f := range req.Functions {
-		if f.Name != "" {
-			names[f.Name] = true
-		}
-	}
-	for _, m := range req.Messages {
-		for _, tc := range m.ToolCalls {
-			if tc.Function != nil && tc.Function.Name != "" {
-				names[tc.Function.Name] = true
-			}
-		}
-		if m.FunctionCall != nil && m.FunctionCall.Name != "" {
-			names[m.FunctionCall.Name] = true
-		}
-	}
-	if len(names) == 0 {
-		return nil
-	}
-	return names
+	return ToolNameAllowlistWire(c)
 }
 
 // RepairAggregatedResponse 在非流式聚合响应里把正文中的标记还原为 tool_calls。
