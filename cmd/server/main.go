@@ -148,14 +148,20 @@ func main() {
 	up := upstream.New()
 	// 分组代理：按账号运行期 group 查 groups.json。无代理配置返回 nil = 直连；
 	// 配置非法时 upstream 内部 fail-closed，不会回落到直连。
+	// groupID="" = 公共池（未分组账号），读 groups.json 的 public_proxy。
 	up.SetGroupProxyFunc(func(groupID string) *upstream.ProxyConfig {
-		g, ok := groupStore.Get(groupID)
-		if !ok || g.Proxy == nil {
+		var px *groups.Proxy
+		if groupID == "" {
+			px = groupStore.PublicProxy()
+		} else if g, ok := groupStore.Get(groupID); ok {
+			px = g.Proxy
+		}
+		if px == nil {
 			return nil
 		}
 		return &upstream.ProxyConfig{
-			Type: g.Proxy.Type, Host: g.Proxy.Host, Port: g.Proxy.Port,
-			Username: g.Proxy.Username, Password: g.Proxy.Password,
+			Type: px.Type, Host: px.Host, Port: px.Port,
+			Username: px.Username, Password: px.Password,
 		}
 	})
 

@@ -54,9 +54,7 @@ func (p *Panel) groupViews() []groupView {
 			CallPublic: g.CallPublic, HasKey: g.KeyHash != "", KeyHint: g.KeyHint,
 			MemberCount: len(g.Members), Members: g.Members, CreatedAt: g.CreatedAt,
 		}
-		if g.Proxy != nil {
-			v.Proxy = &proxyView{Type: g.Proxy.Type, Host: g.Proxy.Host, Port: g.Proxy.Port, Username: g.Proxy.Username, HasPassword: g.Proxy.Password != ""}
-		}
+		v.Proxy = toProxyView(g.Proxy)
 		for _, a := range all {
 			if a.Group != g.ID {
 				continue
@@ -85,8 +83,24 @@ func (p *Panel) applyGroupMeta() {
 	p.cfg.Pool.SetGroupMeta(meta)
 }
 
+// publicGroupID 面板 API 中代表公共池的保留 id（真实分组 id 恒为 g_ 前缀，不冲突）。
+const publicGroupID = "public"
+
+func toProxyView(px *groups.Proxy) *proxyView {
+	if px == nil {
+		return nil
+	}
+	return &proxyView{Type: px.Type, Host: px.Host, Port: px.Port, Username: px.Username, HasPassword: px.Password != ""}
+}
+
 func (p *Panel) groupsList(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"groups": p.groupViews()})
+	out := map[string]any{"groups": p.groupViews()}
+	if p.cfg.Groups != nil {
+		if v := toProxyView(p.cfg.Groups.PublicProxy()); v != nil {
+			out["public_proxy"] = v
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (p *Panel) groupCreate(w http.ResponseWriter, r *http.Request) {
@@ -233,6 +247,20 @@ func (p *Panel) groupSetProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 空密码保留旧密码，避免前端编辑时只显示掩码导致密码被清空。
+	if id == publicGroupID {
+		if old := p.cfg.Groups.PublicProxy(); proxy.Password == "" && old != nil {
+			proxy.Password = old.Password
+		}
+		if err := p.cfg.Groups.SetPublicProxy(proxy); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if p.cfg.Upstream != nil {
+			p.cfg.Upstream.InvalidateGroup("")
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "public_proxy": toProxyView(p.cfg.Groups.PublicProxy())})
+		return
+	}
 	old, ok := p.cfg.Groups.Get(id)
 	if !ok {
 		writeErr(w, http.StatusNotFound, "group not found")
@@ -249,6 +277,55 @@ func (p *Panel) groupSetProxy(w http.ResponseWriter, r *http.Request) {
 		p.cfg.Upstream.InvalidateGroup(id)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "group": p.groupView(id)})
+}
+
+// groupDeleteProxy 清除代理，恢复直连。id=public 表示公共池。
+func (p *Panel) groupDeleteProxy(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.Groups == nil {
+		writeErr(w, http.StatusNotImplemented, "groups not available")
+		return
+	}
+	id := r.PathValue("id")
+	var err error
+	cacheKey := id
+	if id == publicGroupID {
+		err = p.cfg.Groups.SetPublicProxy(nil)
+		cacheKey = ""
+	} else {
+		err = p.cfg.Groups.SetProxy(id, nil)
+	}
+	if err != nil {
+		status := http.StatusBadRequest
+		if os.IsNotExist(err) {
+			status = http.StatusNotFound
+		}
+		writeErr(w, status, err.Error())
+		return
+	}
+	if p.cfg.Upstream != nil {
+		p.cfg.Upstream.InvalidateGroup(cacheKey)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// groupRevealKey 返回分组密钥明文；旧分组只存哈希时返回 409，需轮换后才能查看。
+func (p *Panel) groupRevealKey(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.Groups == nil {
+		writeErr(w, http.StatusNotImplemented, "groups not available")
+		return
+	}
+	id := r.PathValue("id")
+	if _, ok := p.cfg.Groups.Get(id); !ok {
+		writeErr(w, http.StatusNotFound, "group not found")
+		return
+	}
+	key, ok := p.cfg.Groups.RevealKey(id)
+	if !ok {
+		writeErr(w, http.StatusConflict, "旧分组只保存了密钥哈希，无法查看明文；请轮换密钥后再查看")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "key": key})
 }
 
 func (p *Panel) groupTestProxy(w http.ResponseWriter, r *http.Request) {
@@ -286,7 +363,18 @@ func (p *Panel) accountSetGroup(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if p.cfg.Pool.AuthByUID(uid) == nil {
+		writeErr(w, http.StatusNotFound, "account not found")
+		return
+	}
 	groupID := strings.TrimSpace(req.Group)
+	if groupID == publicGroupID {
+		groupID = ""
+	}
+	if p.cfg.Groups.GroupOf(uid) == groupID {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "uid": uid, "group": groupID, "unchanged": true})
+		return
+	}
 	if groupID != "" {
 		if _, ok := p.cfg.Groups.Get(groupID); !ok {
 			writeErr(w, http.StatusBadRequest, "unknown group")
@@ -306,6 +394,68 @@ func (p *Panel) accountSetGroup(w http.ResponseWriter, r *http.Request) {
 	}
 	p.cfg.Pool.SetGroup(uid, groupID)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "uid": uid, "group": groupID})
+}
+
+// exportAccount 面板导出格式（workbuddy-accounts v1，camelCase），可被 import/cockpit 原样导入。
+type exportAccount struct {
+	UID          string `json:"uid"`
+	Nickname     string `json:"nickname,omitempty"`
+	Realm        string `json:"realm,omitempty"`
+	Domain       string `json:"domain,omitempty"`
+	EnterpriseID string `json:"enterpriseId,omitempty"`
+	AccessToken  string `json:"accessToken"`
+	RefreshToken string `json:"refreshToken"`
+	ExpiresAt    int64  `json:"expiresAt"`
+	Group        string `json:"group,omitempty"`
+}
+
+// accountsExport 导出所选账号凭证（含 access/refresh token，属敏感数据，仅鉴权后可用）。
+//
+//	POST /panel/api/accounts/export  {"uids":["..."]}
+func (p *Panel) accountsExport(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		UIDs []string `json:"uids"`
+	}
+	if err := decodeJSONBody(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if len(req.UIDs) == 0 {
+		writeErr(w, http.StatusBadRequest, "uids is required")
+		return
+	}
+	seen := map[string]bool{}
+	out := make([]exportAccount, 0, len(req.UIDs))
+	var missing []string
+	for _, uid := range req.UIDs {
+		uid = strings.TrimSpace(uid)
+		if uid == "" || seen[uid] {
+			continue
+		}
+		seen[uid] = true
+		a := p.cfg.Pool.AuthByUID(uid)
+		if a == nil {
+			missing = append(missing, uid)
+			continue
+		}
+		out = append(out, exportAccount{
+			UID: a.UID, Nickname: a.Nickname, Realm: a.Realm(), Domain: a.Domain,
+			EnterpriseID: a.EnterpriseID, AccessToken: a.AccessToken, RefreshToken: a.RefreshToken,
+			ExpiresAt: a.ExpiresAt, Group: a.Group(),
+		})
+	}
+	if len(out) == 0 {
+		writeErr(w, http.StatusNotFound, "no matching accounts")
+		return
+	}
+	log.Printf("panel: export accounts count=%d missing=%d", len(out), len(missing))
+	name := fmt.Sprintf("workbuddy-accounts-%s.json", time.Now().Format("20060102-150405"))
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"format": "workbuddy-accounts", "version": 1, "exported_at": time.Now().Unix(),
+		"accounts": out, "missing": missing,
+	})
 }
 
 func decodeJSONBody(r *http.Request, out any) error {

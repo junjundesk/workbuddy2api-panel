@@ -1,7 +1,7 @@
 'use strict';
 const $ = id => document.getElementById(id);
 const COLORS = ['#5b7cfa','#3ddc97','#f5b544','#c084fc','#f0655f','#38bdf8','#fb923c','#a3e635'];
-const state = { groups: [], accounts: [], selected: 'public', editing: null, groupColor: COLORS[0], proxyGroup: null, proxyType: 'socks5h', importGroup: null, importTab: 'single', confirm: null };
+const state = { groups: [], accounts: [], selected: 'public', editing: null, groupColor: COLORS[0], proxyGroup: null, proxyType: 'socks5h', importGroup: null, importTab: 'single', confirm: null, publicProxy: null, sel: new Set(), revealed: {}, moveUids: [] };
 
 function esc(s) { return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 function fmt(n) { return Number(n || 0).toLocaleString('zh-CN'); }
@@ -33,6 +33,9 @@ async function load() {
     const [gd, ov] = await Promise.all([api('groups'), api('overview')]);
     state.groups = gd.groups || [];
     state.accounts = ov.accounts || [];
+    state.publicProxy = gd.public_proxy || null;
+    const live = new Set(state.accounts.map(a => a.uid));
+    Array.from(state.sel).forEach(u => { if (!live.has(u)) state.sel.delete(u); });
     if (state.selected !== 'public' && !groupOf(state.selected)) state.selected = 'public';
     $('navState').textContent = '服务正常';
     renderAll();
@@ -53,7 +56,7 @@ function renderStats() {
   const pub = publicAccounts();
   const groupAcc = state.accounts.filter(a => a.group);
   let keys = 0, proxies = 0, healthy = 0;
-  state.groups.forEach(g => { if (g.has_key) keys++; if (g.proxy) proxies++; });
+  state.groups.forEach(g => { if (g.has_key) keys++; if (g.proxy) proxies++; }); if (state.publicProxy) proxies++;
   state.accounts.forEach(a => { if (a.group && !a.disabled && !a.cooling && !a.paused) healthy++; });
   const shared = state.groups.filter(g => g.shared_pool).length;
   $('stats').innerHTML =
@@ -76,16 +79,20 @@ function renderRail() {
   $('railList').innerHTML = html;
 }
 function keyCard(g) {
-  const hint = g.has_key ? esc(g.key_hint || '已生成') : '尚未生成';
+  const shown = state.revealed[g.id];
+  const hint = shown ? esc(shown) : (g.has_key ? esc(g.key_hint || '已生成') : '尚未生成');
+  const btns = g.has_key ? '<button class="xs ghost" data-act="reveal-key">' + (shown ? '隐藏' : '显示') + '</button><button class="xs ghost" data-act="copy-group-key">复制</button>' : '';
   return '<div class="card"><div class="card-h"><h3>分组密钥</h3><span class="tag accent">独立鉴权</span></div>' +
-    '<div class="kline"><code>' + hint + '</code><button class="xs" data-act="rotate-key">' + (g.has_key ? '轮换' : '生成') + '</button></div>' +
-    '<div class="hint">分组密钥只显示一次；此处仅保留掩码。</div><div class="card-f"><span>Bearer 此密钥只能访问本组</span></div></div>';
+    '<div class="kline"><code>' + hint + '</code>' + btns + '<button class="xs" data-act="rotate-key">' + (g.has_key ? '轮换' : '生成') + '</button></div>' +
+    '<div class="hint">点击「显示」查看完整密钥；旧版本创建的分组只存了哈希，需轮换一次后才能查看。</div><div class="card-f"><span>Bearer 此密钥只能访问本组</span></div></div>';
 }
 function proxyCard(g) {
-  const p = g.proxy;
+  const isPub = !g;
+  const p = isPub ? state.publicProxy : g.proxy;
+  const clr = p ? '<button class="xs ghost danger" data-act="clear-proxy">清除</button>' : '';
   return '<div class="card"><div class="card-h"><h3>网络代理</h3>' + (p ? '<span class="tag ok">已配置</span>' : '<span class="tag mute">未配置</span>') + '</div>' +
-    (p ? '<div class="proxy-line"><span class="proto ' + esc(p.type) + '">' + esc(p.type.toUpperCase()) + '</span><code>' + esc(p.host) + ':' + p.port + '</code></div><div class="hint">覆盖聊天、OAuth、余额、模型探测与全部任务。</div>' : '<div class="hint">未配置时本组使用服务器直连出口。</div>') +
-    '<div class="card-f"><span>本组全部出站请求</span><button class="xs ghost" data-act="edit-proxy">' + (p ? '编辑' : '配置') + '</button></div></div>';
+    (p ? '<div class="proxy-line"><span class="proto ' + esc(p.type) + '">' + esc(p.type.toUpperCase()) + '</span><code>' + esc(p.host) + ':' + p.port + '</code></div><div class="hint">覆盖聊天、OAuth、余额、模型探测与全部任务。</div>' : '<div class="hint">' + (isPub ? '未配置时公共池（未分组账号）使用服务器直连出口；共享分组账号仍走各自分组代理。' : '未配置时本组使用服务器直连出口。') + '</div>') +
+    '<div class="card-f"><span>' + (isPub ? '未分组账号全部出站请求' : '本组全部出站请求') + '</span><span class="grow"></span>' + clr + '<button class="xs ghost" data-act="edit-proxy">' + (p ? '编辑' : '配置') + '</button></div></div>';
 }
 function shareCard(g) {
   return '<div class="card"><div class="card-h"><h3>共享池</h3><span class="tag ' + (g.shared_pool || g.call_public ? 'warn' : 'mute') + '">' + (g.shared_pool || g.call_public ? '已开启共享' : '双向隔离') + '</span></div>' +
@@ -107,8 +114,9 @@ function accActs(a, mode) {
   h += b('models', '模型', '', '在控制台打开模型面板');
   h += frozen ? b('revive', '解冻', 'primary') : (a.paused ? b('resume', '恢复选号', 'primary') : b('pause', '暂停选号', '', '退出选号，但照常签到 / 保活 / 刷新余额'));
   if (!a.disabled) h += b('disable', '禁用');
-  if (mode === 'group') h += '<button class="xs ghost" data-act="move-account" data-uid="' + u + '">移出</button>';
-  else if (a.group) h += '<button class="xs ghost" data-act="select" data-id="' + esc(a.group) + '">前往分组</button>';
+  h += '<button class="xs ghost" data-act="move-account" data-uid="' + u + '" title="移动到公共池或其他分组">移动</button>';
+  if (mode !== 'group' && a.group) h += '<button class="xs ghost" data-act="select" data-id="' + esc(a.group) + '">前往分组</button>';
+  h += '<button class="xs ghost" data-act="export-account" data-uid="' + u + '" title="导出该账号 JSON（含凭证）">导出</button>';
   h += '<button class="xs ghost danger" data-act="remove-account" data-uid="' + u + '">移除</button>';
   return h;
 }
@@ -118,13 +126,13 @@ function credText(a) {
   return fmt(a.credits) + (a.credits_total > 0 ? '<span style="color:var(--ink-3)">/' + fmt(a.credits_total) + '</span>' : '');
 }
 function rowsHtml(list, mode) {
-  if (!list.length) return '<tr><td colspan="9"><div class="empty"><div class="big">' + (mode === 'group' ? '这个分组还没有账号' : '没有账号') + '</div>点击「添加账号」或「导入 JSON」。</div></td></tr>';
+  if (!list.length) return '<tr><td colspan="10"><div class="empty"><div class="big">' + (mode === 'group' ? '这个分组还没有账号' : '没有账号') + '</div>点击「添加账号」或「导入 JSON」。</div></td></tr>';
   return list.map(a => {
     const st = statusOf(a);
     const acts = accActs(a, mode);
     const tags = (a.realm === 'global' ? ' <span class="tag accent">国际版</span>' : '') + (a.enterprise ? ' <span class="tag accent">企业版</span>' : '');
     const note = a.reason ? '<div class="id" style="margin-top:3px">' + esc(a.reason) + '</div>' : '';
-    return '<tr class="' + st.cls + '"><td class="mark"><i></i></td><td><div class="who"><div class="nm">' + esc(a.nickname || a.uid.slice(0, 8)) + tags + '</div><div class="id">' + esc(a.uid) + '</div></div></td><td><span class="tag ' + st.tag + '">' + st.text + '</span>' + note + '</td><td class="num">' + credText(a) + '</td><td class="num">' + fmt(a.success_count) + ' / ' + fmt(a.err_total) + '</td><td class="num">' + (a.in_flight || 0) + '</td><td class="num">' + (a.token_usage && a.token_usage.total_tokens ? fmtTokens(a.token_usage.total_tokens) : '—') + '</td><td class="num">' + (a.realm || 'cn').toUpperCase() + '</td><td><div class="acts">' + acts + '</div></td></tr>';
+    return '<tr class="' + st.cls + '"><td class="mark"><i></i></td><td class="ck"><input type="checkbox" data-act="sel-one" data-uid="' + esc(a.uid) + '"' + (state.sel.has(a.uid) ? ' checked' : '') + '></td><td><div class="who"><div class="nm">' + esc(a.nickname || a.uid.slice(0, 8)) + tags + '</div><div class="id">' + esc(a.uid) + '</div></div></td><td><span class="tag ' + st.tag + '">' + st.text + '</span>' + note + '</td><td class="num">' + credText(a) + '</td><td class="num">' + fmt(a.success_count) + ' / ' + fmt(a.err_total) + '</td><td class="num">' + (a.in_flight || 0) + '</td><td class="num">' + (a.token_usage && a.token_usage.total_tokens ? fmtTokens(a.token_usage.total_tokens) : '—') + '</td><td class="num">' + (a.realm || 'cn').toUpperCase() + '</td><td><div class="acts">' + acts + '</div></td></tr>';
   }).join('');
 }
 // 分组批量操作，与主页分组卡片同口径：签到跳过禁用 / 企业版；任务执行只跑能做成长任务的号。
@@ -138,7 +146,7 @@ function groupBulkBtns(list) {
   return h;
 }
 function accountsBox(list, mode) {
-  return '<div class="box"><header><h3>' + (mode === 'group' ? '分组账号' : '公共池账号') + ' <span class="hint">' + (mode === 'group' ? '仅本组密钥可见' : '未分组 + 共享') + '</span></h3><span class="grow"></span>' + (mode === 'group' ? groupBulkBtns(list) : '') + '<button class="xs" data-act="add-account">添加账号</button><button class="xs" data-act="import">导入 JSON</button></header><div class="acc-wrap"><table class="acc"><thead><tr><th class="mark"></th><th>账号</th><th>状态</th><th>积分</th><th>成功 / 失败</th><th>在途</th><th>用量</th><th>域</th><th></th></tr></thead><tbody>' + rowsHtml(list, mode) + '</tbody></table></div><div class="table-foot">共 ' + list.length + ' 个账号</div></div>';
+  return '<div class="box"><header><h3>' + (mode === 'group' ? '分组账号' : '公共池账号') + ' <span class="hint">' + (mode === 'group' ? '仅本组密钥可见' : '未分组 + 共享') + '</span></h3><span class="grow"></span>' + (mode === 'group' ? groupBulkBtns(list) : '') + '<span class="hint" id="selInfo"></span><button class="xs" data-act="move-sel" disabled>移动所选</button><button class="xs" data-act="export-sel" disabled title="导出所选账号 JSON（含凭证），可在其他实例直接导入">导出所选</button><button class="xs" data-act="add-account">添加账号</button><button class="xs" data-act="import">导入 JSON</button></header><div class="acc-wrap"><table class="acc"><thead><tr><th class="mark"></th><th class="ck"><input type="checkbox" data-act="sel-all" title="全选当前列表"></th><th>账号</th><th>状态</th><th>积分</th><th>成功 / 失败</th><th>在途</th><th>用量</th><th>域</th><th></th></tr></thead><tbody>' + rowsHtml(list, mode) + '</tbody></table></div><div class="table-foot">共 ' + list.length + ' 个账号</div></div>';
 }
 function renderDetail() {
   const g = selectedGroup();
@@ -146,7 +154,7 @@ function renderDetail() {
     const list = publicAccounts();
     $('detail').innerHTML = '<div class="detail-head"><div class="dh-title"><span class="group-mark" style="--c:var(--accent)"></span><div><h1>公共号池</h1><div class="sub">未分组账号 + 已进入共享池的分组账号</div></div></div><div class="dh-acts"><span class="tag accent">默认池</span></div></div>' +
       '<div class="gp-cards"><div class="card"><div class="card-h"><h3>公共池</h3><span class="tag mute">config.api_key</span></div><div class="hint">公共池沿用现有主密钥；分组密钥不能反向访问公共池。</div></div>' +
-      '<div class="card"><div class="card-h"><h3>网络出口</h3><span class="tag mute">直连</span></div><div class="hint">公共池账号不套用分组代理。</div></div>' +
+      proxyCard(null) +
       '<div class="card"><div class="card-h"><h3>共享来源</h3><span class="tag ' + (state.groups.filter(x => x.shared_pool).length ? 'warn' : 'mute') + '">' + state.groups.filter(x => x.shared_pool).length + ' 个分组</span></div><div class="hint">只有开启「进入公共池」的分组才会出现在这里。</div></div></div>' + accountsBox(list, 'public');
     return;
   }
@@ -154,7 +162,36 @@ function renderDetail() {
   $('detail').innerHTML = '<div class="detail-head"><div class="dh-title"><span class="group-mark" style="--c:' + esc(g.color || '#5b7cfa') + '"></span><div><h1>' + esc(g.name) + '</h1><div class="sub">' + esc(g.id) + ' · ' + g.member_count + ' 个账号</div></div></div><div class="dh-acts"><span class="tag ' + (g.shared_pool ? 'warn' : 'accent') + '">' + (g.shared_pool ? '共享分组' : '独立分组') + '</span><button class="xs" data-act="edit-group">编辑</button><button class="xs danger" data-act="delete-group">删除</button></div></div>' +
     '<div class="gp-cards">' + keyCard(g) + proxyCard(g) + shareCard(g) + '</div>' + accountsBox(list, 'group');
 }
-function renderAll() { renderStats(); renderRail(); renderDetail(); }
+function renderAll() { renderStats(); renderRail(); renderDetail(); updateSelUI(); }
+function visibleAccounts() { const g = selectedGroup(); return g ? groupAccounts(g.id) : publicAccounts(); }
+function updateSelUI() {
+  const list = visibleAccounts(); const n = list.filter(a => state.sel.has(a.uid)).length;
+  const info = $('selInfo'); if (info) info.textContent = n ? '已选 ' + n : '';
+  document.querySelectorAll('[data-act="move-sel"],[data-act="export-sel"]').forEach(b => { b.disabled = !n; });
+  const all = document.querySelector('[data-act="sel-all"]'); if (all) { all.checked = n > 0 && n === list.length; all.indeterminate = n > 0 && n < list.length; }
+}
+function selectedVisible() { return visibleAccounts().filter(a => state.sel.has(a.uid)).map(a => a.uid); }
+async function exportAccounts(uids) {
+  if (!uids.length) { toast('请先勾选账号', 'err'); return; }
+  const r = await api('accounts/export', { method: 'POST', body: JSON.stringify({ uids }) });
+  const data = { format: r.format, version: r.version, exported_at: r.exported_at, accounts: r.accounts };
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob); const link = document.createElement('a');
+  const ts = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
+  link.href = url; link.download = uids.length === 1 ? 'workbuddy-' + uids[0] + '.json' : 'workbuddy-accounts-' + ts + '.json';
+  document.body.appendChild(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+  toast('已导出 ' + r.accounts.length + ' 个账号' + (r.missing && r.missing.length ? '（' + r.missing.length + ' 个不存在已跳过）' : '') + '；文件含登录凭证，请妥善保管', 'warn');
+}
+function openMoveModal(uids) {
+  state.moveUids = uids;
+  const cur = new Set(uids.map(u => { const a = state.accounts.find(x => x.uid === u); return a ? (a.group || '') : ''; }));
+  const only = cur.size === 1 ? Array.from(cur)[0] : null;
+  const opts = [{ id: '', name: '公共号池（未分组）' }].concat(state.groups.map(g => ({ id: g.id, name: g.name })));
+  $('moveTarget').innerHTML = opts.map(o => '<option value="' + esc(o.id) + '"' + (o.id === only ? ' disabled' : '') + '>' + esc(o.name) + (o.id === only ? '（当前）' : '') + '</option>').join('');
+  const first = opts.find(o => o.id !== only); $('moveTarget').value = first ? first.id : '';
+  $('moveHint').textContent = '将 ' + uids.length + ' 个账号移动到目标号池（一个账号只能属于一个分组）。';
+  openVeil('moveVeil');
+}
 function showKeyModal(key) { $('keyBig').textContent = key; openVeil('keyVeil'); }
 function openGroupModal(edit) {
   state.editing = edit ? edit.id : null;
@@ -168,8 +205,10 @@ function openGroupModal(edit) {
 }
 function proxyHint(t) { if (t === 'http') return 'HTTP CONNECT；目标域名由本机解析。'; if (t === 'socks5') return 'SOCKS5（本地 DNS）：先解析目标域名再由代理转发 IP。'; return 'SOCKS5H（远程 DNS）：域名交给代理解析，适合避免 DNS 泄漏。'; }
 function openProxyModal(g) {
-  state.proxyGroup = g.id;
-  const p = g.proxy;
+  state.proxyGroup = g ? g.id : 'public';
+  const p = g ? g.proxy : state.publicProxy;
+  $('proxyScope').textContent = g ? '本组全部出站请求（聊天、OAuth、余额、模型探测、签到/保活/旅行/活跃任务）都走此代理。' : '公共池（未分组账号）全部出站请求都走此代理；共享分组账号仍走各自分组代理。';
+  $('proxyClear').hidden = !p;
   state.proxyType = p ? p.type : 'socks5h';
   $('proxyHost').value = p ? p.host : '';
   $('proxyPort').value = p ? p.port : 1080;
@@ -224,7 +263,38 @@ document.addEventListener('click', async e => {
   const el = e.target.closest('[data-act]'); if (!el) return;
   const act = el.dataset.act;
   try {
-    if (act === 'select') { state.selected = el.dataset.id; renderAll(); return; }
+    if (act === 'select') { state.selected = el.dataset.id; state.sel.clear(); renderAll(); return; }
+    if (act === 'sel-one') { if (el.checked) state.sel.add(el.dataset.uid); else state.sel.delete(el.dataset.uid); updateSelUI(); return; }
+    if (act === 'sel-all') { const on = el.checked; visibleAccounts().forEach(a => { if (on) state.sel.add(a.uid); else state.sel.delete(a.uid); }); document.querySelectorAll('[data-act="sel-one"]').forEach(c => { c.checked = on; }); updateSelUI(); return; }
+    if (act === 'export-sel') { await exportAccounts(selectedVisible()); return; }
+    if (act === 'export-account') { await exportAccounts([el.dataset.uid]); return; }
+    if (act === 'move-sel') { const u = selectedVisible(); if (!u.length) { toast('请先勾选账号', 'err'); return; } openMoveModal(u); return; }
+    if (act === 'move-do') {
+      const target = $('moveTarget').value; const uids = state.moveUids.slice(); let ok = 0, fail = 0, lastErr = '';
+      for (const uid of uids) {
+        try { await api('accounts/' + encodeURIComponent(uid) + '/group', { method: 'POST', body: JSON.stringify({ group: target }) }); ok++; }
+        catch (e2) { fail++; lastErr = e2.message; }
+      }
+      closeVeil('moveVeil'); state.sel.clear(); await load();
+      const tg = target ? groupOf(target) : null;
+      toast('已移动 ' + ok + ' 个账号到' + (tg ? '「' + tg.name + '」' : '公共号池') + (fail ? '，失败 ' + fail + '（' + lastErr + '）' : ''), fail ? 'err' : 'ok'); return;
+    }
+    if (act === 'reveal-key') {
+      const g = selectedGroup(); if (!g) return;
+      if (state.revealed[g.id]) { delete state.revealed[g.id]; renderDetail(); updateSelUI(); return; }
+      const r = await api('groups/' + g.id + '/key'); state.revealed[g.id] = r.key; renderDetail(); updateSelUI(); return;
+    }
+    if (act === 'copy-group-key') {
+      const g = selectedGroup(); if (!g) return;
+      const k = state.revealed[g.id] || (await api('groups/' + g.id + '/key')).key; copyText(k); return;
+    }
+    if (act === 'clear-proxy' || act === 'proxy-clear') {
+      const g = act === 'proxy-clear' ? (state.proxyGroup === 'public' ? null : groupOf(state.proxyGroup)) : selectedGroup();
+      const id = g ? g.id : 'public';
+      openConfirm('清除代理', '<div class="hint">清除后' + (g ? '「' + esc(g.name) + '」' : '公共池') + '的出站请求将改为服务器直连。</div>', '清除', async () => {
+        await api('groups/' + id + '/proxy', { method: 'DELETE' }); closeVeil('confirmVeil'); closeVeil('proxyVeil'); await load(); toast('代理已清除，恢复直连', 'ok');
+      }); return;
+    }
     if (act === 'new-group') { openGroupModal(null); return; }
     if (act === 'edit-group') { const g = selectedGroup(); if (g) openGroupModal(g); return; }
     if (act === 'group-color') { state.groupColor = el.dataset.color; document.querySelectorAll('#groupColors .swatch').forEach(b => b.classList.toggle('on', b.dataset.color === state.groupColor)); return; }
@@ -247,7 +317,7 @@ document.addEventListener('click', async e => {
     if (act === 'rotate-key') {
       const g = selectedGroup(); if (!g) return;
       const r = await api('groups/' + g.id + '/key/rotate', { method: 'POST' });
-      showKeyModal(r.key); await load(); toast('新密钥已生成，旧密钥已失效', 'warn'); return;
+      delete state.revealed[g.id]; showKeyModal(r.key); await load(); toast('新密钥已生成，旧密钥已失效', 'warn'); return;
     }
     if (act === 'toggle-shared' || act === 'toggle-call') {
       const g = selectedGroup(); if (!g) return;
@@ -256,7 +326,7 @@ document.addEventListener('click', async e => {
       await api('groups/' + g.id, { method: 'PATCH', body: JSON.stringify(body) });
       await load(); toast('共享设置已更新', 'ok'); return;
     }
-    if (act === 'edit-proxy') { const g = selectedGroup(); if (g) openProxyModal(g); return; }
+    if (act === 'edit-proxy') { openProxyModal(selectedGroup() || null); return; }
     if (act === 'proxy-type') { state.proxyType = el.dataset.type; updateProxyUI(); return; }
     if (act === 'proxy-save') {
       const body = { type: state.proxyType, host: $('proxyHost').value.trim(), port: parseInt($('proxyPort').value, 10) || 0, username: $('proxyUser').value.trim(), password: $('proxyPass').value };
@@ -348,11 +418,7 @@ document.addEventListener('click', async e => {
       finally { el.disabled = false; }
       return;
     }
-    if (act === 'move-account') {
-      const uid = el.dataset.uid;
-      await api('accounts/' + encodeURIComponent(uid) + '/group', { method: 'POST', body: JSON.stringify({ group: '' }) });
-      await load(); toast('已移到公共池', 'ok'); return;
-    }
+    if (act === 'move-account') { openMoveModal([el.dataset.uid]); return; }
     if (act === 'remove-account') {
       const uid = el.dataset.uid;
       openConfirm('移除账号', '<div class="hint">移除 ' + esc(uid) + ' 将删除池状态与 auths/ 下的凭证文件，且不可恢复。</div>', '移除', async () => {

@@ -31,16 +31,18 @@ type Proxy struct {
 
 // Group 一个号池分组。
 type Group struct {
-	ID         string    `json:"id"`
-	Name       string    `json:"name"`
-	Color      string    `json:"color,omitempty"`
-	SharedPool bool      `json:"shared_pool"`
-	CallPublic bool      `json:"call_public"`
-	KeyHash    string    `json:"key_hash,omitempty"`
-	KeyHint    string    `json:"key_hint,omitempty"`
-	CreatedAt  time.Time `json:"created_at"`
-	Proxy      *Proxy    `json:"proxy,omitempty"`
-	Members    []string  `json:"members"`
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Color      string `json:"color,omitempty"`
+	SharedPool bool   `json:"shared_pool"`
+	CallPublic bool   `json:"call_public"`
+	KeyHash    string `json:"key_hash,omitempty"`
+	KeyHint    string `json:"key_hint,omitempty"`
+	// Key 分组密钥明文（groups.json 0600 落盘，供面板手动查看）；旧分组可能为空。
+	Key       string    `json:"key,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	Proxy     *Proxy    `json:"proxy,omitempty"`
+	Members   []string  `json:"members"`
 }
 
 // Meta 是 pool 选号需要的分组策略快照（不含密钥/代理等敏感配置）。
@@ -50,8 +52,9 @@ type Meta struct {
 }
 
 type fileFormat struct {
-	Version int     `json:"version"`
-	Groups  []Group `json:"groups"`
+	Version     int     `json:"version"`
+	PublicProxy *Proxy  `json:"public_proxy,omitempty"`
+	Groups      []Group `json:"groups"`
 }
 
 // Store 分组注册表。所有导出方法并发安全；写操作落盘 groups.json。
@@ -60,6 +63,8 @@ type Store struct {
 	path   string
 	groups map[string]*Group
 	byKey  map[string]string // key hash -> group id
+	// publicProxy 公共池（未分组账号）出站代理；nil = 直连。
+	publicProxy *Proxy
 }
 
 // Load 读取 groups.json；文件不存在时返回空注册表（不是错误）。
@@ -79,6 +84,7 @@ func Load(path string) (*Store, error) {
 	if err := json.Unmarshal(raw, &f); err != nil {
 		return nil, fmt.Errorf("parse groups.json: %w", err)
 	}
+	s.publicProxy = normalizeProxy(f.PublicProxy)
 	for i := range f.Groups {
 		g := f.Groups[i]
 		if strings.TrimSpace(g.ID) == "" || strings.TrimSpace(g.Name) == "" {
@@ -168,7 +174,7 @@ func (s *Store) Create(name, color string, shared, callPublic bool) (Group, stri
 	}
 	g := &Group{
 		ID: id, Name: name, Color: strings.TrimSpace(color), SharedPool: shared,
-		CallPublic: callPublic, KeyHash: hash, KeyHint: hint, CreatedAt: time.Now(),
+		CallPublic: callPublic, KeyHash: hash, KeyHint: hint, Key: key, CreatedAt: time.Now(),
 		Members: []string{},
 	}
 	s.mu.Lock()
@@ -233,13 +239,62 @@ func (s *Store) SetProxy(id string, p *Proxy) error {
 	if !ok {
 		return os.ErrNotExist
 	}
+	var np *Proxy
 	if p != nil {
-		if normalizeProxy(p) == nil {
+		cp := *p
+		if np = normalizeProxy(&cp); np == nil {
 			return fmt.Errorf("invalid proxy config")
 		}
 	}
-	g.Proxy = normalizeProxy(p)
-	return s.saveLocked()
+	old := g.Proxy
+	g.Proxy = np
+	if err := s.saveLocked(); err != nil {
+		g.Proxy = old
+		return err
+	}
+	return nil
+}
+
+// PublicProxy 返回公共池代理副本；nil = 直连。
+func (s *Store) PublicProxy() *Proxy {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.publicProxy == nil {
+		return nil
+	}
+	p := *s.publicProxy
+	return &p
+}
+
+// SetPublicProxy 设置/清除公共池代理。p=nil 表示直连。
+func (s *Store) SetPublicProxy(p *Proxy) error {
+	var np *Proxy
+	if p != nil {
+		cp := *p
+		if np = normalizeProxy(&cp); np == nil {
+			return fmt.Errorf("invalid proxy config")
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	old := s.publicProxy
+	s.publicProxy = np
+	if err := s.saveLocked(); err != nil {
+		s.publicProxy = old
+		return err
+	}
+	return nil
+}
+
+// RevealKey 返回分组密钥明文；旧分组（只存哈希）返回 false。
+func (s *Store) RevealKey(id string) (string, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	g, ok := s.groups[id]
+	if !ok || g.Key == "" {
+		return "", false
+	}
+	return g.Key, true
 }
 
 // RotateKey 轮换分组密钥，返回新明文密钥。
@@ -254,14 +309,14 @@ func (s *Store) RotateKey(id string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	oldHash := g.KeyHash
-	g.KeyHash, g.KeyHint = hash, hint
+	oldHash, oldHint, oldKey := g.KeyHash, g.KeyHint, g.Key
+	g.KeyHash, g.KeyHint, g.Key = hash, hint, key
 	s.byKey[hash] = id
 	if oldHash != "" {
 		delete(s.byKey, oldHash)
 	}
 	if err := s.saveLocked(); err != nil {
-		g.KeyHash = oldHash
+		g.KeyHash, g.KeyHint, g.Key = oldHash, oldHint, oldKey
 		delete(s.byKey, hash)
 		if oldHash != "" {
 			s.byKey[oldHash] = id
@@ -380,7 +435,7 @@ func (s *Store) saveLocked() error {
 	if strings.TrimSpace(s.path) == "" {
 		return nil
 	}
-	f := fileFormat{Version: 1, Groups: make([]Group, 0, len(s.groups))}
+	f := fileFormat{Version: 1, PublicProxy: s.publicProxy, Groups: make([]Group, 0, len(s.groups))}
 	for _, g := range s.groups {
 		f.Groups = append(f.Groups, *cloneGroup(g))
 	}

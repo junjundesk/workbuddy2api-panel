@@ -116,7 +116,11 @@ func doJSON(client *http.Client, method, fullURL, bearer string, body io.Reader,
 
 // loginHTTPFor 返回分组 OAuth 专用 client（30s 超时，复用分组代理 Transport）。
 func (p *Panel) loginHTTPFor(group string) *http.Client {
-	if group == "" || p.cfg.Upstream == nil {
+	if p.cfg.Upstream == nil {
+		return loginHTTP
+	}
+	// 公共池未配置代理时沿用 loginHTTP 直连；配置了则同样走公共池代理。
+	if group == "" && (p.cfg.Groups == nil || p.cfg.Groups.PublicProxy() == nil) {
 		return loginHTTP
 	}
 	hc := p.cfg.Upstream.HTTPForGroup(group)

@@ -736,6 +736,7 @@ func (c *Client) SetGroupProxyFunc(fn func(group string) *ProxyConfig) {
 }
 
 // InvalidateGroup 在分组代理配置变更后关闭旧连接并删除缓存，下一请求重建。
+// group="" 对应公共池代理。
 func (c *Client) InvalidateGroup(group string) {
 	c.proxyMu.Lock()
 	if gc := c.groupClients[group]; gc != nil {
@@ -770,13 +771,14 @@ func (c *Client) baseTransport() *http.Transport {
 	return newTransport()
 }
 
-// clientFor 返回分组专用 client；无代理配置时回落默认 client（公共池直连）。
+// clientFor 返回分组专用 client；无代理配置时回落默认 client（直连）。
+// group="" 表示公共池：proxyOf("") 返回公共池代理（nil = 直连），缓存键同为 ""。
 // 代理配置非法时返回永远报错的 client（fail-closed，不回落直连）。
 func (c *Client) clientFor(group string, chat bool) *http.Client {
 	c.proxyMu.RLock()
 	proxyFn := c.proxyOf
 	c.proxyMu.RUnlock()
-	if group == "" || proxyFn == nil {
+	if proxyFn == nil {
 		if chat {
 			return c.chatHTTP()
 		}
@@ -823,7 +825,7 @@ func (c *Client) clientFor(group string, chat bool) *http.Client {
 	return gc.http
 }
 
-// httpFor 按账号运行期分组选择 client；公共池走默认直连 client。
+// httpFor 按账号运行期分组选择 client；公共池走公共池代理（未配置则直连）。
 func (c *Client) httpFor(a *auth.Auth) *http.Client {
 	if a == nil {
 		return c.HTTP
