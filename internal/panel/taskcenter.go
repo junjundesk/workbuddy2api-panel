@@ -6,7 +6,7 @@
 //     汇总出"未完成且可自动化"的待办清单（只读，不执行）。
 //   - 执行队列（run_queue + queue）：把待办项按账号分组排队执行——账号内
 //     串行（复用 per-account 锁，与单任务/一键完成互斥），账号间并发
-//     （concurrency 信号量限制，默认 1）。队列状态可轮询。
+//     （concurrency 信号量限制，上限 = 有待办的账号数）。队列状态可轮询。
 package panel
 
 import (
@@ -139,6 +139,7 @@ type queueState struct {
 	items     []queueItem
 	conc      int
 	seq       int
+	label     string // 来源展示名（分组任务执行时为分组名；空 = 全部账号）
 }
 
 // Panel 队列字段在 Panel 结构体上（panel.go）由 initQueue 惰性初始化；
@@ -148,25 +149,26 @@ func (p *Panel) queue() *queueState {
 	return p.q
 }
 
-// tasksRunQueue 启动执行队列：{concurrency:1-4, growth:bool, school:bool}。
-// 先做一次扫描，把全部待办项排队（growth 按账号内 autoActions 顺序执行，
-// school 逐账号跑闭环），账号内串行、账号间受并发信号量约束。
+// tasksRunQueue 启动执行队列：{concurrency, growth, uids?, label?}。
+// 先做一次扫描，把待办项排队（growth 按账号内 autoActions 顺序执行），
+// 账号内串行、账号间受并发信号量约束。并发上限自适应为「有待办的账号数」
+// （≤0 = 取满）。uids 非空时只扫这些账号（分组卡片「任务执行」），label 是
+// 任务中心展示用的来源名（如分组名）。
 func (p *Panel) tasksRunQueue(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Concurrency int  `json:"concurrency"`
-		Growth      bool `json:"growth"`
+		Concurrency int      `json:"concurrency"`
+		Growth      bool     `json:"growth"`
+		UIDs        []string `json:"uids"`
+		Label       string   `json:"label"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	if !body.Growth {
 		body.Growth = true
 	}
-	if body.Concurrency < 1 {
-		body.Concurrency = 1
+	if rs := []rune(body.Label); len(rs) > 32 { // 按字符截断，不切坏 UTF-8
+		body.Label = string(rs[:32])
 	}
-	if body.Concurrency > 4 {
-		body.Concurrency = 4
-	}
-	started, total, seq, msg := p.startGrowthQueue(body.Concurrency, body.Growth)
+	started, total, seq, msg := p.startGrowthQueue(body.Concurrency, body.Growth, body.UIDs, body.Label)
 	switch {
 	case seq == -1:
 		writeErr(w, http.StatusConflict, msg)
@@ -179,14 +181,16 @@ func (p *Panel) tasksRunQueue(w http.ResponseWriter, r *http.Request) {
 
 // startGrowthQueue 扫描全部账号待办并启动队列（HTTP「执行全部待办」与调度器
 // growth 时点共用核心）。返回 (started, total, seq, msg)：seq==-1 表示队列
-// 已在执行（冲突）；started=false 时 msg 为无可执行待办的说明。并发夹取
-// [1,4]；growth 开关同 HTTP 入参语义。
-func (p *Panel) startGrowthQueue(concurrency int, growth bool) (started bool, total int, seq int, msg string) {
-	if concurrency < 1 {
-		concurrency = 1
-	}
-	if concurrency > 4 {
-		concurrency = 4
+// 已在执行（冲突）；started=false 时 msg 为无可执行待办的说明。并发由
+// clampQueueConcurrency 夹到 [1, 有待办的账号数]；growth 开关同 HTTP 入参语义。
+// uids 非空 = 只处理这些账号（分组任务执行）；label 仅用于展示。
+func (p *Panel) startGrowthQueue(concurrency int, growth bool, uids []string, label string) (started bool, total int, seq int, msg string) {
+	var only map[string]bool
+	if len(uids) > 0 {
+		only = make(map[string]bool, len(uids))
+		for _, u := range uids {
+			only[u] = true
+		}
 	}
 	q := p.queue()
 	q.mu.Lock()
@@ -208,6 +212,9 @@ func (p *Panel) startGrowthQueue(concurrency int, growth bool) (started bool, to
 	var mu sync.Mutex
 	for _, st := range states {
 		if st.Disabled {
+			continue
+		}
+		if only != nil && !only[st.UID] {
 			continue
 		}
 		a := p.cfg.Pool.AuthByUID(st.UID)
@@ -274,19 +281,40 @@ func (p *Panel) startGrowthQueue(concurrency int, growth bool) (started bool, to
 		q.running = false
 		q.startedAt = time.Time{}
 		q.mu.Unlock()
+		if label != "" {
+			return false, 0, 0, label + "：没有待办任务"
+		}
 		return false, 0, 0, "全部账号没有待办任务"
 	}
+	concurrency = clampQueueConcurrency(concurrency, len(accts))
 
 	q.mu.Lock()
 	q.items = items
 	q.conc = concurrency
+	q.label = label
 	q.seq++
 	seq = q.seq
 	q.mu.Unlock()
 
 	go p.runQueueItems(accts, items, concurrency)
-	log.Printf("panel: 队列启动：%d 项（并发 %d，成长 %v）", len(items), concurrency, growth)
+	if label != "" {
+		log.Printf("panel: 队列启动：%s %d 项（并发 %d，成长 %v）", label, len(items), concurrency, growth)
+	} else {
+		log.Printf("panel: 队列启动：%d 项（并发 %d，成长 %v）", len(items), concurrency, growth)
+	}
 	return true, len(items), seq, ""
+}
+
+// clampQueueConcurrency 账号间并发夹到 [1, accounts]：上限随账号数自适应，
+// 不再写死；c ≤ 0 视为「取满」（每个有待办的账号各占一路）。账号内仍串行。
+func clampQueueConcurrency(c, accounts int) int {
+	if accounts < 1 {
+		accounts = 1
+	}
+	if c < 1 || c > accounts {
+		return accounts
+	}
+	return c
 }
 
 // RunGrowthQueueOnce 调度器 growth 时点回调（sch.SetGrowthHook 挂载）：与
@@ -294,7 +322,7 @@ func (p *Panel) startGrowthQueue(concurrency int, growth bool) (started bool, to
 // 每日零点解锁一环，此前只能手动扫描推进；此回调让链条每天自动走一环。
 // 异步执行（startGrowthQueue 启动 goroutine 即返），已在跑/无待办安全跳过。
 func (p *Panel) RunGrowthQueueOnce() {
-	started, total, _, _ := p.startGrowthQueue(1, true)
+	started, total, _, _ := p.startGrowthQueue(1, true, nil, "")
 	if started {
 		log.Printf("panel: 定时成长任务队列已启动（%d 项）", total)
 	}
@@ -474,6 +502,7 @@ func (p *Panel) tasksQueueStatus(w http.ResponseWriter, r *http.Request) {
 		"started":    !q.startedAt.IsZero(),
 		"started_at": q.startedAt,
 		"seq":        q.seq,
+		"label":      q.label,
 		"items":      items,
 	})
 }

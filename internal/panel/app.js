@@ -443,6 +443,7 @@ function renderAccountGroups(list, groups) {
       '<span class="gc">' + b.items.length + ' 个账号</span>' +
       '<span class="gs">' + tag(c.ok, 'ok', '可用') + tag(c.cool, 'warn', '冷却') + tag(c.paused, 'warn', '暂停') + tag(c.off, 'bad', '禁用') + '</span>' +
       '<span class="gcred">' + cred + '</span><span class="grow"></span>' +
+      (!b.pub && b.items.some(taskEligible) ? '<button class="xs" data-gtask="' + k + '" title="扫描本组账号的成长任务待办并排队执行，进度在任务中心查看">任务执行</button>' : '') +
       (b.items.length ? '<button class="xs" data-gbulk="checkin" data-g="' + k + '" title="逐个签到本组账号（跳过禁用 / 企业版）">本组签到</button>' +
         '<button class="xs" data-gbulk="balance" data-g="' + k + '" title="逐个刷新本组账号余额">本组余额</button>' : '') +
       '</header><div class="tbl-wrap"><table class="acc gfix">' + cols + head + '<tbody>' + rows + '</tbody></table></div></div>';
@@ -567,6 +568,7 @@ async function loadOverview(quiet) {
   try {
     const d = await api('overview');
     overviewData = d;
+    syncQueueConcOptions(d.accounts);
     $('sTotal').textContent = d.total;
     $('sHealthy').textContent = d.healthy;
     $('sCooling').textContent = d.cooling;
@@ -648,7 +650,42 @@ async function runGroupBulk(btn) {
   toast(label + '完成：成功 ' + ok + (fail ? '，失败 ' + fail : ''), fail ? 'err' : 'ok');
   loadOverview(true);
 }
+// taskEligible 能跑成长任务的账号：国际版 / 企业版没有成长体系（后端同样门控），禁用号不跑。
+function taskEligible(s) { return !s.disabled && !s.enterprise && s.realm !== 'global'; }
+// syncQueueConcOptions 任务中心并发下拉：上限 = 可执行账号数（自适应），记住上次选择。
+const LS_QC_CONC = 'wb2api.qcConc';
+function syncQueueConcOptions(accounts) {
+  const sel = $('qcConc'); if (!sel) return;
+  const max = Math.max(1, (accounts || []).filter(taskEligible).length);
+  const want = Math.min(max, Number(localStorage.getItem(LS_QC_CONC)) || Number(sel.value) || 1);
+  if (sel.options.length !== max) {
+    sel.innerHTML = Array.from({ length: max }, (_, i) => '<option value="' + (i + 1) + '">' + (i + 1) + (i + 1 === max ? '（全部）' : '') + '</option>').join('');
+  }
+  sel.value = String(want);
+}
+if ($('qcConc')) $('qcConc').addEventListener('change', e => localStorage.setItem(LS_QC_CONC, e.target.value));
+// runGroupTasks 分组卡片「任务执行」：只扫本组账号排队，跳到任务中心看进度。
+async function runGroupTasks(btn) {
+  const d = overviewData || {};
+  const bucket = groupAccountsForView(d.accounts || [], d.groups || []).find(b => b.key === btn.dataset.gtask);
+  const items = (bucket ? bucket.items : []).filter(taskEligible);
+  if (!items.length) { toast('本组没有可执行成长任务的账号', 'err'); return; }
+  const conc = Math.min(items.length, Number($('qcConc').value) || 1);
+  if (!confirm('扫描「' + bucket.name + '」' + items.length + ' 个账号的待办并排队执行（账号并发 ' + conc + '，账号内串行）。\n含真实对话的任务耗时较长，确认继续？')) return;
+  btn.disabled = true;
+  try {
+    const r = await api('tasks/run_queue', { method: 'POST', body: JSON.stringify({ concurrency: conc, uids: items.map(s => s.uid), label: bucket.name }) });
+    if (!r.started) { toast(r.message || '本组没有待办任务', 'ok'); return; }
+    lastQueueSeq = r.seq || 0;
+    toast(bucket.name + '：队列已启动 ' + r.total + ' 项（并发 ' + conc + '）', 'ok');
+    go('taskscenter'); history.replaceState(null, '', '#taskscenter');
+    startQueuePolling();
+  } catch (e) { toast(e.message, 'err'); }
+  finally { btn.disabled = false; }
+}
 if ($('accGroups')) $('accGroups').addEventListener('click', ev => {
+  const gt = ev.target.closest('button[data-gtask]');
+  if (gt) { if (!gt.disabled) runGroupTasks(gt); return; }
   const bulk = ev.target.closest('button[data-gbulk]');
   if (bulk) { if (!bulk.disabled) runGroupBulk(bulk); return; }
   if (ev.target.closest('button[data-a]')) { onAccClick(ev); return; }
@@ -1928,7 +1965,7 @@ function updateProgress(q) {
   const done = q.items.filter(it => it.status === 'done' || it.status === 'error' || it.status === 'skipped').length;
   $('qProg').hidden = false;
   $('qBarFill').style.width = (total ? Math.round(done / total * 100) : 0) + '%';
-  $('qProgText').textContent = (q.running ? '执行中 ' : '已结束 ') + done + ' / ' + total;
+  $('qProgText').textContent = (q.label ? q.label + ' · ' : '') + (q.running ? '执行中 ' : '已结束 ') + done + ' / ' + total;
 }
 // 队列状态 → 分组（执行时轮询）
 function groupsFromQueue(items) {
@@ -1945,7 +1982,7 @@ function groupsFromQueue(items) {
 }
 function startQueuePolling() {
   if (queueTimer) clearInterval(queueTimer);
-  queueTimer = setInterval(async () => {
+  const tick = async () => {
     let q;
     try { q = await api('tasks/queue'); } catch (e) { return; }
     if (!q.started) return;
@@ -1959,8 +1996,10 @@ function startQueuePolling() {
     // 回写视图——曾把用户刚点开的「扫描待办」结果在下一个 tick 冲掉。
     renderQueue(groupsFromQueue(q.items || []), q);
     clearInterval(queueTimer); queueTimer = null;
-    toast('任务队列执行结束', 'ok');
-  }, 3000);
+    toast((q.label ? q.label + '：' : '') + '任务队列执行结束', 'ok');
+  };
+  queueTimer = setInterval(tick, 3000);
+  tick(); // 立即拉一次：从分组卡片跳过来时不用干等 3 秒
 }
 // reattachQueueView 切回任务中心视图时恢复队列进度：仅当本页启动的队列仍在
 // 执行才重新开轮询（残留态/别页队列不接管——视图不被旧结果冲掉）。
