@@ -1193,7 +1193,11 @@ func (c *Client) ChatStreamParsed(ctx context.Context, a *auth.Auth, raw []byte,
 	}
 	prepared := raw
 	if obj != nil {
-		if out := c.prepareBodyFromObject(obj, a.Realm(), a.UID, meta.ConversationID, c.globalOn(a)); out != nil {
+		// 每次尝试都在深拷贝上改写：调用方的 obj 会在换号重试中复用。原地改写会把
+		// 第一次尝试注入的 prompt_cache_key（含首个账号 uid）、global 兜底 system、
+		// effort 降级等残留带进后续尝试 → 换号后缓存键错号、前缀漂移、缓存不命中。
+		// 旧字节管线每次都从原始 body 重新解析，天然无此问题；这里恢复同等语义。
+		if out := c.prepareBodyFromObject(deepCopyJSON(obj).(map[string]any), a.Realm(), a.UID, meta.ConversationID, c.globalOn(a)); out != nil {
 			prepared = out
 		}
 	}
