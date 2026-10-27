@@ -39,7 +39,14 @@ func (h *Handler) groupAllowsAccount(scope authScope, a *auth.Auth) bool {
 	}
 	gid := a.Group()
 	if scope.GroupID != "" {
-		return gid == scope.GroupID
+		if gid == scope.GroupID {
+			return true
+		}
+		if !scope.CallPublic {
+			return false
+		}
+		// 只有允许公共池回源时，才接受公共池/共享组的粘性账号。
+		// 是否需要回源由 handler 的候选集决定，本组可用时仍优先本组。
 	}
 	if gid == "" {
 		return true

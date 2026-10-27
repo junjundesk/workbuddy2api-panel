@@ -1096,7 +1096,7 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	scope := scopeFrom(r)
-	chat, custom, dropped, err := responsesChatRequest(req, h.respStore, scope.GroupID)
+	chat, custom, dropped, history, err := responsesChatRequestWithHistory(req, h.respStore, scope.GroupID)
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request", err.Error())
 		return
@@ -1144,7 +1144,7 @@ func (h *Handler) responses(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if run.persist && run.final != nil {
-		items := append(append([]any{}, run.inputItems()...), run.outputList()...)
+		items := append(append([]any{}, history...), run.outputList()...)
 		h.respStore.put(run.id, items, run.final, scope.GroupID)
 	}
 }
@@ -1159,10 +1159,4 @@ func (h *Handler) getResponse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, st.full)
-}
-
-// inputItems 本次请求的原始 input items（含 additional_tools 之外的全部条目），
-// 供响应存储续接 previous_response_id。
-func (t *responsesRun) inputItems() []any {
-	return responsesInputItems(t.req["input"])
 }

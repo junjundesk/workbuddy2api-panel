@@ -146,8 +146,18 @@ func (r *Router) Resolve(key string) (string, bool) {
 // 对其他模型仍可用（见 pool.healthyForModel 的 softRateModel 豁免）。若只按账号级
 // 可用性校验，会话会被钉在一个"对当前模型不可用"的号上反复失败。
 func (r *Router) ResolveForModel(key, model string) (string, bool) {
+	return r.ResolveWithCandidates(key, r.availableSlice(model))
+}
+
+// ResolveWithCandidates 在调用方给定的可用账号快照内解析绑定。候选需已按模型、
+// realm 和号池作用域过滤；允许重复 UID 以保留快过期账号的虚拟实例权重。
+// 绑定校验与新分配使用同一快照，分组请求无需修改共享 Router 的配置。
+func (r *Router) ResolveWithCandidates(key string, uids []string) (string, bool) {
 	now := time.Now()
-	available := r.availableSet(model)
+	available := make(map[string]bool, len(uids))
+	for _, uid := range uids {
+		available[uid] = true
+	}
 
 	// ── Fast path: RLock 快查 ──────────────────────────────
 	r.mu.RLock()
@@ -174,7 +184,6 @@ func (r *Router) ResolveForModel(key, model string) (string, bool) {
 		delete(r.entries, key) // 失效：清掉再分配
 	}
 
-	uids := r.availableSlice(model)
 	if len(uids) == 0 {
 		return "", false
 	}
@@ -267,14 +276,19 @@ func (r *Router) gcOnce(now time.Time) int {
 	return len(expiredKeys)
 }
 
-// availableSet 把 AvailableForModel(model) 的有序列表转集合（快路径命中校验用）。
-func (r *Router) availableSet(model string) map[string]bool {
-	uids := r.availableSlice(model)
-	set := make(map[string]bool, len(uids))
-	for _, u := range uids {
-		set[u] = true
+// ScopedKey 为分组隔离会话绑定；普通公共池键保持原值以复用存量 Redis 绑定。
+// 保留前缀也会转义公共池键，防止客户端显式键伪装成某个分组的内部键。
+// 此键仅用于粘性存储，不应替换上游 conversation ID 或 prompt_cache_key。
+func ScopedKey(scope, key string) string {
+	const prefix = "\u0000wb2a-scope:"
+	if key == "" {
+		return ""
 	}
-	return set
+	if scope == "" && !strings.HasPrefix(key, prefix) {
+		return key
+	}
+	pair, _ := json.Marshal([2]string{scope, key})
+	return prefix + string(pair)
 }
 
 // availableSlice 安全调用 AvailableForModel；未注入时回落 Available（nil 视空池）。

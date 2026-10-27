@@ -706,14 +706,20 @@ func (h *Handler) chatCompletionsIn(w http.ResponseWriter, r *http.Request, in *
 	// ExtractKey 与粘性开关解耦（issue #35 侧）：关闭粘性时会话头族的聚合主键仍按
 	// 会话级（RequestIDForKey(sessKey)），不悄悄退化成轮级——提取本身与粘性无关。
 	sessKey := in.sessKey
+	// 粘性存储按号池隔离；原始 sessKey 仍供上游会话头使用，避免前缀键漂移。
+	bindKey := session.ScopedKey(scope.GroupID, sessKey)
 	stickyUID := ""
-	// 分组请求暂不启用全局粘性：Router 的可用集是公共池口径，跨组绑定会泄漏；
-	// 分组内部仍由 PickScoped 做加权轮换，后续可升级为每分组 Router。
-	if scope.GroupID == "" && h.cfg.Session != nil && sessKey != "" {
-		// 按模型解析：绑定号在**当前模型**被 6004 限额时视为不可用 → 重新分配，
-		// 而不是钉在限额号上反复失败（"限额后换不动号"的正解）。
-		if uid, ok := h.cfg.Session.ResolveForModel(sessKey, in.model); ok {
-			stickyUID = uid
+	if h.cfg.Session != nil && bindKey != "" {
+		if scope.GroupID == "" {
+			// 公共池保留已有的 realm/模型感知可用集与绑定。
+			stickyUID, _ = h.cfg.Session.ResolveForModel(bindKey, in.model)
+		} else {
+			// 分组必须用自己的可用集：本组优先，无可用号且允许时回源公共池。
+			uids := h.cfg.Pool.WeightedAvailableUIDsForModelRealmScoped(bareModel, realm, scope.GroupID)
+			if len(uids) == 0 && scope.CallPublic {
+				uids = h.cfg.Pool.WeightedAvailableUIDsForModelRealmScoped(bareModel, realm, "")
+			}
+			stickyUID, _ = h.cfg.Session.ResolveWithCandidates(bindKey, uids)
 		}
 	}
 
@@ -746,7 +752,7 @@ func (h *Handler) chatCompletionsIn(w http.ResponseWriter, r *http.Request, in *
 	// 幂等：stickyUID 已空则空操作；不会误解绑其他轮的绑定。仅当 Session != nil 时 stickyUID 才会非空。
 	unbindSticky := func() {
 		if stickyUID != "" {
-			h.cfg.Session.Unbind(sessKey)
+			h.cfg.Session.Unbind(bindKey)
 			stickyUID = ""
 		}
 	}
@@ -1173,7 +1179,7 @@ func (h *Handler) chatCompletionsIn(w http.ResponseWriter, r *http.Request, in *
 				h.cfg.Pool.NoteSuccess(acct.UID)
 				h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
 				if sessKey != "" && h.cfg.Session != nil {
-					h.cfg.Session.Bind(sessKey, acct.UID)
+					h.cfg.Session.Bind(bindKey, acct.UID)
 				}
 			default:
 				// 真成功：这一跳读完且上游没有报错，才记成功并让粘性跟上。
@@ -1185,7 +1191,7 @@ func (h *Handler) chatCompletionsIn(w http.ResponseWriter, r *http.Request, in *
 				// 粘性跟随最终成功号：本轮成功的账号成为该会话的粘性绑定（覆盖旧绑定）。
 				// 若 sticky 号失败、轮换到别的号成功，这里把会话重绑到新号，多轮对话下一跳不再随机抽。
 				if sessKey != "" && h.cfg.Session != nil {
-					h.cfg.Session.Bind(sessKey, acct.UID)
+					h.cfg.Session.Bind(bindKey, acct.UID)
 				}
 			}
 			credit, hasCredit := stats.Credit()
@@ -1271,7 +1277,7 @@ func (h *Handler) chatCompletionsIn(w http.ResponseWriter, r *http.Request, in *
 		h.cfg.Pool.NoteSuccess(acct.UID)
 		h.cfg.Pool.BlockModelClear(acct.UID, bareModel)
 		if sessKey != "" && h.cfg.Session != nil {
-			h.cfg.Session.Bind(sessKey, acct.UID)
+			h.cfg.Session.Bind(bindKey, acct.UID)
 		}
 		// 成本账本（非流式）：从聚合响应的 usage 取 credit 与 token 总数。
 		if hasCredit {

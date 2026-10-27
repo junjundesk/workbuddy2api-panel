@@ -121,6 +121,15 @@ func dedupStrings(in []string) []string {
 // responsesChatRequest 把 Responses 请求体转换成 chat/completions 请求体。
 // 返回值：chat body / custom 工具名集合（响应方向据此还原 custom_tool_call）/ 被忽略字段清单。
 func responsesChatRequest(req map[string]any, store *responsesStore, owners ...string) (map[string]any, map[string]bool, []string, error) {
+	chat, custom, dropped, _, err := responsesChatRequestWithHistory(req, store, owners...)
+	return chat, custom, dropped, err
+}
+
+// responsesChatRequestWithHistory 同时返回本轮实际使用的完整 input 历史。
+// 在请求受理时展开 previous_response_id / item_reference，完成后存储该快照，
+// 避免第三轮丢前缀，也避免上游耗时期间旧响应过期导致存储历史与出站不一致。
+// instructions 只用于当前请求，不进入续接历史（Responses API 语义）。
+func responsesChatRequestWithHistory(req map[string]any, store *responsesStore, owners ...string) (map[string]any, map[string]bool, []string, []any, error) {
 	owner := ""
 	if len(owners) > 0 {
 		owner = owners[0]
@@ -143,16 +152,18 @@ func responsesChatRequest(req map[string]any, store *responsesStore, owners ...s
 	if inst := responsesInstructionsText(req["instructions"]); inst != "" {
 		messages = append(messages, map[string]any{"role": "system", "content": inst})
 	}
+	var history []any
 	if prev := strings.TrimSpace(jStr(req["previous_response_id"])); prev != "" {
 		stored := store.get(prev, owner)
 		if stored == nil {
-			return nil, custom, dropped, fmt.Errorf("previous_response_id %q not found (unknown or expired)", prev)
+			return nil, custom, dropped, nil, fmt.Errorf("previous_response_id %q not found (unknown or expired)", prev)
 		}
-		messages = append(messages, responsesItemsToMessages(
-			responsesExpandReferences(stored.items, store, owner, &dropped), custom, &dropped)...)
+		history = responsesExpandReferences(stored.items, store, owner, &dropped)
+		messages = append(messages, responsesItemsToMessages(history, custom, &dropped)...)
 	}
-	messages = append(messages, responsesItemsToMessages(
-		responsesExpandReferences(inputItems, store, owner, &dropped), custom, &dropped)...)
+	expandedInput := responsesExpandReferences(inputItems, store, owner, &dropped)
+	messages = append(messages, responsesItemsToMessages(expandedInput, custom, &dropped)...)
+	history = append(history, expandedInput...)
 
 	chat := map[string]any{"model": jStr(req["model"]), "messages": messages}
 	if jBool(req["stream"], false) {
@@ -161,7 +172,9 @@ func responsesChatRequest(req map[string]any, store *responsesStore, owners ...s
 	if v, ok := req["max_output_tokens"]; ok && v != nil {
 		chat["max_tokens"] = v
 	}
-	for _, k := range []string{"temperature", "top_p", "user", "parallel_tool_calls"} {
+	// 与 chat 入口使用相同的缓存身份与会话提取规则；客户端显式缓存键必须保留。
+	for _, k := range []string{"temperature", "top_p", "user", "parallel_tool_calls",
+		"prompt_cache_key", "metadata", "conversation_id", "conversationId", "user_id"} {
 		if v, ok := req[k]; ok && v != nil {
 			chat[k] = v
 		}
@@ -181,12 +194,12 @@ func responsesChatRequest(req map[string]any, store *responsesStore, owners ...s
 	// 本网关 chat 通道没有对应语义的请求字段：记账后由调用方日志透出，
 	// 不静默假装已支持（客户端据此可判断是否需要降级）。
 	for _, k := range []string{"background", "conversation", "include", "max_tool_calls",
-		"metadata", "prompt_cache_key", "safety_identifier", "service_tier", "top_logprobs", "truncation"} {
+		"safety_identifier", "service_tier", "top_logprobs", "truncation"} {
 		if v, ok := req[k]; ok && jsonTruthy(v) {
 			dropped = append(dropped, k)
 		}
 	}
-	return chat, custom, dedupStrings(dropped), nil
+	return chat, custom, dedupStrings(dropped), history, nil
 }
 
 // responsesInputItems 归一化 input：字符串 → 单条 user 文本项；数组 → 原样。
