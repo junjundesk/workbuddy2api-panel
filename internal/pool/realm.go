@@ -10,17 +10,32 @@ import (
 // 3:1 是温和偏好，不是固定比例：账号组成变化会自然改变最终占比。
 const expiringVirtualSlots = 3
 
+// scopeFor 把 (group, callPublic) 折成选号作用域，是「分组作用域」的唯一构造点：
+//   - group==""            → 公共池（未分组 + shared 分组）；
+//   - group!="", callPublic → 本组 ∪ 公共池（**并集**，同一候选集）；
+//   - group!="", 否则       → 本组专属。
+//
+// 与旧实现的关键差别：callPublic 不是「本组无号时回源」的两段式，而是并集——
+// 本组健康时公共池账号仍在同一权重池里参与抽签。
+func (p *Pool) scopeFor(group string, callPublic bool) GroupScope {
+	if group == "" {
+		return GroupScope{Public: true}
+	}
+	return GroupScope{Group: group, Union: callPublic}
+}
+
 // AvailableUIDsForRealm 同 AvailableUIDs，但仅返回 Realm()==realm 的账号。
 // realm=="" 退化为 AvailableUIDs（现状语义）。
-// AvailableUIDsForRealmScoped 同 AvailableUIDsForRealm，并叠加分组作用域。
-// group 非空 = 本组；group=="" = 公共池（未分组 + shared 分组）。
-func (p *Pool) AvailableUIDsForRealmScoped(realm, group string) []string {
+// AvailableUIDsForRealmScoped 同 AvailableUIDsForRealm，并叠加分组作用域
+// （group/callPublic 语义见 scopeFor）。
+func (p *Pool) AvailableUIDsForRealmScoped(realm, group string, callPublic bool) []string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	now := time.Now()
+	scope := p.scopeFor(group, callPublic)
 	uids := make([]string, 0, len(p.byUID))
 	for uid, e := range p.byUID {
-		if !p.scopeMatch(e, GroupScope{Group: group, Public: group == ""}) {
+		if !p.scopeMatch(e, scope) {
 			continue
 		}
 		if realm != "" && e.a.Realm() != realm {
@@ -104,13 +119,14 @@ func (p *Pool) WeightedAvailableUIDsForModelRealm(model, realm string) []string 
 // WeightedAvailableUIDsForModelRealmScoped 同 WeightedAvailableUIDsForModelRealm，
 // 并叠加分组作用域；public 会话用它保持快过期账号虚拟实例权重，避免升级后
 // 公共池会话分配口径变化。
-func (p *Pool) WeightedAvailableUIDsForModelRealmScoped(model, realm, group string) []string {
+func (p *Pool) WeightedAvailableUIDsForModelRealmScoped(model, realm, group string, callPublic bool) []string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	now := time.Now()
+	scope := p.scopeFor(group, callPublic)
 	uids := make([]string, 0, len(p.byUID))
 	for uid, e := range p.byUID {
-		if !p.scopeMatch(e, GroupScope{Group: group, Public: group == ""}) {
+		if !p.scopeMatch(e, scope) {
 			continue
 		}
 		if realm != "" && e.a.Realm() != realm {
@@ -143,13 +159,14 @@ func (p *Pool) WeightedAvailableUIDsForModelRealmScoped(model, realm, group stri
 // AvailableUIDsForModelRealmScoped 同 AvailableUIDsForModelRealm，并叠加分组作用域。
 // group=="" = 公共池（未分组 + shared 分组）；供公共池会话粘性可用集使用，
 // 避免把未共享分组的私有账号绑定进公共会话。
-func (p *Pool) AvailableUIDsForModelRealmScoped(model, realm, group string) []string {
+func (p *Pool) AvailableUIDsForModelRealmScoped(model, realm, group string, callPublic bool) []string {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	now := time.Now()
+	scope := p.scopeFor(group, callPublic)
 	uids := make([]string, 0, len(p.byUID))
 	for uid, e := range p.byUID {
-		if !p.scopeMatch(e, GroupScope{Group: group, Public: group == ""}) {
+		if !p.scopeMatch(e, scope) {
 			continue
 		}
 		if realm != "" && e.a.Realm() != realm {

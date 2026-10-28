@@ -45,8 +45,9 @@ func (h *Handler) groupAllowsAccount(scope authScope, a *auth.Auth) bool {
 		if !scope.CallPublic {
 			return false
 		}
-		// 只有允许公共池回源时，才接受公共池/共享组的粘性账号。
-		// 是否需要回源由 handler 的候选集决定，本组可用时仍优先本组。
+		// 开启「调用公共池」时接受公共池/共享组的粘性账号：语义是**共用候选集**
+		// （本组 ∪ 公共池的并集），不是"本组无号才回源"——本组健康时公共池号
+		// 同样在同一次加权抽签里被选中，粘性绑定也照常保持。
 	}
 	if gid == "" {
 		return true

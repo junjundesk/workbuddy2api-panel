@@ -40,24 +40,21 @@ func (p *Pool) PickExcludingForRealm(tried map[string]bool, reqModel, realm stri
 }
 
 // PickExcludingForRealmScoped 在 realm 过滤之外叠加分组作用域。
-// group 非空 = 只选本组账号；group=="" = 公共池（未分组 + shared 分组）。
-// callPublic 仅对 group 生效：本组无可用号时再尝试公共池（两段式，本组优先）。
+// group 非空 = 本组作用域；group=="" = 公共池（未分组 + shared 分组）。
+//
+// callPublic 仅对 group 生效，语义是**共用候选集**（不是"无号时回源"）：
+// 本组账号与公共池账号进同一个候选集，由同一次加权抽签决定——本组号健康时
+// 公共池号同样有机会被选中（这正是「公共池和本组账号共用」的含义）。
 func (p *Pool) PickExcludingForRealmScoped(tried map[string]bool, reqModel, realm, group string, callPublic bool) *auth.Auth {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	firstScope := GroupScope{Group: group}
-	if group == "" {
-		firstScope = GroupScope{Public: true}
+	scope := GroupScope{Public: true}
+	if group != "" {
+		scope = GroupScope{Group: group, Union: callPublic}
 	}
-	a := p.pickLocked(tried, reqModel, realm, firstScope, true)
-	if a == nil && group != "" && callPublic {
-		a = p.pickLocked(tried, reqModel, realm, GroupScope{Public: true}, true)
-	}
-	if a == nil && group != "" {
-		// 公共池也不可用时，允许回落到本组冷却账号（与旧全冷却兜底语义一致）。
-		a = p.pickLocked(tried, reqModel, realm, GroupScope{Group: group}, true)
-	}
-	return a
+	// allowFallback=true：该作用域内全员冷却时按最早到期兜底（并集作用域下
+	// 本组与公共池的冷却号同池比较，取最早解封的那个）。
+	return p.pickLocked(tried, reqModel, realm, scope, true)
 }
 
 // pick 在 healthy 候选集中按权重加权随机选出账号，并记录 lastUsed（防并发撞号）。
@@ -70,8 +67,9 @@ func (p *Pool) pick(tried map[string]bool, reqModel, realm string) *auth.Auth {
 }
 
 // pickLocked 是 pick 的持锁实现；scope 为空时等价于旧行为。
-// allowFallback=false 表示无 healthy 候选时返回 nil（分组第一段用，避免拿本组
-// 冷却号挡住公共池回源）。调用方必须已持 p.mu。
+// allowFallback=false 表示无 healthy 候选时返回 nil（供调用方自行决定是否兜底）。
+// 分组作用域已在 scope 内一次成型（并集/本组/公共池），不再有"两段式回源"。
+// 调用方必须已持 p.mu。
 func (p *Pool) pickLocked(tried map[string]bool, reqModel, realm string, scope GroupScope, allowFallback bool) *auth.Auth {
 	now := time.Now()
 	realmOK := func(e *entry) bool { return realm == "" || e.a.Realm() == realm }

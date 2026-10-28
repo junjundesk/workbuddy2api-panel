@@ -432,7 +432,7 @@ function renderAccountGroups(list, groups) {
   const tag = (n, cls, label) => n ? '<span class="tag ' + cls + '">' + label + ' ' + n + '</span>' : '';
   $('accGroups').innerHTML = groupAccountsForView(list, groups).map(b => {
     const c = accGroupCounts(b.items, now);
-    const badge = b.pub ? '未分组' : (b.shared ? '进入公共池' : '独立') + (b.call ? ' · 可回源' : '');
+    const badge = b.pub ? '未分组' : (b.shared ? '进入公共池' : '独立') + (b.call ? ' · 共用公共池' : '');
     const cred = c.total > 0 ? '积分 ' + c.credits + ' / ' + c.total : (c.credits ? '积分 ' + c.credits : '');
     const rows = b.items.length ? b.items.map(s => accRowHtml(s, maxCred)).join('')
       : '<tr><td colspan="9"><div class="empty">' + (b.pub ? '没有未分组的账号' : '这个分组还没有账号') + '</div></td></tr>';

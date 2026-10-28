@@ -19,6 +19,6 @@ import (
 func realmAwareAvailableForModel(p *pool.Pool) func(model string) []string {
 	return func(model string) []string {
 		realm, bare := server.ResolveModel(model)
-		return p.WeightedAvailableUIDsForModelRealmScoped(bare, realm, "")
+		return p.WeightedAvailableUIDsForModelRealmScoped(bare, realm, "", false) // 公共池会话：无分组作用域
 	}
 }

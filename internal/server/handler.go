@@ -218,7 +218,7 @@ func (h *Handler) withAuth(next http.HandlerFunc) http.HandlerFunc {
 
 // resolveScope 把 Bearer 解析为公共池或分组作用域：
 //   - 主 api_key → 公共池（含 shared 分组）；
-//   - 分组密钥 → 仅该分组（call_public 时允许回源公共池）；
+//   - 分组密钥 → 仅该分组（call_public 时与本组共用候选集：本组 ∪ 公共池）；
 //   - 主 api_key 为空时保持现有匿名公共池行为，但 sk-grp- 无效密钥返回 401，
 //     避免误落到公共池。
 func (h *Handler) resolveScope(r *http.Request) (authScope, bool) {
@@ -363,15 +363,12 @@ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// modelListForGroup 分组密钥可见的模型目录：只用本组账号探测；开启 call_public
-// 且本组无可用号时回落公共池账号。不读全局 dynamicModelsCache（那是公共池口径，
-// 直接复用会把公共池模型泄漏给分组）。
+// modelListForGroup 分组密钥可见的模型目录：用本组账号探测；开启 call_public 时
+// 探测账号从「本组 ∪ 公共池」里取（并集口径与选号一致），而不是"本组没号才回源"。
+// 不读全局 dynamicModelsCache（那是公共池口径，直接复用会把公共池模型泄漏给分组）。
 func (h *Handler) modelListForGroup(scope authScope) []map[string]any {
 	out := make([]map[string]any, 0)
-	cnUIDs := h.cfg.Pool.AvailableUIDsForRealmScoped("cn", scope.GroupID)
-	if len(cnUIDs) == 0 && scope.CallPublic {
-		cnUIDs = h.cfg.Pool.AvailableUIDsForRealmScoped("cn", "")
-	}
+	cnUIDs := h.cfg.Pool.AvailableUIDsForRealmScoped("cn", scope.GroupID, scope.CallPublic)
 	if len(cnUIDs) > 0 {
 		if acct := h.cfg.Pool.AuthByUID(cnUIDs[0]); acct != nil {
 			if infos, err := h.cfg.Upstream.FetchModels(acct); err == nil {
@@ -382,10 +379,7 @@ func (h *Handler) modelListForGroup(scope authScope) []map[string]any {
 		}
 	}
 	if h.cfg.GlobalEnabled {
-		globalUIDs := h.cfg.Pool.AvailableUIDsForRealmScoped("global", scope.GroupID)
-		if len(globalUIDs) == 0 && scope.CallPublic {
-			globalUIDs = h.cfg.Pool.AvailableUIDsForRealmScoped("global", "")
-		}
+		globalUIDs := h.cfg.Pool.AvailableUIDsForRealmScoped("global", scope.GroupID, scope.CallPublic)
 		if len(globalUIDs) > 0 {
 			if acct := h.cfg.Pool.AuthByUID(globalUIDs[0]); acct != nil {
 				for _, mi := range h.cfg.Upstream.FetchGlobalModelInfos(acct) {
@@ -614,7 +608,7 @@ func (h *Handler) fetchDynamicModels() []upstream.ModelInfo {
 	}
 	dynamicModelsCache.RUnlock()
 
-	uids := h.cfg.Pool.AvailableUIDsForRealmScoped("cn", "")
+	uids := h.cfg.Pool.AvailableUIDsForRealmScoped("cn", "", false) // 公共池口径（无分组）
 	if len(uids) == 0 {
 		return nil
 	}
@@ -723,11 +717,9 @@ func (h *Handler) chatCompletionsIn(w http.ResponseWriter, r *http.Request, in *
 			// 公共池保留已有的 realm/模型感知可用集与绑定。
 			stickyUID, _ = h.cfg.Session.ResolveForModel(bindKey, in.model)
 		} else {
-			// 分组必须用自己的可用集：本组优先，无可用号且允许时回源公共池。
-			uids := h.cfg.Pool.WeightedAvailableUIDsForModelRealmScoped(bareModel, realm, scope.GroupID)
-			if len(uids) == 0 && scope.CallPublic {
-				uids = h.cfg.Pool.WeightedAvailableUIDsForModelRealmScoped(bareModel, realm, "")
-			}
+			// 分组用带作用域的可用集：开启 call_public 时候选集 = 本组 ∪ 公共池
+			// （并集口径与选号一致，粘性号可以是公共池账号，本组健康时也不会被踢）。
+			uids := h.cfg.Pool.WeightedAvailableUIDsForModelRealmScoped(bareModel, realm, scope.GroupID, scope.CallPublic)
 			stickyUID, _ = h.cfg.Session.ResolveWithCandidates(bindKey, uids)
 		}
 	}

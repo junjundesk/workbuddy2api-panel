@@ -17,7 +17,7 @@ import (
 func scopedTestRouter(p *pool.Pool, store *bindStore) *session.Router {
 	return session.New(session.Config{Store: store, Available: p.AvailableUIDs, AvailableForModel: func(model string) []string {
 		realm, bare := resolveModel(model)
-		return p.WeightedAvailableUIDsForModelRealmScoped(bare, realm, "")
+		return p.WeightedAvailableUIDsForModelRealmScoped(bare, realm, "", false) // 公共池测试路由器
 	}})
 }
 
@@ -125,10 +125,24 @@ func TestScopedStickyPublicFallbackAndRecovery(t *testing.T) {
 			if rec.Code != http.StatusServiceUnavailable || len(*captured) != 2 {
 				t.Fatal("revoked call_public still used public account")
 			}
+			// 共用候选集语义：本组号恢复后，公共池号仍在候选集里（不是"本组优先"）。
 			p.Resume("own")
 			rec = scopedTestRequest(t, h, path, authScope{GroupID: "g", CallPublic: true}, false)
-			if rec.Code != 200 || !strings.Contains((*captured)[2].auth, "own") {
-				t.Fatal("did not return to recovered own group")
+			if rec.Code != 200 || len(*captured) != 3 {
+				t.Fatalf("resume+call_public status=%d", rec.Code)
+			}
+			uids := p.WeightedAvailableUIDsForModelRealmScoped("glm-5.2", "", "g", true)
+			hasOwn, hasPublic := false, false
+			for _, u := range uids {
+				if u == "own" {
+					hasOwn = true
+				}
+				if strings.HasPrefix(u, "public") {
+					hasPublic = true
+				}
+			}
+			if !hasOwn || !hasPublic {
+				t.Fatalf("call_public 候选集应为本组 ∪ 公共池，got %v", uids)
 			}
 			// Moving the only own account must invalidate the binding, not follow it into another group.
 			p.SetGroup("own", "other")

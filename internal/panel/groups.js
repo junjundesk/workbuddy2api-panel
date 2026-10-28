@@ -72,7 +72,7 @@ function renderRail() {
   html += '<div class="rail-sec">专属分组 <span>' + state.groups.length + '</span><button data-act="new-group">＋</button></div>';
   state.groups.forEach(g => {
     const bits = [g.member_count + ' 个账号', g.shared_pool ? '共享' : '独立'];
-    if (g.call_public) bits.push('可回源');
+    if (g.call_public) bits.push('共用公共池');
     if (!g.has_key) bits.push('缺密钥');
     html += '<button class="pool-item ' + (state.selected === g.id ? 'on' : '') + '" data-act="select" data-id="' + esc(g.id) + '"><span class="gdot" style="--c:' + esc(g.color || '#5b7cfa') + '"></span><span><b>' + esc(g.name) + '</b><em>' + esc(bits.join(' · ')) + '</em></span><span class="cnt">' + g.member_count + '</span></button>';
   });
@@ -97,8 +97,8 @@ function proxyCard(g) {
 function shareCard(g) {
   return '<div class="card"><div class="card-h"><h3>共享池</h3><span class="tag ' + (g.shared_pool || g.call_public ? 'warn' : 'mute') + '">' + (g.shared_pool || g.call_public ? '已开启共享' : '双向隔离') + '</span></div>' +
     '<label class="switch-row"><span class="sw-text"><b>允许本组账号进入公共池</b><em>默认关闭</em></span><input type="checkbox" data-act="toggle-shared"' + (g.shared_pool ? ' checked' : '') + '><span class="track"><i></i></span></label>' +
-    '<label class="switch-row"><span class="sw-text"><b>允许本组调用公共池账号</b><em>本组无可用号时回源；默认关闭</em></span><input type="checkbox" data-act="toggle-call"' + (g.call_public ? ' checked' : '') + '><span class="track"><i></i></span></label>' +
-    '<div class="hint">' + (g.shared_pool ? '公共池可命中本组账号。' : '') + (g.call_public ? '本组可回源公共池。' : '') + (!g.shared_pool && !g.call_public ? '本组与公共池双向隔离。' : '') + '</div></div>';
+    '<label class="switch-row"><span class="sw-text"><b>允许本组调用公共池账号</b><em>本组与公共池账号共用候选；默认关闭</em></span><input type="checkbox" data-act="toggle-call"' + (g.call_public ? ' checked' : '') + '><span class="track"><i></i></span></label>' +
+    '<div class="hint">' + (g.shared_pool ? '公共池可命中本组账号。' : '') + (g.call_public ? '本组账号与公共池账号进同一候选集，按权重一起抽签。' : '') + (!g.shared_pool && !g.call_public ? '本组与公共池双向隔离。' : '') + '</div></div>';
 }
 // accActs 账号行操作，与主页账号池（app.js renderAccounts）同口径：
 // 企业版不显示签到 / 任务（上游不支持），冻结 → 解冻、暂停 → 恢复选号、否则 → 暂停选号。
