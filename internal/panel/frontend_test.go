@@ -903,3 +903,19 @@ process.stdout.write(JSON.stringify({
 			strings.TrimSpace(string(out)), want)
 	}
 }
+
+// TestGroupsJSSyntax groups.js 与 app.js 同为 go:embed 的静态资源，Go 编译器不检查
+// 其内容；一次括号写错就会让 /panel/groups 整页白屏，所以同样前置到 CI 校验。
+func TestGroupsJSSyntax(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not available; skipping JS syntax check")
+	}
+	path, err := filepath.Abs("groups.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(node, "--check", path).CombinedOutput(); err != nil {
+		t.Fatalf("groups.js syntax error:\n%s", out)
+	}
+}

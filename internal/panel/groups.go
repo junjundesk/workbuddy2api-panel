@@ -328,6 +328,12 @@ func (p *Panel) groupRevealKey(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "key": key})
 }
 
+// groupTestProxy 面板「测试连接」：并行验证两件事——
+//  1. 这条代理能不能连通上游白名单站点（耗时 + HTTP 状态）；
+//  2. 它实际从哪个 IP、哪个地区出去（经 ipip.net 探测）。
+//
+// 并行是因为串行会把单次测试拖到 20 秒以上；两者互不依赖，任一侧失败都不影响
+// 另一侧的结论——代理只对部分域名生效时，这个差异正是用户要看到的信息。
 func (p *Panel) groupTestProxy(w http.ResponseWriter, r *http.Request) {
 	proxy, err := proxyFromRequest(r)
 	if err != nil {
@@ -336,18 +342,68 @@ func (p *Panel) groupTestProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg := upstream.ProxyConfig{Type: proxy.Type, Host: proxy.Host, Port: proxy.Port, Username: proxy.Username, Password: proxy.Password}
 	targets := []string{"https://copilot.tencent.com/", "https://www.workbuddy.ai/"}
-	var lastErr error
-	for _, target := range targets {
-		ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
-		latency, status, err := upstream.TestProxy(ctx, cfg, target, 10*time.Second)
-		cancel()
-		if err == nil {
-			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "latency_ms": latency.Milliseconds(), "status": status, "target": target})
-			return
-		}
-		lastErr = err
+
+	type connResult struct {
+		latency time.Duration
+		status  int
+		target  string
+		err     error
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": false, "error": lastErr.Error()})
+	type ipResult struct {
+		info    upstream.ExitInfo
+		latency time.Duration
+		err     error
+	}
+	connCh := make(chan connResult, 1)
+	ipCh := make(chan ipResult, 1)
+
+	go func() {
+		var lastErr error
+		for _, target := range targets {
+			ctx, cancel := context.WithTimeout(r.Context(), 12*time.Second)
+			latency, status, err := upstream.TestProxy(ctx, cfg, target, 10*time.Second)
+			cancel()
+			if err == nil {
+				connCh <- connResult{latency: latency, status: status, target: target}
+				return
+			}
+			lastErr = err
+		}
+		connCh <- connResult{err: lastErr}
+	}()
+
+	go func() {
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		start := time.Now()
+		info, err := upstream.ProbeExitIP(ctx, cfg, 8*time.Second)
+		ipCh <- ipResult{info: info, latency: time.Since(start), err: err}
+	}()
+
+	conn := <-connCh
+	ip := <-ipCh
+
+	out := map[string]any{"ip_latency_ms": ip.latency.Milliseconds()}
+	if ip.err == nil {
+		out["exit_ip"] = ip.info.IP
+		if ip.info.Region != "" {
+			out["exit_region"] = ip.info.Region
+		}
+	} else {
+		// 探测失败只影响这一行提示，不改变连通性结论。
+		out["ip_error"] = ip.err.Error()
+	}
+	if conn.err != nil {
+		out["ok"] = false
+		out["error"] = conn.err.Error()
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
+	out["ok"] = true
+	out["latency_ms"] = conn.latency.Milliseconds()
+	out["status"] = conn.status
+	out["target"] = conn.target
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (p *Panel) accountSetGroup(w http.ResponseWriter, r *http.Request) {

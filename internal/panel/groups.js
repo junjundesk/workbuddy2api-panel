@@ -203,6 +203,28 @@ function openGroupModal(edit) {
   $('groupColors').innerHTML = COLORS.map(c => '<button class="swatch ' + (c === state.groupColor ? 'on' : '') + '" style="--c:' + c + '" data-act="group-color" data-color="' + c + '"></button>').join('');
   openVeil('groupVeil');
 }
+// 测试结果固定两行：连通性（耗时 / 状态 / 目标站点）+ 出口 IP 与归属地。
+// 出口 IP 由服务端经同一代理访问 ipip.net 取回——CSP 是 connect-src 'self'，
+// 前端不能直连第三方，也不该让浏览器实测（那样测的是浏览器出口而不是服务器出口）。
+function renderProxyTest(box, r) {
+  box.className = 'testbox ' + (r.ok ? 'ok' : 'err');
+  box.textContent = '';
+  const l1 = document.createElement('div');
+  l1.textContent = r.ok
+    ? '连接成功 · ' + r.latency_ms + ' ms · HTTP ' + r.status + ' · ' + r.target
+    : '连接失败：' + (r.error || '未知错误');
+  const l2 = document.createElement('div');
+  if (r.exit_ip) {
+    l2.className = 'l2';
+    l2.innerHTML = '出口 IP：<b>' + esc(r.exit_ip) + '</b>' +
+      (r.exit_region ? ' · ' + esc(r.exit_region) : ' · 未返回归属地') +
+      (r.ip_latency_ms != null ? ' · ' + r.ip_latency_ms + ' ms' : '');
+  } else {
+    l2.className = 'l2 warn';
+    l2.textContent = '出口 IP：未取到' + (r.ip_error ? '（' + r.ip_error + '）' : '');
+  }
+  box.append(l1, l2);
+}
 function proxyHint(t) { if (t === 'http') return 'HTTP CONNECT；目标域名由本机解析。'; if (t === 'socks5') return 'SOCKS5（本地 DNS）：先解析目标域名再由代理转发 IP。'; return 'SOCKS5H（远程 DNS）：域名交给代理解析，适合避免 DNS 泄漏。'; }
 function openProxyModal(g) {
   state.proxyGroup = g ? g.id : 'public';
@@ -335,10 +357,9 @@ document.addEventListener('click', async e => {
     }
     if (act === 'proxy-test') {
       const body = { type: state.proxyType, host: $('proxyHost').value.trim(), port: parseInt($('proxyPort').value, 10) || 0, username: $('proxyUser').value.trim(), password: $('proxyPass').value };
-      const box = $('proxyTestBox'); box.hidden = false; box.className = 'testbox'; box.textContent = '正在测试…';
+      const box = $('proxyTestBox'); box.hidden = false; box.className = 'testbox'; box.textContent = '正在测试…（连通性 + 出口 IP）';
       const r = await api('groups/' + state.proxyGroup + '/proxy/test', { method: 'POST', body: JSON.stringify(body) });
-      box.className = 'testbox ' + (r.ok ? 'ok' : 'err');
-      box.textContent = r.ok ? ('连接成功 · ' + r.latency_ms + ' ms · HTTP ' + r.status + ' · ' + r.target) : ('连接失败：' + r.error);
+      renderProxyTest(box, r);
       return;
     }
     if (act === 'import') { openImportModal(); return; }

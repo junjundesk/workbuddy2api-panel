@@ -2,6 +2,8 @@ package panel
 
 import (
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
@@ -122,5 +124,40 @@ func TestAccountsExportReimportable(t *testing.T) {
 	}
 	if code, _, _ := call(t, p, "POST", "/panel/api/accounts/export", `{"uids":[]}`); code != 400 {
 		t.Fatalf("empty uids code=%d", code)
+	}
+}
+
+// 代理测试接口：代理不可达时仍返回 200 + ok:false，且出口 IP 探测失败不能让接口
+// panic 或吞掉错误文本（两条探测并行，各自失败各自报告）。
+func TestGroupTestProxyUnreachable(t *testing.T) {
+	p, _, _ := newGroupsPanel(t)
+	// 先占一个端口再关掉：连接立即被拒绝，测试不必等超时。
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	_ = ln.Close()
+
+	body := fmt.Sprintf(`{"type":"http","host":"127.0.0.1","port":%d}`, port)
+	code, out, raw := call(t, p, "POST", "/panel/api/groups/public/proxy/test", body)
+	if code != 200 {
+		t.Fatalf("code=%d raw=%s", code, raw)
+	}
+	if out["ok"] != false {
+		t.Fatalf("unreachable proxy should be ok:false: %s", raw)
+	}
+	if msg, _ := out["error"].(string); msg == "" {
+		t.Fatalf("missing error text: %s", raw)
+	}
+}
+
+func TestGroupTestProxyRejectsBadInput(t *testing.T) {
+	p, _, _ := newGroupsPanel(t)
+	if code, _, _ := call(t, p, "POST", "/panel/api/groups/public/proxy/test", `{"type":"http","port":8080}`); code != 400 {
+		t.Fatalf("missing host code=%d", code)
+	}
+	if code, _, _ := call(t, p, "POST", "/panel/api/groups/public/proxy/test", `{"type":"ftp","host":"1.2.3.4","port":1}`); code != 400 {
+		t.Fatalf("bad proxy type code=%d", code)
 	}
 }
