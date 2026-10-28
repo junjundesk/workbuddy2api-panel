@@ -155,10 +155,11 @@ type RateLimitedModel struct {
 //   - 11102 该后端无此模型：Until 为指数退避 TTL（6h 起、封顶 24h）；Hits 记录
 //     累计命中次数驱动退避（6004 无 hits 概念，Hits 恒 0）。
 type modelCooldown struct {
-	// Until 该模型的冷却截止（6004：now+min(resetAt-now, soft_rate_max)；11102：now+退避 TTL）。
+	// Until 该模型的冷冻截止（6004：resetAt，仅对 model_rate_max 硬顶钳制；
+	// 无重置文案时 now+探测 TTL；11102：now+退避 TTL）。
 	Until time.Time
-	// ResetAt 上游「将在 … 重置」的原始墙钟（未经 soft_rate_max 截断）。
-	// 与 Until 的区别同：Until 可能截断，ResetAt 是上游权威恢复时刻。
+	// ResetAt 上游「将在 … 重置」的原始墙钟（未经任何截断）。
+	// 与 Until 的区别：Until 可能被硬顶钳制，ResetAt 是上游权威恢复时刻。
 	// 11102 无重置文案，ResetAt 恒零值。
 	ResetAt time.Time
 	// Reason 触发原因（透出运维可读文案，同 Status.Reason）。
@@ -511,8 +512,16 @@ const (
 )
 
 // defaultSoftRateMax 软冷却指数退避的默认封顶：softRateMax 未注入（<=0）时按此值算，
-// 避免测试/裸用池时退避无上限。
+// 避免测试/裸用池时退避无上限。**只作用于账号级软冷却**，不裁剪 6004 模型级冷冻。
 const defaultSoftRateMax = 2 * time.Hour
+
+// defaultModelRateMax 6004 模型级冷冻的默认硬顶。上游重置墙钟是权威事实，正常
+// 远小于 24h；此上限只防脏数据把某号某模型永久冻死（例如文案年份解析错）。
+const defaultModelRateMax = 24 * time.Hour
+
+// defaultModelProbeCooldown 6004 无可解析重置时间时的模型级探测冷却。
+// 只锁该模型（不罚整号），到期由选号自然重探——探测一次的成本远低于冻结整号。
+const defaultModelProbeCooldown = 30 * time.Minute
 
 // defaultDegrade* 连败降权默认参数（issue #114）：连败 5 次临时出池 10 分钟。
 const (

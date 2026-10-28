@@ -385,7 +385,25 @@ func (p *Pool) inFlightFull(e *entry) bool {
 	return e.inFlight.Load() >= int64(limit)
 }
 
-// minPickGap 防并发撞号窗口：同一账号在该窗口内不重复被选中（除非 top5 全部刚被用过）。
+// EligibleForModel 报告当前对指定模型可选的账号数（healthyForModel 口径：排除
+// 禁用/暂停/账号级冷却/熔断/该模型的 6004 冷冻）。供 handler 计算「模型级限流」
+// 的换号预算：6004 只锁 (账号,模型)，池里通常还有大量可用号，不该被账号级预算
+// （默认 3）卡死。分组作用域/在途/积分保底未纳入——多算的余量由「选号返回 nil」
+// 自然终止，不会真的多打上游。O(N)，仅请求入口调一次。
+func (p *Pool) EligibleForModel(model string) int {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	now := time.Now()
+	n := 0
+	for _, e := range p.byUID {
+		if e.healthyForModel(now, model) {
+			n++
+		}
+	}
+	return n
+}
+
+// minPickGap 防并发撞号窗口：同一账号在该窗口内不被重复选中（除非 top5 全部刚被用过）。
 // 生产默认 100ms；纯加权分布测试可临时置 0 关闭防撞号。
 var minPickGap = 100 * time.Millisecond
 

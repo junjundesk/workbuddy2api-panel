@@ -253,7 +253,7 @@ mkdir -p auths data && cp config.example.json config.json
 docker run -d --name workbuddy2api \
   -p 7863:7863 -e TZ=Asia/Shanghai \
   -v ./auths:/app/auths -v ./data:/app/data -v ./config.json:/app/config.json \
-  ghcr.io/linguo2625469/workbuddy2api-panel:latest
+  ghcr.io/junjundesk/workbuddy2api-panel:latest
 
 # 3. 健康检查（无可用账号时返回 503）
 curl -s http://localhost:7863/healthz
@@ -269,7 +269,7 @@ curl -s http://localhost:7863/healthz
 
 ```bash
 # 1. 克隆
-git clone https://github.com/linguo2625469/workbuddy2api-panel.git
+git clone https://github.com/junjundesk/workbuddy2api-panel.git
 cd workbuddy2api-panel
 
 # 2. 准备配置（compose 挂载此文件，缺失会导致容器启动失败）
@@ -379,12 +379,15 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `auth_dir` | `./auths` | 账号凭证目录 |
 | `state_file` | `./data/state.json` | 账号池状态持久化文件 |
 | `server.read_timeout` | `300s` | 入站请求读取（含 body 上传）总时长上限；大上下文/文件块经反代转发超时会 400 `read body: i/o timeout`；`0` = 不限制；改动需重启（#100） |
+| `server.max_rotate` | `3` | 单请求最多换号次数（账号级错误 / 5xx / 超时）；多号池调大可减少"坏号多"时的失败率，代价是最坏尾延迟 |
+| `server.max_rotate_model_limit` | `8` | 模型级限流（6004）的换号预算硬顶：按"该模型当前可用号数"放宽，但不超过此值（防某模型全池耗干时把整个池打一遍） |
 | `panel.package_detail_limit` | `5` | 积分构成页单账号默认展示的最早到期包数；其余未用完包与已用完包聚合折叠 |
 | `logging.request_archive_enabled` | `true` | 请求元数据 JSONL 归档开关；不记录提示词、响应正文或 Authorization |
 | `logging.request_retention_days` | `7` | 请求归档保留天数；超期文件在启动和周期清理时删除 |
 | `logging.request_archive_max_mb` | `100` | 请求归档总容量上限（MiB）；超限优先删除最旧文件 |
 | `cooldown.soft_rate` | `600s` | 软限流（429 / 限流文案）冷却基数；同一账号连续触发按 2 倍指数退避 |
-| `cooldown.soft_rate_max` | `2h` | 软冷却指数退避封顶 |
+| `cooldown.soft_rate_max` | `2h` | 账号级软冷却指数退避封顶（**不裁剪** 6004 模型级冷冻） |
+| `cooldown.model_rate_max` | `24h` | 6004 模型级冷冻硬顶：上游重置墙钟是权威事实，此值只防脏数据把某号某模型永久冻死 |
 | `schedule.checkin_hours` | `[9, 21]` | 每日本地时区整点签到 + 余额查询解冻。空数组 / `null` = 未配置回落默认（不是禁用） |
 | `schedule.travel_hours` | `[9, 21]` | 每日本地时区整点推进猫猫旅行状态机（领养 / 派出 / 领奖） |
 | `schedule.activity_hours` | `[10]` | 每日本地时区整点对话活跃上报（点亮连登 + 解锁 `first_buddy`） |
@@ -503,7 +506,7 @@ WARN: [server] stream ...: saw M native tool call block(s) but repaired none (to
 | 分类 | 触发条件 | 账号处置 | 恢复 |
 |---|---|---|---|
 | 余额不足 | HTTP 402 / body 含余额关键词 | 硬冷却到**次日 04:00**（本地时区） | 签到（09/21 点）余额恢复自动解冻 |
-| 频控 | HTTP 429 / 限流文案（不限状态码） | 软冷却 `soft_rate`（600s 起，连续触发指数退避，封顶 `soft_rate_max`）。**`code 6004`（模型级）带「将在 … 重置」时**冷却到上游重置墙钟并豁免切模型（见[常见问题](#429-code6004模型级限流的冷却语义)） | 到期自动恢复 / 成功清零退避 |
+| 频控 | HTTP 429 / 限流文案（不限状态码） | 账号级软冷却 `soft_rate`（600s 起，连续触发指数退避，封顶 `soft_rate_max`）。**`code 6004`（模型级）**只锁 (账号, 模型)：冷冻到上游重置墙钟（硬顶 `model_rate_max`，默认 24h），账号其他模型立即可用，换号预算放宽到 `max_rotate_model_limit`（见[常见问题](#429-code6004模型级限流的冷却语义)） | 到期自动恢复 / 成功清零退避 |
 | Session 失效 | body 含 `Offline user session not found` / `12153` | **连续 3 次**才永久禁用（一次 12153 多为临时抖动：网络 / 闪断 / refresh 竞态）；刷新成功 / 任意成功 / 手工复活清计数 | 人工重新登录（`login.sh`）或 `ReviveDisabled` 复活 |
 | 上游 404 | HTTP 404 | 软冷却固定 60s（不随 `soft_rate`、不单独退避） | 到期自动恢复 |
 | 服务端错误 | HTTP ≥500 | 喂连续失败计数，达阈值熔断 | 熔断到期 / 成功清零 |
@@ -686,7 +689,7 @@ http://127.0.0.1:7863/panel/
   - `允许本组账号进入公共池`：公共池请求可命中本组账号；
   - `允许本组调用公共池账号`：本组账号优先，本组无可用账号时才回源公共池。
 - **分组密钥**：创建/轮换时显示一次，服务端只保存 SHA-256；`Authorization: Bearer <分组密钥>` 只能访问本组账号，不能访问面板或公共池。主 `api_key` 仍走公共池。
-- **分组代理**：支持 HTTP / SOCKS5（本地 DNS）/ SOCKS5H（远程 DNS）；覆盖聊天、OAuth、余额、模型探测以及签到/保活/旅行/活跃等全部出站请求。代理不可用时直接失败，不回落直连。
+- **分组代理**：支持 HTTP / SOCKS5（本地 DNS）/ SOCKS5H（远程 DNS）；覆盖聊天、OAuth、余额、模型探测以及签到/保活/旅行/活跃等全部出站请求。代理不可用时直接失败，不回落直连。面板「测试连接」除耗时与 HTTP 状态外，还会显示经该代理的**实际出口 IP 与归属地**（服务端经同一代理访问 `https://myip.ipip.net/` 取回，前端不直连第三方）。
 - **分组导入/添加**：分组页支持单账号或批量 JSON 导入、浏览器 OAuth 添加账号；删除分组时可选「账号移到公共池」或「完全删除（含 auth 文件）」。
 
 **配置热生效**：保存配置后，`api_key`、`cooldown.soft_rate`、`features.sanitize_blacklist_fingerprints`、
@@ -709,6 +712,8 @@ http://127.0.0.1:7863/panel/
 | 写入 | `POST config`（校验 → 落盘 → 热应用，返回需重启字段清单）· `POST usage/save`（立即把内存用量落盘） |
 
 账号运维操作均落到池既有入口（`Revive`/`Disable`/`Remove` 等），与 `/status` 观测口径一致。
+
+**代理测试返回**：`POST groups/{id}/proxy/test` 用提交的代理**并行**做两件事——连通上游站点（`latency_ms` / `status` / `target`）与探测出口（`exit_ip` / `exit_region` / `ip_latency_ms`，探测失败给 `ip_error`）。两侧独立：代理只对部分域名生效时，`ok:false` 仍可能带回 `exit_ip`，据此可判断是"代理没生效"还是"目标站点不可达"。
 
 **账号级实时模型列表**：`GET /panel/api/accounts/{uid}/models` 用**指定账号直连上游**拉取模型目录（不读 `/v1/models` 与面板的 10 分钟缓存），返回该账号自己可见模型的全部字段，并与**同账号上一次拉取**对比给出 `added`/`removed`（首次调用只建基线，不编造变化）。用途：对比不同账号（套餐 / 域 / 灰度）可见模型的差异、确认某个账号是否真的没有被下发新模型。账号池每行的「模型」按钮即调此接口；「模型与档位」页反映的是该域**首个可用账号**的目录（缓存口径），两者用途不同。
 
@@ -950,11 +955,15 @@ python3 scripts/probe_max_tokens.py   --base http://127.0.0.1:7863/v1 --key sk-x
 
 ### 429 code=6004（模型级限流）的冷却语义？
 
-上游 `429` + `code 6004` 是**该模型的使用量超限**（msg 通常带「将在 YYYY-MM-DD HH:MM:SS UTC+8 重置」），**不是账号整体被限流**。网关的处理：
+上游 `429` + `code 6004` 是**该模型的使用量超限**（msg 通常带「将在 YYYY-MM-DD HH:MM:SS UTC+8 重置」），**不是账号整体被限流**。网关的处理是**只锁 (账号, 模型)**：
 
-- **冷却到上游重置时间**：msg 带「将在 … 重置」时，账号冷却 `until` 精确等于该墙钟（按 UTC+8 解释），并封顶 `soft_rate_max`（默认 2h）
-- **切模型立即可用**：冷却由 6004 触发时会记录触发模型；同一账号改用**其他模型**请求时视为可用。同模型或未记录模型的冷却回到现状
-- **退回指数退避**：6004 无「将在 … 重置」文案，或非 6004 的普通软限流 → 仍是 `soft_rate`（600s 起，连续触发指数退避，封顶 `soft_rate_max`）
+- **冷冻到上游重置时间**：msg 带「将在 … 重置」时，该账号该模型的冷冻截止**精确等于该墙钟**（按 UTC+8 解释），只受 `model_rate_max`（默认 24h，仅防脏数据）硬顶约束——**不再**被账号级 `soft_rate_max` 裁剪
+- **账号本人不受罚**：冻结只写 `modelCooldowns[model]`，账号级 `until`/`softStreak` 一律不动；同一账号改用**其他模型**立刻可用（模型豁免），其它请求也不会再选它打这个模型
+- **粘性自动解绑**：会话粘性号若在该模型上被冻，选号时 `PickByUIDForModel` 判否 → 解绑走普通轮换，不会一直钉着它
+- **到点自动解锁**：`now ≥ Until` 即惰性解除（无需定时任务/人工操作），面板 `rate_limited_models` 台账同步消失
+- **换号预算**：6004 触发的换号不受 `server.max_rotate`（默认 3）限制，按「该模型当前可用号数」放宽到 `server.max_rotate_model_limit`（默认 8），且不做 500ms/1s 轮转退避
+- **无重置文案**：仍只锁该模型，用 30 分钟探测 TTL（**不会**退化成账号级冷却）
+- **全池该模型都被冻**：429 + `Retry-After`（精确到最早解封时刻）+ `gateway_hint` 提示「换模型可立刻恢复」；上游原文（含 requestId）照旧透传
 
 ### 多图会话请求体超限怎么办？
 

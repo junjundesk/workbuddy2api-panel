@@ -154,6 +154,18 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 			} else {
 				var chunk map[string]any
 				if json.Unmarshal([]byte(payload), &chunk) == nil {
+					// 上游 200 已开流却发来 error 帧（6004 限流 / 审核 / 参数错误）：
+					// 返回分类信封，交给 handler 走与 HTTP 错误码**同一条**处置链路
+					// （换号 / 模型冷冻 / 原文透传）。此前这种帧被聚合忽略，最终以
+					// "empty upstream stream" → 502 upstream_parse 收场——限流被伪装成
+					// 不可重试的服务端故障，客户端只会无脑重试。
+					if _, hasErr := chunk["error"]; hasErr {
+						kind := FrameKind(payload)
+						if kind == ErrNone {
+							kind = ErrServer // 无法分类的错误帧属上游故障：喂熔断，不猜业务语义
+						}
+						return nil, &Error{Kind: kind, Status: http.StatusBadRequest, Msg: payload}
+					}
 					// 有效事件计数：仅 JSON 解析成功的数据帧计入（解析失败沿用静默 continue）。
 					validEvents++
 					if v, ok := chunk["id"].(string); ok && id == "" {

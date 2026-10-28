@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -706,12 +708,10 @@ func TestChat6004ModelResetCoolsToParsedTime(t *testing.T) {
 	}
 }
 
-// TestChat6004WithoutResetFallsBackToBackoff 6004 无时间文案 → 退回 600s 基数软冷却
-// （现状不变）。
-func TestChat6004WithoutResetFallsBackToBackoff(t *testing.T) {
-	var calls int
+// TestChat6004WithoutResetFreezesModelOnly 6004 无时间文案 → 只锁 (账号, 模型)
+// （30m 探测 TTL），**不得**退化成账号级冷却：该号其他模型必须立刻可用。
+func TestChat6004WithoutResetFreezesModelOnly(t *testing.T) {
 	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
-		calls++
 		if authz == "Bearer at-bad" {
 			return 429, `{"code":6004,"msg":"model usage limit exceeded"}`, false
 		}
@@ -731,15 +731,142 @@ func TestChat6004WithoutResetFallsBackToBackoff(t *testing.T) {
 		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
 	}
 	st, _ := p.Status("bad")
-	if !st.Cooling || st.CoolKind != "soft_rate" {
-		t.Fatalf("bad should be soft cooling: %+v", st)
-	}
-	// 冷却时长 = 注入 soft 基数(60s)，非解析时间（无重置文案）。
-	if st.CoolRemaining <= 0 || st.CoolRemaining > 60 {
-		t.Errorf("cool_remaining_sec=%d want ~60 (soft base, not parsed)", st.CoolRemaining)
+	if st.Cooling {
+		t.Fatalf("6004 无时间文案不得把整号冷却: %+v", st)
 	}
 	if len(st.RateLimitedModels) != 1 || st.RateLimitedModels[0].Model != "glm-5.3" || st.RateLimitedModels[0].Kind != "rate_limit" {
-		t.Fatalf("rate-limited models=%+v, want audit row for glm-5.3", st.RateLimitedModels)
+		t.Fatalf("rate-limited models=%+v, want model-level row glm-5.3", st.RateLimitedModels)
+	}
+	if rem := time.Until(st.RateLimitedModels[0].Until); rem <= 0 || rem > 31*time.Minute {
+		t.Errorf("探测 TTL 应 ~30m, got %v", rem)
+	}
+	// 换个模型必须立刻能用这个号（6004 只锁模型）。
+	p.SetRandomSource(func(n int64) int64 { return 0 })
+	if got := p.PickExcludingForModel(nil, "hy3-x"); got == nil || got.UID != "bad" {
+		t.Fatalf("不同模型应可选 bad, got %+v", got)
+	}
+}
+
+// TestChat6004RotatesBeyondAccountBudget 多号池关键回归：前 3 个号都被 6004 冷冻时，
+// 请求必须继续换号直到找到可用号（旧实现 MaxRotate=3 会直接回 429，尽管池里还有 17 个
+// 对该模型完全可用的号）。
+func TestChat6004RotatesBeyondAccountBudget(t *testing.T) {
+	const total = 20
+	limited := map[string]bool{}
+	auths := make([]*auth.Auth, 0, total)
+	for i := 0; i < total; i++ {
+		uid := fmt.Sprintf("a%02d", i)
+		auths = append(auths, &auth.Auth{UID: uid, AccessToken: "at-" + uid, ExpiresAt: 9999999999})
+		if i < 3 {
+			limited["Bearer at-"+uid] = true
+		}
+	}
+	resetTS := time.Now().Add(time.Hour).In(upstream.SoftRateResetLoc()).Format("2006-01-02 15:04:05")
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		if limited[authz] {
+			return 429, `{"code":6004,"msg":"您的使用量已超出频率限制，将在 ` + resetTS + ` UTC+8 重置，您也可以切换其他模型继续使用。"}`, false
+		}
+		return 200, sseOK, true
+	})
+	p := testPoolWith(auths...)
+	// 被限号权重最高（随机源 0 = 取最高分）→ 保证前三次必然命中它们。
+	for i := 0; i < 3; i++ {
+		p.SetCredits(fmt.Sprintf("a%02d", i), 100000, 0)
+	}
+	for i := 3; i < total; i++ {
+		p.SetCredits(fmt.Sprintf("a%02d", i), 10, 0)
+	}
+	p.SetRandomSource(func(n int64) int64 { return 0 })
+	// 账号级预算仍是 3：证明模型级限流走的是放宽后的预算（默认 8）。
+	h := NewHandler(Config{Pool: p, Upstream: up, MaxRotate: 3})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.3","messages":[]}`)))
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s（应在放宽预算内换到健康号）", rec.Code, rec.Body)
+	}
+	for i := 0; i < 3; i++ {
+		st, _ := p.Status(fmt.Sprintf("a%02d", i))
+		if st.Cooling {
+			t.Errorf("a%02d 应只锁模型不锁账号: %+v", i, st)
+		}
+		if len(st.RateLimitedModels) != 1 || st.RateLimitedModels[0].Model != "glm-5.3" {
+			t.Errorf("a%02d 应有 glm-5.3 模型冷冻台账: %+v", i, st.RateLimitedModels)
+		}
+	}
+}
+
+// TestChat6004ErrorFrameNonStreamRotates 上游 200 + error 帧（6004）在**非流式**请求里
+// 也必须换号兜底：此前这种帧被聚合忽略 → 502 upstream_parse（客户端当服务端故障重试），
+// 账号也不会被冷冻。现在走与 HTTP 错误码同一条处置链路。
+func TestChat6004ErrorFrameNonStreamRotates(t *testing.T) {
+	ts := time.Now().Add(time.Hour).In(upstream.SoftRateResetLoc()).Format("2006-01-02 15:04:05")
+	frame := "data: {\"error\":{\"code\":6004,\"msg\":\"您的使用量已超出频率限制，将在 " + ts + " UTC+8 重置\"}}\n\ndata: [DONE]\n\n"
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) {
+		if authz == "Bearer at-bad" {
+			return 200, frame, true
+		}
+		return 200, sseOK, true
+	})
+	p := testPoolWith(
+		&auth.Auth{UID: "bad", AccessToken: "at-bad", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "good", AccessToken: "at-good", ExpiresAt: 9999999999},
+	)
+	p.SetCredits("bad", 2000, 0)
+	p.SetCredits("good", 1000, 0)
+	p.SetRandomSource(func(n int64) int64 { return 0 })
+	h := NewHandler(Config{Pool: p, Upstream: up})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.3","messages":[],"stream":false}`)))
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s（200+error 帧应换号兜底，不是 502）", rec.Code, rec.Body)
+	}
+	st, _ := p.Status("bad")
+	if st.Cooling {
+		t.Fatalf("6004 不得写账号级冷却: %+v", st)
+	}
+	if len(st.RateLimitedModels) != 1 || st.RateLimitedModels[0].Model != "glm-5.3" {
+		t.Fatalf("bad 应有 glm-5.3 模型冷冻台账: %+v", st.RateLimitedModels)
+	}
+}
+
+// TestChatAll6004Returns429WithRetryAfter 全池该模型都被 6004 冷冻 → 429（时间性、
+// 可重试）+ Retry-After 精确到最早解封时刻；上游原文（含 requestId）原样透传，
+// hint 给出"换模型可立刻恢复"的出路，不谎称"没有可用账号"。
+func TestChatAll6004Returns429WithRetryAfter(t *testing.T) {
+	reset := time.Now().Add(2 * time.Hour).Truncate(time.Second)
+	ts := reset.In(upstream.SoftRateResetLoc()).Format("2006-01-02 15:04:05")
+	body := `{"code":6004,"msg":"您的使用量已超出频率限制，将在 ` + ts + ` UTC+8 重置，您也可以切换其他模型继续使用。","requestId":"0d8d67d55d698ca51450303b98ef4bb0"}`
+	up := newFakeUpstream(t, func(authz string) (int, string, bool) { return 429, body, false })
+	p := testPoolWith(
+		&auth.Auth{UID: "a1", AccessToken: "at-a1", ExpiresAt: 9999999999},
+		&auth.Auth{UID: "a2", AccessToken: "at-a2", ExpiresAt: 9999999999},
+	)
+	h := NewHandler(Config{Pool: p, Upstream: up})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/v1/chat/completions",
+		strings.NewReader(`{"model":"glm-5.3","messages":[]}`)))
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("code=%d body=%s（全池模型级冷冻应保持 429 可重试语义）", rec.Code, rec.Body)
+	}
+	ra := rec.Header().Get("Retry-After")
+	if ra == "" {
+		t.Fatal("缺少 Retry-After 头（客户端只能盲等）")
+	}
+	secs, err := strconv.Atoi(ra)
+	if err != nil || secs < 3600 || secs > 3*3600 {
+		t.Errorf("Retry-After=%q want ~2h", ra)
+	}
+	out := rec.Body.String()
+	if !strings.Contains(out, "rate_limit_exceeded") {
+		t.Errorf("body=%s want code rate_limit_exceeded", out)
+	}
+	if !strings.Contains(out, "0d8d67d55d698ca51450303b98ef4bb0") {
+		t.Errorf("上游原文（requestId）应透传: %s", out)
+	}
+	if !strings.Contains(out, "model_rate_limited") {
+		t.Errorf("hint 应说明是模型级冷冻: %s", out)
 	}
 }
 

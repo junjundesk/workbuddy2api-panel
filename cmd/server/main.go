@@ -112,7 +112,8 @@ func main() {
 	p.SetMaxInFlight(cfg.Pool.MaxInFlight)
 	p.SetMaxInFlightGlobal(cfg.Pool.MaxInFlightGlobal) // global 域 WAF 风控分档（P1-1）
 	p.SetDegrade(cfg.Pool.DegradeThreshold, cfg.DegradeCooldownDur, cfg.DegradeCooldownMaxD)
-	p.SetSoftRateMax(cfg.SoftRateMaxDur)                 // 软冷却指数退避封顶（soft_rate_max，默认 2h）
+	p.SetSoftRateMax(cfg.SoftRateMaxDur)                 // 账号级软冷却指数退避封顶（soft_rate_max，默认 2h）
+	p.SetModelRateMax(cfg.ModelRateMaxDur)               // 6004 模型级冷冻硬顶（model_rate_max，默认 24h）
 	p.SetCostExploreInterval(cfg.CostExploreIntervalDur) // costTier 探索窗口（issue #136，默认 30m；0 关停）
 	p.SetCreditFloor(cfg.Pool.CreditFloor)               // 积分保底（默认 0 = 关闭）
 	p.SetWeights(cfg.Pool.IdleWeightPerHour, cfg.Pool.IdleWeightMax)
@@ -325,20 +326,23 @@ func main() {
 	server.SetChatLogOutput(io.MultiWriter(os.Stdout, pn.Logs()))
 
 	h := server.NewHandler(server.Config{
-		Pool:         p,
-		Upstream:     up,
-		APIKey:       cfg.APIKey,
-		Groups:       groupStore,
-		Session:      sessRouter,
-		StickyCount:  sessCount,
-		RedisMode:    redisMode,
-		SoftCooldown: cfg.SoftRateDur,
-		Panel:        pn,
-		Live:         live,
-		Usage:        rec,
-		RequestLog:   requestLog,
-		PromptMode:   cfg.Prompt.Mode,
-		PromptText:   cfg.PromptText,
+		Pool:     p,
+		Upstream: up,
+		APIKey:   cfg.APIKey,
+		// 换号预算：基础 3（账号级错误/5xx/超时），模型级限流（6004）放宽到 8。
+		MaxRotate:           cfg.Server.MaxRotate,
+		MaxRotateModelLimit: cfg.Server.MaxRotateModelLimit,
+		Groups:              groupStore,
+		Session:             sessRouter,
+		StickyCount:         sessCount,
+		RedisMode:           redisMode,
+		SoftCooldown:        cfg.SoftRateDur,
+		Panel:               pn,
+		Live:                live,
+		Usage:               rec,
+		RequestLog:          requestLog,
+		PromptMode:          cfg.Prompt.Mode,
+		PromptText:          cfg.PromptText,
 		// 来源记录开关经 livecfg 热生效；此处同时填静态字段，供 Live 为 nil 的
 		// 裸用/测试路径拿到同一缺省值。
 		RecordClientInfo: cfg.Logging.RequestClientInfo,
@@ -527,6 +531,7 @@ func saveConfig(raw []byte, path string, live *livecfg.Holder, p *pool.Pool, up 
 	p.SetMaxInFlightGlobal(newCfg.Pool.MaxInFlightGlobal)
 	p.SetDegrade(newCfg.Pool.DegradeThreshold, newCfg.DegradeCooldownDur, newCfg.DegradeCooldownMaxD)
 	p.SetSoftRateMax(newCfg.SoftRateMaxDur)
+	p.SetModelRateMax(newCfg.ModelRateMaxDur)
 	p.SetCostExploreInterval(newCfg.CostExploreIntervalDur) // costTier 探索窗口热生效（0 关停）
 	p.SetCreditFloor(newCfg.Pool.CreditFloor)               // 积分保底热生效（0 = 关闭）
 	p.SetWeights(newCfg.Pool.IdleWeightPerHour, newCfg.Pool.IdleWeightMax)

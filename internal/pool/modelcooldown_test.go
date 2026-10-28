@@ -91,13 +91,13 @@ func TestCooldownSoftForModelDoesNotClobberUntil(t *testing.T) {
 	}
 }
 
-// TestCooldownSoftForModelCapsUntilKeepsResetAt 6004 写 modelCooldowns：
-// until 截断到 soft_rate_max，reset_at 保留上游原始墙钟（issue #36 台账语义迁移）。
-func TestCooldownSoftForModelCapsUntilKeepsResetAt(t *testing.T) {
+// TestCooldownSoftForModelKeepsUpstreamReset 6004 冷冻精确对齐上游重置墙钟：
+// 账号级退避封顶 soft_rate_max 不得裁剪它（那是"退避估计"的封顶，不是上游事实）。
+func TestCooldownSoftForModelKeepsUpstreamReset(t *testing.T) {
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
-	p.SetSoftRateMax(10 * time.Minute)
-	reset := time.Now().Add(2 * time.Hour) // 远超封顶 → until 截断到 10m，reset_at 保留 2h
+	p.SetSoftRateMax(10 * time.Minute) // 账号级封顶：不得影响模型级冷冻
+	reset := time.Now().Add(2 * time.Hour)
 	p.CooldownSoftForModel("u1", 600*time.Second, reset, "glm-5.3", "6004 model rate limit")
 	p.mu.RLock()
 	mc, ok := p.byUID["u1"].modelCooldowns["glm-5.3"]
@@ -105,11 +105,54 @@ func TestCooldownSoftForModelCapsUntilKeepsResetAt(t *testing.T) {
 	if !ok {
 		t.Fatal("modelCooldowns 缺少 glm-5.3")
 	}
-	if rem := mc.Until.Sub(time.Now()); rem <= 0 || rem > 10*time.Minute+time.Second {
-		t.Errorf("Until 应在 (0,10m] 区间，实际剩余 %v", rem)
+	if d := mc.Until.Sub(reset); d < -time.Second || d > time.Second {
+		t.Errorf("Until=%v want ~reset=%v（不得被 soft_rate_max=10m 裁剪）", mc.Until, reset)
 	}
 	if d := mc.ResetAt.Sub(reset); d < -time.Second || d > time.Second {
-		t.Errorf("ResetAt=%v want ~2h 后=%v", mc.ResetAt, reset)
+		t.Errorf("ResetAt=%v want ~%v", mc.ResetAt, reset)
+	}
+	// 账号级维度必须一动不动：6004 只锁 (账号, 模型)。
+	if st, _ := p.Status("u1"); st.Cooling {
+		t.Errorf("6004 不得写账号级冷却: %+v", st)
+	}
+}
+
+// TestCooldownSoftForModelHardCap 异常大的重置时间被 model_rate_max 硬顶钳制：
+// 只防脏数据（如年份解析错）把某号某模型永久冻死，ResetAt 仍保留原始墙钟。
+func TestCooldownSoftForModelHardCap(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.SetModelRateMax(6 * time.Hour)
+	reset := time.Now().Add(48 * time.Hour)
+	p.CooldownSoftForModel("u1", 600*time.Second, reset, "glm-5.3", "6004 model rate limit")
+	p.mu.RLock()
+	mc := p.byUID["u1"].modelCooldowns["glm-5.3"]
+	p.mu.RUnlock()
+	if rem := mc.Until.Sub(time.Now()); rem > 6*time.Hour+time.Second {
+		t.Errorf("Until 剩余 %v 应被 model_rate_max=6h 钳制", rem)
+	}
+	if d := mc.ResetAt.Sub(reset); d < -time.Second || d > time.Second {
+		t.Errorf("ResetAt 应保留原始墙钟, got %v", mc.ResetAt)
+	}
+}
+
+// TestAccountCooldownKeepsModelFreeze 账号级冷却（别的模型吃 429）不得清掉 6004 冷冻：
+// 两个维度正交——账号冷却期间整号本就不选，无需删除模型条目来"防豁免泄漏"，
+// 而删除会让「锁到上游重置墙钟」的承诺提前失效。
+func TestAccountCooldownKeepsModelFreeze(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	reset := time.Now().Add(3 * time.Hour)
+	p.CooldownSoftForModel("u1", time.Minute, reset, "glm-5.3", "6004 model rate limit")
+	p.Cooldown("u1", CoolSoft, time.Minute, "429 rate limit") // 另一个模型上的账号级冷却
+	p.mu.RLock()
+	mc, ok := p.byUID["u1"].modelCooldowns["glm-5.3"]
+	p.mu.RUnlock()
+	if !ok {
+		t.Fatal("账号级冷却把 6004 模型冷冻清掉了")
+	}
+	if d := mc.Until.Sub(reset); d < -time.Second || d > time.Second {
+		t.Errorf("冷冻截止被改写: %v want %v", mc.Until, reset)
 	}
 }
 

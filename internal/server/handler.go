@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 
 	"sync"
@@ -31,10 +32,15 @@ import (
 
 // Config handler 依赖。
 type Config struct {
-	Pool      *pool.Pool
-	Upstream  *upstream.Client
-	APIKey    string // 空 = 不鉴权（静态值；与 Live 同时给出时 Live 优先）
-	MaxRotate int    // 单请求最多换号次数，默认 3
+	Pool     *pool.Pool
+	Upstream *upstream.Client
+	APIKey   string // 空 = 不鉴权（静态值；与 Live 同时给出时 Live 优先）
+	// MaxRotate 单请求最多换号次数（账号级错误 / 5xx / 超时），默认 3。
+	MaxRotate int
+	// MaxRotateModelLimit 模型级限流（6004）的换号预算硬顶，默认 8。
+	// 6004 只锁 (账号,模型)，多号池里通常还有大量可用号，不该被账号级预算卡死；
+	// 硬顶则防止某模型全池耗干时，每个客户端请求把整个池打一遍（放大上游调用）。
+	MaxRotateModelLimit int
 	// Session 会话粘性路由器（可选；nil = 关闭粘性，纯 Pick 轮换）。
 	Session *session.Router
 	// StickyCount 返回当前粘性会话绑定数（供 /status）；nil 时报告 0。
@@ -145,6 +151,9 @@ type Handler struct {
 func NewHandler(cfg Config) *Handler {
 	if cfg.MaxRotate <= 0 {
 		cfg.MaxRotate = 3
+	}
+	if cfg.MaxRotateModelLimit <= 0 {
+		cfg.MaxRotateModelLimit = 8
 	}
 	if cfg.SoftCooldown <= 0 {
 		cfg.SoftCooldown = 600 * time.Second // 软限流基数（连续触发按指数退避放大）
@@ -904,7 +913,19 @@ func (h *Handler) chatCompletionsIn(w http.ResponseWriter, r *http.Request, in *
 	}
 	chatMeta.TraceID = r.Header.Get("X-Trace-ID")
 
-	for i := 0; i < h.cfg.MaxRotate; i++ {
+	// 换号预算：基础 MaxRotate（账号级错误/5xx/超时），并按「该模型当前可选号数」
+	// 放宽——6004 只锁 (账号,模型)，多号池里 3 次预算会让「还有十几个号能用」的请求
+	// 也直接回 429。放宽量受 MaxRotateModelLimit 硬顶约束（防止某模型全池耗干时，
+	// 每个客户端请求都把整个池打一遍）。分组作用域过滤只会让实际候选更少，多算的
+	// 余量由「选号返回 nil」自然终止。
+	maxAttempts := h.cfg.MaxRotate
+	if n := h.cfg.Pool.EligibleForModel(bareModel); n > maxAttempts {
+		if n > h.cfg.MaxRotateModelLimit {
+			n = h.cfg.MaxRotateModelLimit
+		}
+		maxAttempts = n
+	}
+	for i := 0; i < maxAttempts; i++ {
 		// 选号：粘性号优先（PickByUIDForModel 已校验该模型可用性 + 在途未满），否则普通轮换。
 		var acct *auth.Auth
 		if stickyUID != "" {
@@ -1123,6 +1144,15 @@ func (h *Handler) chatCompletionsIn(w http.ResponseWriter, r *http.Request, in *
 			if kind == upstream.ErrWafBlock && h.wafIP.noteWaf(scope.GroupID, acct.UID) {
 				break
 			}
+			// 6004 模型级限流：该号该模型已被冷冻，换下一个号立刻可用——退避
+			// 500ms/1s 只是把客户端延迟堆起来（一次请求可能换到 8 个号）。
+			// 其余分类仍走退避（上游可能在抖，连打会加重风控）。
+			if kind == upstream.ErrSoftRate && upstream.IsModelRateLimit(string(respBody)) {
+				if r.Context().Err() != nil {
+					break // 客户端断连：终止轮转
+				}
+				continue
+			}
 			if !rotateBackoff(i, r.Context()) {
 				break // ctx 取消：终止轮转（分类错误换号退避）
 			}
@@ -1237,7 +1267,27 @@ func (h *Handler) chatCompletionsIn(w http.ResponseWriter, r *http.Request, in *
 		rc.Close()
 		if err != nil {
 			recordAttempt(acct.UID, pool.TokenUsageDelta{}, 0, false, attemptStarted, 0)
-			// 上游流解析失败：客户端还没看到任何输出，回 502 并告知原因。
+			// 上游 200 + error 帧（如 6004 模型级限流）：客户端还没看到任何输出，
+			// 走与 HTTP 错误码同一条处置链路——冷冻该账号该模型并继续换号，
+			// 而不是把业务错误伪装成 502 upstream_parse（客户端会当服务端故障重试）。
+			var ue *upstream.Error
+			if errors.As(err, &ue) {
+				lastErr = ue
+				st.status = ue.Status
+				h.applyErrorPolicy(acct.UID, ue.Kind, ue.Msg, bareModel, ue)
+				fail(acct.UID)
+				if ue.Kind == upstream.ErrSoftRate && upstream.IsModelRateLimit(ue.Msg) {
+					if r.Context().Err() != nil {
+						break
+					}
+					continue
+				}
+				if !rotateBackoff(i, r.Context()) {
+					break
+				}
+				continue
+			}
+			// 其余是解析层失败（畸形流/空流）：客户端还没看到任何输出，回 502 并告知原因。
 			writeOpenAIError(w, http.StatusBadGateway, "upstream_parse", err.Error())
 			st.status = http.StatusBadGateway
 			st.outcome = reqlog.OutcomeHTTPError
@@ -1315,7 +1365,15 @@ func (h *Handler) chatCompletionsIn(w http.ResponseWriter, r *http.Request, in *
 		case upstream.ErrSoftRate:
 			status = http.StatusTooManyRequests
 			code = "rate_limit_exceeded"
-			msg = "rate limited: all accounts are cooling down, please wait a moment and try again"
+			// 多号池里"all accounts are cooling down"是误导：本次只试过 tried 个号。
+			msg = fmt.Sprintf("rate limited: tried %d account(s) for this model and all hit upstream rate limit; retry after the reset time or switch model",
+				len(tried))
+			// 精确等待信号：客户端认 Retry-After 远强于读中文文案。
+			if until, ok := upstream.ParseRateReset(ue.Msg); ok {
+				setRetryAfter(w, until)
+			} else if ue.RetryAfter > 0 {
+				setRetryAfter(w, time.Now().Add(ue.RetryAfter))
+			}
 		case upstream.ErrWafBlock:
 			if h.wafIP.active(scope.GroupID) {
 				// IP 级拦截措辞（fail-fast 终止路径）：网关出口 IP 被 WAF 拦截、
@@ -1338,6 +1396,14 @@ func (h *Handler) chatCompletionsIn(w http.ResponseWriter, r *http.Request, in *
 			upstreamMsgPassed = true
 		}
 	}
+	// 轮转结束后重取一次模型级阻塞快照：循环里只在「选号返回 nil」时取，若本轮
+	// 最后一个号刚被 6004/11102 冷冻，这里必须补一次才能得到「全池该模型不可用」的
+	// 准确结论——否则客户端拿到可重试的 429，会一直重试到重置时刻（正是本次要修的）。
+	if !modelBlock.Blocked && bareModel != "" {
+		if mb := h.cfg.Pool.ModelBlocked(bareModel); mb.Blocked {
+			modelBlock = mb
+		}
+	}
 	// 模型级阻塞覆盖上面的通用文案（放在最后 = 优先级最高）。
 	//
 	// 为什么能覆盖 code 而不丢信息：modelBlock.Reason 就是 BlockModelBackoff 存下的
@@ -1347,20 +1413,34 @@ func (h *Handler) chatCompletionsIn(w http.ResponseWriter, r *http.Request, in *
 	// 用 400 而非 503：这是"你选的这个模型当前不可用"，不是"服务端暂时过载"。
 	// 换号重试必然同样失败，客户端不该按可重试错误处理。
 	if modelBlock.Blocked {
-		code = "model_unavailable"
 		// 有上游原文时保留它（含 requestId，用户要拿去向上游反馈），只把"有几个号
 		// 被挡、最早何时解封"这类本地调度信息放进 gateway_hint。
-		if !upstreamMsgPassed {
-			msg = "model is unavailable on every account (per-model cooldown), try another model"
+		switch modelBlock.Kind {
+		case "model_unavailable":
+			// 11102：该后端永远没有这个模型 → 400（不可重试，唯一出路是换模型）。
+			code = "model_unavailable"
+			status = http.StatusBadRequest
+			if !upstreamMsgPassed {
+				msg = "model is unavailable on every account (per-model cooldown), try another model"
+			}
+			hint = fmt.Sprintf("model_blocked: %d account(s) cannot serve this model", modelBlock.Count)
+		default:
+			// 6004：全池该模型都在冷冻，但这是**时间性**的 → 保持 429（可重试），
+			// 用 Retry-After 精确告知最早解封时刻，hint 里给出"换模型立刻可用"的出路。
+			code = "rate_limit_exceeded"
+			status = http.StatusTooManyRequests
+			if !upstreamMsgPassed {
+				msg = "this model is rate-limited on every account for now; switch to another model or retry after the reset time"
+			}
+			hint = fmt.Sprintf("model_rate_limited: %d account(s) cooling down this model; switch to another model to avoid waiting", modelBlock.Count)
 		}
-		hint = fmt.Sprintf("model_blocked: %d account(s) cooling down this model", modelBlock.Count)
 		if !modelBlock.Until.IsZero() {
 			hint += "; earliest unblock at " + modelBlock.Until.Format(time.RFC3339)
+			setRetryAfter(w, modelBlock.Until)
 		}
 		if s := strings.TrimSpace(modelBlock.Reason); s != "" {
 			hint += "; upstream: " + s
 		}
-		status = http.StatusBadRequest
 	}
 	writeOpenAIErrorHint(w, status, code, msg, hint)
 	st.status = status
@@ -1477,9 +1557,9 @@ func isUpstreamTimeout(err error, clientGone bool) bool {
 //
 // 十条路径，各司其职：
 //   - ErrHardCredit → CooldownUntilTomorrow4AM：即时硬冷却到次日 04:00（等签到恢复）。
-//   - ErrSoftRate → 优先对齐上游重置墙钟（带「将在 … 重置」时 6004 走模型级豁免、
-//     非 6004 走账号级，均不指数堆加）；无重置时间才走有界退避。冷却时长优先采信
-//     Retry-After 头（uerr.RetryAfter，body 文案墙钟之外的头形态来源）。
+//   - ErrSoftRate → 6004 只锁 (账号, 模型) 并精确对齐上游重置墙钟（无文案时用
+//     Retry-After 头，再没有就有界探测 TTL；**永不**降级成账号级冷却）；非 6004
+//     走账号级软冷却（同样优先对齐墙钟/头，最后才是有界退避）。均不做指数堆加。
 //   - ErrWafBlock → 账号级软冷却：**不 Disable**——WAF 403 是 IP/指纹维频控信号，
 //     罚过即走、到期自愈。时长优先 Retry-After 头；缺失按 wafCooldownBase(60s)
 //     起 · softStreak 指数、封顶 soft_rate_max 的既有 CooldownSoftRate 有界退避。
@@ -1510,16 +1590,24 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 不需要异步核查（冗余）。立即换号。
 		h.cfg.Pool.CooldownUntilTomorrow4AM(uid, "余额不足")
 	case upstream.ErrSoftRate:
-		// 统一对齐上游重置时间：只要 body 带「将在 … 重置」，无论业务 code 是
-		// 6004 还是 11140 rate-limiting 等形态，都精确冷却到该墙钟、绝不指数堆加。
-		//   - 模型级（6004）→ CooldownSoftForModel：写 modelCooldowns[model]，切模型豁免。
-		//   - 账号级（非 6004）→ CooldownSoftRate：写账号级 until，不产生模型豁免。
+		// 6004（模型级）与普通 429（账号级）语义不同，必须分流：
+		//   - 6004 → **只锁 (账号, 模型)**：有「将在 … 重置」按该墙钟；只有 Retry-After
+		//     头就按头；两者都没有给有界探测 TTL。绝不降级成账号级冷却——那会让整号
+		//     所有模型陪葬，多号池里等于白扔一个号。
+		//   - 非 6004（普通 429 / 11140 rate-limiting 文案）→ 账号级 until。
 		modelRateLimited := upstream.IsModelRateLimit(body)
-		if resetAt, ok := upstream.ParseRateReset(body); ok {
-			if modelRateLimited {
+		if modelRateLimited {
+			if resetAt, ok := upstream.ParseRateReset(body); ok {
+				// 上游权威恢复时刻：冷冻到点，仅被 model_rate_max 硬顶挡脏值。
 				h.cfg.Pool.CooldownSoftForModel(uid, h.softCooldown(), resetAt, model, "6004 model rate limit")
-				return
+			} else if uerr != nil && uerr.RetryAfter > 0 {
+				h.cfg.Pool.CooldownSoftForModel(uid, h.softCooldown(), time.Now().Add(uerr.RetryAfter), model, "6004 model rate limit (retry-after)")
+			} else {
+				h.cfg.Pool.CooldownSoftForModel(uid, h.softCooldown(), time.Time{}, model, "6004 model rate limit (reset unknown)")
 			}
+			return
+		}
+		if resetAt, ok := upstream.ParseRateReset(body); ok {
 			h.cfg.Pool.CooldownSoftRate(uid, h.softCooldown(), resetAt, "429 rate limit")
 			return
 		}
@@ -1527,18 +1615,12 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 头优先于「有界退避」，但低于 body 重置文案（文案是上游更权威的口径）。
 		if uerr != nil && uerr.RetryAfter > 0 {
 			h.cfg.Pool.CooldownSoftRate(uid, h.softCooldown(), time.Now().Add(uerr.RetryAfter), "429 rate limit (retry-after)")
-			if modelRateLimited {
-				h.cfg.Pool.RecordModelRateLimitAudit(uid, model, "6004 model rate limit (reset unknown)")
-			}
 			return
 		}
 		// 无重置时间 → 账号级有界退避（soft_rate 基数起、softStreak 翻倍、封顶
 		// soft_rate_max；已在冷却中的兜底探测不翻倍）。基数取 h.softCooldown()
 		// （热改优先），管理面板改 soft_rate 后立即生效。
 		h.cfg.Pool.CooldownSoftRate(uid, h.softCooldown(), time.Time{}, "429 rate limit")
-		if modelRateLimited {
-			h.cfg.Pool.RecordModelRateLimitAudit(uid, model, "6004 model rate limit (reset unknown)")
-		}
 	case upstream.ErrWafBlock:
 		// WAF 403（无业务信封拦截形态）。软冷却复用 CooldownSoftRate 家族：基数
 		// wafCooldownBase（60s，抖动后落 [45s,75s]）、softStreak 指数升级、封顶
@@ -1628,6 +1710,20 @@ func writeOpenAIError(w http.ResponseWriter, status int, code, msg string) {
 // （账号本身健康），但比 404 重（带粘性会连环）；60s 级的快速避让已足够让频控窗口
 // 滑过。抖动复用 backoff.go jitterDur（单一来源）。
 const wafCooldownBase = 60 * time.Second
+
+// setRetryAfter 按解封时刻写 Retry-After 响应头（RFC 7231 秒数，向上取整、最小 1s）。
+// 只在确实拿到上游/池内的恢复时刻时调用——没有时间就不编造，客户端仍可按 429 语义退避。
+func setRetryAfter(w http.ResponseWriter, until time.Time) {
+	d := time.Until(until)
+	if d <= 0 {
+		return
+	}
+	secs := int64((d + time.Second - 1) / time.Second)
+	if secs < 1 {
+		secs = 1
+	}
+	w.Header().Set("Retry-After", strconv.FormatInt(secs, 10))
+}
 
 // writeOpenAIErrorHint 同 writeOpenAIError，另在 error 对象上附加
 // error.gateway_hint（hint 为空串时不带字段——未覆盖形态不编造）。

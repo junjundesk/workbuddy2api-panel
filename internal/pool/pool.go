@@ -25,6 +25,10 @@ type Pool struct {
 	breakerCooldownMax time.Duration
 	// softRateMax 软冷却指数退避的封顶（SetSoftRateMax 注入；默认 defaultSoftRateMax）。
 	softRateMax time.Duration
+	// modelRateMax 6004 模型级冷冻的硬顶（SetModelRateMax 注入；默认 defaultModelRateMax）。
+	// 与 softRateMax 分离：6004 的上游重置墙钟是权威事实，不该被"退避估计"的封顶
+	// 裁剪（否则"提示 15:22、2h 后就解冻"）；此值只用于挡脏数据（如解析出 2099 年）。
+	modelRateMax time.Duration
 	// costExploreInterval costTier 条件探索窗口（issue #136 方案 a′，SetCostExploreInterval
 	// 注入；默认 defaultCostExploreInterval 30m）。tier 0 垄断 + tier 1 存在且距上次
 	// 探索 ≥ 窗口时，本次 pick 生效层切 tier 1-only（探索=搭车改道，零新增上游请求）。
@@ -146,6 +150,16 @@ func (p *Pool) SetSoftRateMax(d time.Duration) {
 	defer p.mu.Unlock()
 	if d > 0 {
 		p.softRateMax = d
+	}
+}
+
+// SetModelRateMax 注入 6004 模型级冷冻的硬顶时长（main 从 config 解析后调用）。
+// 非正值保留原值（用默认 24h），风格同 SetSoftRateMax。
+func (p *Pool) SetModelRateMax(d time.Duration) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if d > 0 {
+		p.modelRateMax = d
 	}
 }
 

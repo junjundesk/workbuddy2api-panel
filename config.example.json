@@ -5,7 +5,9 @@
   "state_file": "./data/state.json",
   "server": {
     "read_timeout": "300s",
-    "responses_early_created": true
+    "responses_early_created": true,
+    "max_rotate": 3,
+    "max_rotate_model_limit": 8
   },
   "panel": {
     "package_detail_limit": 5
@@ -18,7 +20,8 @@
   },
   "cooldown": {
     "soft_rate": "600s",
-    "soft_rate_max": "2h"
+    "soft_rate_max": "2h",
+    "model_rate_max": "24h"
   },
   "schedule": {
     "checkin_hours": [9, 21],

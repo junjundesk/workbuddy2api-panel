@@ -870,34 +870,44 @@ func TestCooldownSoftForModelParsedUntil(t *testing.T) {
 	}
 }
 
-func TestCooldownSoftForModelCappedBySoftRateMax(t *testing.T) {
-	// 解析时间超出 soft_rate_max → 截断到 soft_rate_max（不无限期拉黑）。
+func TestCooldownSoftForModelIgnoresSoftRateMax(t *testing.T) {
+	// 6004 的重置墙钟是上游权威事实：账号级 soft_rate_max 不得裁剪模型级冷冻。
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
 	p.SetSoftRateMax(10 * time.Minute)
-	reset := time.Now().Add(2 * time.Hour) // 远超过封顶 10m
-	before := time.Now()
+	reset := time.Now().Add(2 * time.Hour) // 远超账号级封顶 10m
 	p.CooldownSoftForModel("u1", 600*time.Second, reset, "glm-5.3", "429 rate limit")
 	st, _ := p.Status("u1")
 	if len(st.RateLimitedModels) != 1 {
 		t.Fatalf("want model ledger row: %+v", st.RateLimitedModels)
 	}
-	if st.RateLimitedModels[0].Until.Sub(before) > 10*time.Minute+time.Second {
-		t.Errorf("model until=%v want capped at soft_rate_max=10m", st.RateLimitedModels[0].Until)
+	if d := st.RateLimitedModels[0].Until.Sub(reset); d < -time.Second || d > time.Second {
+		t.Errorf("model until=%v want ~reset=%v（soft_rate_max 不得裁剪模型级冷冻）", st.RateLimitedModels[0].Until, reset)
 	}
 }
 
-func TestCooldownSoftForModelNoResetFallbackBackoff(t *testing.T) {
-	// 无解析时间（resetAt 零值）→ 有界退避（600s 起）。冷却中的兜底探测再撞 429
-	// **不推进 streak、不延长**（吸收上游：旧「每次探测都翻倍」正是全池被推到
-	// 2h 封顶的元凶）。
+func TestCooldownSoftForModelNoResetProbesModelOnly(t *testing.T) {
+	// 无解析时间（resetAt 零值）→ 只锁模型，用有界探测 TTL（默认 30m）；
+	// 账号级不 cooling，重复命中不缩短既有冷冻。
 	p := New("")
 	p.Add(&auth.Auth{UID: "u1"})
-	p.SetSoftRateMax(time.Hour)
-	p.CooldownSoftForModel("u1", 600*time.Second, time.Time{}, "", "429 rate limit")
-	wantCoolSec(t, p, "u1", 600, 3)
-	p.CooldownSoftForModel("u1", 600*time.Second, time.Time{}, "", "429 rate limit")
-	wantCoolSec(t, p, "u1", 600, 3) // 仍在冷却中：不堆加
+	p.CooldownSoftForModel("u1", 600*time.Second, time.Time{}, "glm-5.3", "6004 model rate limit (reset unknown)")
+	st, _ := p.Status("u1")
+	if st.Cooling {
+		t.Fatalf("无时间的 6004 不得写账号级冷却: %+v", st)
+	}
+	if len(st.RateLimitedModels) != 1 || st.RateLimitedModels[0].Model != "glm-5.3" {
+		t.Fatalf("want model ledger row glm-5.3: %+v", st.RateLimitedModels)
+	}
+	first := st.RateLimitedModels[0].Until
+	if rem := time.Until(first); rem <= 0 || rem > 31*time.Minute {
+		t.Errorf("探测 TTL 应 ~30m, got %v", rem)
+	}
+	p.CooldownSoftForModel("u1", 600*time.Second, time.Time{}, "glm-5.3", "6004 model rate limit (reset unknown)")
+	st2, _ := p.Status("u1")
+	if d := st2.RateLimitedModels[0].Until.Sub(first); d < -time.Second {
+		t.Errorf("重复命中缩短了冷冻: %v → %v", first, st2.RateLimitedModels[0].Until)
+	}
 }
 
 // TestPickExcludingForModelSkipsSoftCoolingSameModel 冷却中账号（6004 带解析时间，

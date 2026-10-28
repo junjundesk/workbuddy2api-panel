@@ -57,6 +57,14 @@ type Config struct {
 		// false = 旧行为：收到上游第一帧才发首事件（首事件时延 = 上游 TTFT）。
 		// 开局后调度/上游错误一律转成 response.failed 事件（HTTP 已是 200）。
 		ResponsesEarlyCreated bool `json:"responses_early_created"`
+
+		// MaxRotate 单请求最多换号次数（账号级错误 / 5xx / 超时），缺省 3。
+		// 每次换号有一跳上游调用，调大只影响"坏号多"时的尾延迟。
+		MaxRotate int `json:"max_rotate"`
+		// MaxRotateModelLimit 模型级限流（6004）触发的换号预算硬顶，缺省 8。
+		// 6004 只锁 (账号, 模型)，多号池里 3 次预算会让"还有十几个号可用"的请求
+		// 直接回 429；硬顶同时防止某模型全池耗干时把整个池打一遍（放大上游调用）。
+		MaxRotateModelLimit int `json:"max_rotate_model_limit"`
 	} `json:"server"`
 
 	Cooldown struct {
@@ -64,9 +72,14 @@ type Config struct {
 		// 硬冷却固定为次日 04:00（CooldownUntilTomorrow4AM），连续错误语义并入熔断器。
 		// 旧 config 中的这些键因 JSON 未知字段而自然忽略，不报错。
 		SoftRate string `json:"soft_rate"` // "600s"，软限流冷却基数
-		// SoftRateMax 软冷却指数退避的封顶，默认 "2h"。
+		// SoftRateMax 软冷却指数退避的封顶，默认 "2h"。**只作用于账号级软冷却**，
+		// 不裁剪 6004 模型级冷冻（上游重置墙钟是权威事实，不是退避估计）。
 		// 空值回落默认，非法值报错（处理风格同 soft_rate）。
 		SoftRateMax string `json:"soft_rate_max"` // "2h"
+		// ModelRateMax 6004 模型级冷冻的硬顶，默认 "24h"。
+		// 正常不会命中（上游重置时刻通常远小于 24h），只用于挡脏数据把某号某模型
+		// 永久冻死（例如文案里的年份解析错）。
+		ModelRateMax string `json:"model_rate_max"` // "24h"
 	} `json:"cooldown"`
 
 	Schedule struct {
@@ -222,6 +235,7 @@ type Config struct {
 	// 解析后
 	SoftRateDur            time.Duration `json:"-"`
 	SoftRateMaxDur         time.Duration `json:"-"`
+	ModelRateMaxDur        time.Duration `json:"-"`
 	BreakerCooldownDur     time.Duration `json:"-"`
 	BreakerCooldownMaxD    time.Duration `json:"-"`
 	DegradeCooldownDur     time.Duration `json:"-"`
@@ -246,7 +260,10 @@ func Default() *Config {
 	}
 	c.Cooldown.SoftRate = "600s"
 	c.Cooldown.SoftRateMax = "2h"
+	c.Cooldown.ModelRateMax = "24h"
 	c.Server.ReadTimeout = "300s"
+	c.Server.MaxRotate = 3
+	c.Server.MaxRotateModelLimit = 8
 	c.Server.ResponsesEarlyCreated = true
 	c.Server.ResponsesEarlyCreated = true
 	c.Panel.PackageDetailLimit = 5
@@ -490,6 +507,26 @@ func (c *Config) normalize() error {
 	}
 	if c.SoftRateMaxDur, err = time.ParseDuration(c.Cooldown.SoftRateMax); err != nil {
 		return fmt.Errorf("cooldown.soft_rate_max: %w", err)
+	}
+	// 6004 模型级冷冻的硬顶（默认 24h；空值回落，非法值报错，风格同上）。
+	if c.Cooldown.ModelRateMax == "" {
+		c.Cooldown.ModelRateMax = "24h"
+	}
+	if c.ModelRateMaxDur, err = time.ParseDuration(c.Cooldown.ModelRateMax); err != nil {
+		return fmt.Errorf("cooldown.model_rate_max: %w", err)
+	}
+	if c.ModelRateMaxDur <= 0 {
+		return fmt.Errorf("cooldown.model_rate_max: 必须为正值（%q）", c.Cooldown.ModelRateMax)
+	}
+	// 换号预算：0/负值回落默认（3 / 8）。调大只影响"坏号多"时的尾延迟与上游调用量。
+	if c.Server.MaxRotate <= 0 {
+		c.Server.MaxRotate = 3
+	}
+	if c.Server.MaxRotateModelLimit <= 0 {
+		c.Server.MaxRotateModelLimit = 8
+	}
+	if c.Server.MaxRotateModelLimit < c.Server.MaxRotate {
+		c.Server.MaxRotateModelLimit = c.Server.MaxRotate
 	}
 	if c.BreakerCooldownDur, err = time.ParseDuration(c.Pool.BreakerCooldown); err != nil {
 		return fmt.Errorf("pool.breaker_cooldown: %w", err)
