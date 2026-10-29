@@ -59,7 +59,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 |---|---|
 | 🔑 **OAuth 一键登录** | `login.sh` 设备授权流程，自动落盘凭证并重启容器加载新账号 |
 | 🔄 **多账号池** | 快过期积分加权 + 成本分层 + 加权随机选号，Top-5 候选 + 防惊群 |
-| 🗂️ **号池分组** | 公共池 + 多个独立分组；分组独立密钥、独立代理（HTTP/SOCKS5/SOCKS5H）、独立账号导入；两个共享方向（进入公共池 / 调用公共池）默认关闭 |
+| 🗂️ **号池分组** | 公共池 + 多个独立分组；分组独立密钥、独立代理（HTTP/SOCKS5/SOCKS5H）、独立账号导入、**独立系统提示词**（开关 + 内容框，保存即生效）；两个共享方向（进入公共池 / 调用公共池）默认关闭 |
 | 🛡️ **熔断与冷却** | 429 软冷却 600s 起指数退避（封顶 `soft_rate_max`）、404 固定 60s 短冷却、402 硬冷却至次日 04:00、连续失败熔断、在途租约限流 |
 | 🧲 **会话粘性** | 同一会话（`conversation_id`）尽量绑定同一账号，TTL 滚动续期，失败自动解绑，可镜像 Redis 防重启丢失 |
 | ⏰ **定时任务** | 签到（09/21 点，末尾自动跑**连登管家**：兑换已解锁档位 + 抽完抽奖次数）+ 活跃上报（10 点，点亮连登 / 解锁领养 + streak 自检）+ 猫猫旅行（09/21 点，独立排程）+ token 保活（22 点），四类独立开关 |
@@ -404,8 +404,8 @@ curl -s http://localhost:7863/v1/chat/completions \
 | `upstream.idle_timeout_seconds` | `300` | 聊天流中空闲上限（活跃续命，静默断流） |
 | `upstream.user_agent` | 空 | 出站 User-Agent 覆盖（空 = 现状 `CLI/2.63.2 CodeBuddy/2.63.2`）。官网「使用端」列按出站 UA 服务端归因；官方 WorkBuddy 桌面 UA 为 `WorkBuddy/<version>`，需要时可配 |
 | `features.sanitize_blacklist_fingerprints` | `true` | 出站请求体黑名单指纹脱敏 |
-| `prompt.mode` | `custom` | 系统提示词模式：`custom` = 网关用自有提示词替换客户端 system；`append` = 开头连续 system/developer 块后插网关提示词（既有消息逐字不动）；`passthrough` = 透传客户端原始 system（降级重试仍切中性提示词） |
-| `prompt.file` | 空 | 提示词文件路径；空 = 内置默认（约 2KB）；路径非空但不可读 → 启动报错 |
+| `prompt.mode` | `passthrough` | 系统提示词模式：`passthrough` = 透传客户端原始 system（缺省，对齐上游）；`custom` = 网关用自有提示词替换客户端 system；`append` = 开头连续 system/developer 块后插网关提示词（既有消息逐字不动）。**热生效**（面板保存后下一请求生效；分组可再覆盖，见「号池分组」） |
+| `prompt.file` | 空 | 提示词文件路径；空 = 内置默认（约 2KB）；路径非空但不可读 → 启动报错。**热生效**于面板保存配置时（直接改文件内容不重载） |
 | `upstash.url` / `upstash.token` | 空 | 空 = 纯内存模式（Noop 降级，功能照常） |
 | `pool.max_in_flight` | `3` | 单账号最大在途请求数（`0` = 不限） |
 | `pool.max_in_flight_global` | `2` | global 域单账号在途上限（国际版 WAF 风控更紧，压低并发） |
@@ -451,9 +451,15 @@ curl -s http://localhost:7863/v1/chat/completions \
 
 | 模式 | 语义 |
 |---|---|
-| `custom`（默认） | 出站前用网关自有提示词**替换**客户端 system / developer 消息（删除全部 system / developer，头部插入单条 system）；user / assistant / tool 消息逐字不动 |
+| `custom` | 出站前用网关自有提示词**替换**客户端 system / developer 消息（删除全部 system / developer，头部插入单条 system）；user / assistant / tool 消息逐字不动 |
 | `append` | 开头连续 system / developer 块之后**插入**一条网关自有 system，既有消息（含客户端项目规范/工具约定）逐字不动——两者并用；降级期退化为 replace（带指纹原文重试只会确定性再撞 400） |
-| `passthrough` | 透传客户端原始 system，不做改写 |
+| `passthrough`（缺省） | 透传客户端原始 system，不做改写 |
+
+**分组级覆盖（优先级最高）**：号池分组可单独开启「专属系统提示词」（面板 → 号池分组 → 系统提示词卡片）。开启后，用**该分组密钥**发起的 `/v1/chat/completions` 与 `/v1/responses` 请求按上表 `custom` 语义处理——删除客户端全部 system / developer，改为注入分组文本；user / assistant / tool 消息逐字不动。未开启（或正文为空）时沿用全局 `prompt.mode`。
+
+- 取值链：**分组覆盖 > 全局热配置（面板保存的 prompt.*）> 启动期静态配置**；
+- 覆盖跟随**密钥作用域**而非实际选中账号：开启 `call_public` 的分组抽到公共池账号时仍用它自己的提示词；主 `api_key` 请求即便粘性命中分组账号也走全局；
+- 保存即生效（写 `data/groups.json`，每请求读取），无需重启；关闭开关保留正文、不再生效。
 
 内置默认提示词约 2KB（`internal/prompt/defaultprompt.md`，嵌入二进制）。`prompt.file` 指向自定义提示词文件（自定义人格 / 人设）即整体替换内置默认；**留空 = 内置默认**，路径非空但不可读 → **启动报错**（fail fast，不会静默回落到内置默认）。
 
@@ -464,6 +470,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 - 触发降级后持续到**次日 00:00 CST**（Asia/Shanghai）重置；降级期内 `passthrough` 请求直达中性提示词，不再先撞 400
 - 降级状态是**进程内存态**，重启清零
 - 内容问题非账号问题：`ErrContentBlocked` 不罚账号（无冷却 / 熔断 / 计错），由网关降级重试消化
+- **分组专属提示词不参与降级**：分组覆盖走 `custom` 语义，被拦直接回 400 `content_blocked`（与全局 `custom` 一致）——运营者显式配置的文本不该被中性提示词悄悄顶替
 
 ### 原生工具调用标记还原
 
@@ -691,9 +698,10 @@ http://127.0.0.1:7863/panel/
 - **分组密钥**：创建/轮换时显示一次，服务端只保存 SHA-256；`Authorization: Bearer <分组密钥>` 只能访问本组账号，不能访问面板或公共池。主 `api_key` 仍走公共池。
 - **分组代理**：支持 HTTP / SOCKS5（本地 DNS）/ SOCKS5H（远程 DNS）；覆盖聊天、OAuth、余额、模型探测以及签到/保活/旅行/活跃等全部出站请求。代理不可用时直接失败，不回落直连。面板「测试连接」除耗时与 HTTP 状态外，还会显示经该代理的**实际出口 IP 与归属地**（服务端经同一代理访问 `https://myip.ipip.net/` 取回，前端不直连第三方）。
 - **分组导入/添加**：分组页支持单账号或批量 JSON 导入、浏览器 OAuth 添加账号；删除分组时可选「账号移到公共池」或「完全删除（含 auth 文件）」。
+- **分组系统提示词**：每个分组一张「系统提示词」卡片——开关 + 自定义内容框（最长 64 KiB）。开启后本组密钥的聊天请求按 `custom` 语义整体替换 system/developer（见「系统提示词体系 → 分组级覆盖」）；保存后**下一个请求立即生效**，无需重启。未开启时沿用全局 `prompt.mode`。
 
 **配置热生效**：保存配置后，`api_key`、`cooldown.soft_rate`、`features.sanitize_blacklist_fingerprints`、
-`logging.request_client_info`、`pool.*`（熔断/在途/权重）、`schedule.*`（时点/开关/余额刷新间隔）**立即生效，无需重启**；
+`logging.request_client_info`、`prompt.mode` / `prompt.file`、`pool.*`（熔断/在途/权重）、`schedule.*`（时点/开关/余额刷新间隔）**立即生效，无需重启**；
 涉及进程装配期依赖的字段（`listen`、`auth_dir`、`state_file`、`upstream.*`、`upstash.*`、`session_sticky.ttl`）
 保存后会提示"需重启进程生效"。配置写入采用「深合并且原子替换」：只更新面板表单覆盖的键，
 用户手写的未知键与其余字段原样保留。
@@ -708,7 +716,7 @@ http://127.0.0.1:7863/panel/
 | 账号运维 | `POST accounts/{uid}/checkin` · `balance` · `revive` · `disable` · `remove`；`POST checkin_all` · `travel_all` · `activity_all` · `keepalive_all` · `balance_all` |
 | 任务 | `GET accounts/{uid}/tasks`；`POST accounts/{uid}/tasks/accept` · `accept_all` · `claim` · `auto` · `auto_all`；`POST tasks/scan_all` · `tasks/run_queue` |
 | 添加账号 | `POST login/start` · `GET login/poll` · `GET login/regions` · `POST import/cockpit` |
-| 号池分组 | `GET groups` · `POST groups` · `PATCH groups/{id}` · `DELETE groups/{id}?account_action=move\|delete` · `POST groups/{id}/key/rotate` · `PUT groups/{id}/proxy` · `POST groups/{id}/proxy/test` · `POST accounts/{uid}/group` |
+| 号池分组 | `GET groups` · `POST groups` · `PATCH groups/{id}` · `DELETE groups/{id}?account_action=move\|delete` · `POST groups/{id}/key/rotate` · `GET/PUT groups/{id}/prompt` · `PUT groups/{id}/proxy` · `POST groups/{id}/proxy/test` · `POST accounts/{uid}/group` |
 | 写入 | `POST config`（校验 → 落盘 → 热应用，返回需重启字段清单）· `POST usage/save`（立即把内存用量落盘） |
 
 账号运维操作均落到池既有入口（`Revive`/`Disable`/`Remove` 等），与 `/status` 观测口径一致。

@@ -19,6 +19,13 @@ type Snapshot struct {
 	SoftCooldown         time.Duration // 429 软冷却基数（<=0 时调用方回退内置默认）
 	SanitizeFingerprints bool          // 出站请求体指纹脱敏
 	RecordClientInfo     bool          // 请求日志是否记录调用来源（客户端 IP / UA）
+
+	// PromptMode / PromptText 全局系统提示词（config prompt.mode 与 prompt.file 的
+	// 解析结果）。面板保存配置时整体替换，下一个请求即生效——此前只写盘不热应用，
+	// 用户改完 prompt.mode 要重启才生效，而保存响应里也没有"需重启"提示。
+	// PromptMode 为空 = 未热配置，handler 回退启动期静态字段（Live 为 nil 的测试/裸用路径）。
+	PromptMode string
+	PromptText string
 }
 
 // Holder 原子持有当前快照。

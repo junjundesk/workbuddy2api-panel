@@ -36,8 +36,13 @@ type Group struct {
 	Color      string `json:"color,omitempty"`
 	SharedPool bool   `json:"shared_pool"`
 	CallPublic bool   `json:"call_public"`
-	KeyHash    string `json:"key_hash,omitempty"`
-	KeyHint    string `json:"key_hint,omitempty"`
+	// PromptEnabled / PromptText 分组专属系统提示词（replaces 语义：整体替换客户端
+	// system / developer 消息，见 internal/prompt 与 internal/server 的 effectivePrompt）。
+	// 关闭或文本空白时沿用全局 prompt 配置；改动经面板保存即对后续请求生效。
+	PromptEnabled bool   `json:"prompt_enabled,omitempty"`
+	PromptText    string `json:"prompt_text,omitempty"`
+	KeyHash       string `json:"key_hash,omitempty"`
+	KeyHint       string `json:"key_hint,omitempty"`
 	// Key 分组密钥明文（groups.json 0600 落盘，供面板手动查看）；旧分组可能为空。
 	Key       string    `json:"key,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
@@ -281,6 +286,63 @@ func (s *Store) SetPublicProxy(p *Proxy) error {
 	s.publicProxy = np
 	if err := s.saveLocked(); err != nil {
 		s.publicProxy = old
+		return err
+	}
+	return nil
+}
+
+// MaxPromptBytes 单分组系统提示词文本上限（64 KiB）。
+//
+// 分组提示词整段替换 system（2KB 级别就够用），上限只用于挡住"误把整个语料
+// 粘进来"：groups.json 每次写操作都会整体重写、读路径也随分组快照加载，无上限
+// 会让一次误操作长期拖慢所有分组的配置读写。
+const MaxPromptBytes = 64 << 10
+
+// Prompt 返回分组当前生效的系统提示词（未启用 / 文本全空白 / 分组不存在 → false）。
+//
+// 与 Get 的区别：这是每个聊天请求都会走一次的热路径，只做 RLock + map 查找 +
+// 返回不可变 string，不 cloneGroup（不复制 Members 切片）。
+//
+// "文本全空白视为未启用"是防御性判定：groups.json 可能被手工编辑成
+// prompt_enabled=true 但正文为空，此时宁可沿用全局提示词，也不能给上游塞一条
+// 空 system（那会变成另一种指纹差异）。
+func (s *Store) Prompt(id string) (string, bool) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return "", false
+	}
+	s.mu.RLock()
+	g, ok := s.groups[id]
+	if !ok || !g.PromptEnabled || strings.TrimSpace(g.PromptText) == "" {
+		s.mu.RUnlock()
+		return "", false
+	}
+	text := g.PromptText
+	s.mu.RUnlock()
+	return text, true
+}
+
+// SetPrompt 设置/清除分组专属系统提示词。
+//   - enabled 且文本全空白 → 报错（避免"开关开着但等于没开"的静默状态）；
+//   - 关闭开关时保留文本，下次开启无需重填，但不生效；
+//   - 写盘失败回滚内存值（与 SetProxy 同 pattern）。
+func (s *Store) SetPrompt(id string, enabled bool, text string) error {
+	if len(text) > MaxPromptBytes {
+		return fmt.Errorf("prompt text too large: %d bytes (limit %d)", len(text), MaxPromptBytes)
+	}
+	if enabled && strings.TrimSpace(text) == "" {
+		return fmt.Errorf("prompt text is required when enabled")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	g, ok := s.groups[id]
+	if !ok {
+		return os.ErrNotExist
+	}
+	oldEnabled, oldText := g.PromptEnabled, g.PromptText
+	g.PromptEnabled, g.PromptText = enabled, text
+	if err := s.saveLocked(); err != nil {
+		g.PromptEnabled, g.PromptText = oldEnabled, oldText
 		return err
 	}
 	return nil

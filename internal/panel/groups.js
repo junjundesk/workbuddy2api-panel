@@ -1,7 +1,7 @@
 'use strict';
 const $ = id => document.getElementById(id);
 const COLORS = ['#5b7cfa','#3ddc97','#f5b544','#c084fc','#f0655f','#38bdf8','#fb923c','#a3e635'];
-const state = { groups: [], accounts: [], selected: 'public', editing: null, groupColor: COLORS[0], proxyGroup: null, proxyType: 'socks5h', importGroup: null, importTab: 'single', confirm: null, publicProxy: null, sel: new Set(), revealed: {}, moveUids: [] };
+const state = { groups: [], accounts: [], selected: 'public', editing: null, groupColor: COLORS[0], proxyGroup: null, proxyType: 'socks5h', importGroup: null, importTab: 'single', promptGroup: null, confirm: null, publicProxy: null, sel: new Set(), revealed: {}, moveUids: [] };
 
 function esc(s) { return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 function fmt(n) { return Number(n || 0).toLocaleString('zh-CN'); }
@@ -73,6 +73,7 @@ function renderRail() {
   state.groups.forEach(g => {
     const bits = [g.member_count + ' 个账号', g.shared_pool ? '共享' : '独立'];
     if (g.call_public) bits.push('共用公共池');
+    if (g.prompt_enabled) bits.push('自定义提示词');
     if (!g.has_key) bits.push('缺密钥');
     html += '<button class="pool-item ' + (state.selected === g.id ? 'on' : '') + '" data-act="select" data-id="' + esc(g.id) + '"><span class="gdot" style="--c:' + esc(g.color || '#5b7cfa') + '"></span><span><b>' + esc(g.name) + '</b><em>' + esc(bits.join(' · ')) + '</em></span><span class="cnt">' + g.member_count + '</span></button>';
   });
@@ -99,6 +100,16 @@ function shareCard(g) {
     '<label class="switch-row"><span class="sw-text"><b>允许本组账号进入公共池</b><em>默认关闭</em></span><input type="checkbox" data-act="toggle-shared"' + (g.shared_pool ? ' checked' : '') + '><span class="track"><i></i></span></label>' +
     '<label class="switch-row"><span class="sw-text"><b>允许本组调用公共池账号</b><em>本组与公共池账号共用候选；默认关闭</em></span><input type="checkbox" data-act="toggle-call"' + (g.call_public ? ' checked' : '') + '><span class="track"><i></i></span></label>' +
     '<div class="hint">' + (g.shared_pool ? '公共池可命中本组账号。' : '') + (g.call_public ? '本组账号与公共池账号进同一候选集，按权重一起抽签。' : '') + (!g.shared_pool && !g.call_public ? '本组与公共池双向隔离。' : '') + '</div></div>';
+}
+// 分组系统提示词：卡片开关 + 弹窗编辑器。保存走 groups/{id}/prompt，服务端
+// 同步写 groups.json，下一个请求即生效（无需重启）；关闭时正文保留、开关置灰。
+function promptCard(g) {
+  const on = !!g.prompt_enabled;
+  const n = g.prompt_chars || 0;
+  return '<div class="card wide"><div class="card-h"><h3>系统提示词</h3>' + (on ? '<span class="tag accent">已启用 · ' + n + ' 字</span>' : '<span class="tag mute">继承全局</span>') + '</div>' +
+    '<label class="switch-row"><span class="sw-text"><b>启用本组专属系统提示词</b><em>' + (on ? '本组密钥请求的 system 会被替换为下方内容' : '沿用配置页 prompt.mode 设置') + '</em></span><input type="checkbox" data-act="toggle-prompt"' + (on ? ' checked' : '') + '><span class="track"><i></i></span></label>' +
+    (on && g.prompt_preview ? '<div class="hint" style="margin-top:8px">预览：<code style="font:11px var(--mono);color:var(--ink-2)">' + esc(g.prompt_preview) + '</code></div>' : '') +
+    '<div class="card-f"><span>只影响本组密钥的 /v1/chat/completions 与 /v1/responses</span><span class="grow"></span><button class="xs ghost" data-act="edit-prompt">' + (on ? '编辑' : '配置') + '</button></div></div>';
 }
 // accActs 账号行操作，与主页账号池（app.js renderAccounts）同口径：
 // 企业版不显示签到 / 任务（上游不支持），冻结 → 解冻、暂停 → 恢复选号、否则 → 暂停选号。
@@ -160,7 +171,7 @@ function renderDetail() {
   }
   const list = groupAccounts(g.id);
   $('detail').innerHTML = '<div class="detail-head"><div class="dh-title"><span class="group-mark" style="--c:' + esc(g.color || '#5b7cfa') + '"></span><div><h1>' + esc(g.name) + '</h1><div class="sub">' + esc(g.id) + ' · ' + g.member_count + ' 个账号</div></div></div><div class="dh-acts"><span class="tag ' + (g.shared_pool ? 'warn' : 'accent') + '">' + (g.shared_pool ? '共享分组' : '独立分组') + '</span><button class="xs" data-act="edit-group">编辑</button><button class="xs danger" data-act="delete-group">删除</button></div></div>' +
-    '<div class="gp-cards">' + keyCard(g) + proxyCard(g) + shareCard(g) + '</div>' + accountsBox(list, 'group');
+    '<div class="gp-cards">' + keyCard(g) + proxyCard(g) + shareCard(g) + promptCard(g) + '</div>' + accountsBox(list, 'group');
 }
 function renderAll() { renderStats(); renderRail(); renderDetail(); updateSelUI(); }
 function visibleAccounts() { const g = selectedGroup(); return g ? groupAccounts(g.id) : publicAccounts(); }
@@ -244,6 +255,33 @@ function updateProxyUI() {
   $('proxyHint').textContent = proxyHint(state.proxyType);
   const p = $('proxyPort'); if (!p.value || p.value === '1080' || p.value === '8080') p.value = state.proxyType === 'http' ? 8080 : 1080;
 }
+function updatePromptCount() { $('promptCount').textContent = ($('promptText').value || '').length + ' 字'; }
+// openPromptModal 先按需 GET 全文（列表只回预览），再展示编辑器。
+// forceEnable：从卡片开关"开启"进入时强制勾选，用户看到内容后再保存。
+async function openPromptModal(g, forceEnable) {
+  state.promptGroup = g.id;
+  $('promptGroupName').textContent = '· ' + g.name;
+  const r = await api('groups/' + g.id + '/prompt');
+  $('promptEnabled').checked = forceEnable ? true : !!r.enabled;
+  $('promptText').value = r.text || '';
+  updatePromptCount();
+  openVeil('promptVeil');
+}
+async function savePrompt() {
+  const g = state.promptGroup ? groupOf(state.promptGroup) : null;
+  if (!g) return;
+  const enabled = $('promptEnabled').checked;
+  const text = $('promptText').value;
+  if (enabled && !text.trim()) { toast('已开启开关，请填写提示词内容（或关闭开关再保存）', 'err'); return; }
+  try {
+    await api('groups/' + g.id + '/prompt', { method: 'PUT', body: JSON.stringify({ enabled, text }) });
+  } catch (e) {
+    renderDetail(); // 保存失败：卡片开关退回服务端真实状态
+    throw e;
+  }
+  closeVeil('promptVeil'); await load();
+  toast(enabled ? '已保存，下一个请求立即生效' : '已关闭本组提示词，恢复沿用全局设置', enabled ? 'ok' : 'warn');
+}
 function openImportModal() {
   state.importGroup = state.selected === 'public' ? null : state.selected;
   $('importGroupName').textContent = state.importGroup ? '· ' + groupOf(state.importGroup).name : '· 公共号池';
@@ -265,6 +303,7 @@ function updateImportParse() {
 }
 $('importSingle').addEventListener('input', updateImportParse);
 $('importBatch').addEventListener('input', updateImportParse);
+$('promptText').addEventListener('input', updatePromptCount);
 // 支持一次多选多个 JSON 文件：逐个解析后按 uid 去重合并成一个数组放进批量文本框。
 // 解析失败 / 无有效账号的文件单独计数提示，不影响其他文件。
 $('importFile').addEventListener('change', async () => {
@@ -348,6 +387,18 @@ document.addEventListener('click', async e => {
       await api('groups/' + g.id, { method: 'PATCH', body: JSON.stringify(body) });
       await load(); toast('共享设置已更新', 'ok'); return;
     }
+    if (act === 'edit-prompt') { const g = selectedGroup(); if (g) await openPromptModal(g); return; }
+    if (act === 'toggle-prompt') {
+      const g = selectedGroup(); if (!g) return;
+      if (el.checked) { await openPromptModal(g, true); return; } // 开启必须先确认内容
+      try {
+        const cur = await api('groups/' + g.id + '/prompt');
+        await api('groups/' + g.id + '/prompt', { method: 'PUT', body: JSON.stringify({ enabled: false, text: cur.text || '' }) });
+        await load(); toast('已关闭本组提示词，恢复沿用全局设置', 'warn');
+      } catch (e) { el.checked = true; throw e; } // 失败回滚开关视觉
+      return;
+    }
+    if (act === 'prompt-save') { await savePrompt(); return; }
     if (act === 'edit-proxy') { openProxyModal(selectedGroup() || null); return; }
     if (act === 'proxy-type') { state.proxyType = el.dataset.type; updateProxyUI(); return; }
     if (act === 'proxy-save') {
@@ -446,7 +497,11 @@ document.addEventListener('click', async e => {
         await api('accounts/' + encodeURIComponent(uid) + '/remove', { method: 'POST' }); closeVeil('confirmVeil'); await load(); toast('账号已移除', 'ok');
       }); return;
     }
-    if (act === 'close') { closeVeil(el.dataset.target); return; }
+    if (act === 'close') {
+      closeVeil(el.dataset.target);
+      if (el.dataset.target === 'promptVeil') renderDetail(); // 取消编辑：开关退回真实状态
+      return;
+    }
     if (act === 'confirm-yes') { const fn = state.confirm; state.confirm = null; if (fn) await fn(); return; }
     if (act === 'copy-key') { copyText($('keyBig').textContent); return; }
     if (act === 'gate-ok') { const v = $('gateKey').value.trim(); if (!v) return; localStorage.setItem('wb2api.key', v); closeVeil('keyGate'); load(); return; }

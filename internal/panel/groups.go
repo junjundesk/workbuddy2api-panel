@@ -11,6 +11,7 @@ import (
 	"os"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/junjundesk/workbuddy2api-panel/internal/groups"
 	"github.com/junjundesk/workbuddy2api-panel/internal/pool"
@@ -40,6 +41,12 @@ type groupView struct {
 	Disabled    int        `json:"disabled"`
 	Members     []string   `json:"members,omitempty"`
 	CreatedAt   time.Time  `json:"created_at"`
+	// 分组专属系统提示词：列表只回元数据（开关 / 字数 / 首 60 字预览），
+	// 正文按需 GET /panel/api/groups/{id}/prompt —— 分组页每次操作都会重拉列表，
+	// 把最长 64 KiB 的正文塞进列表没有展示价值。
+	PromptEnabled bool   `json:"prompt_enabled"`
+	PromptChars   int    `json:"prompt_chars,omitempty"`
+	PromptPreview string `json:"prompt_preview,omitempty"`
 }
 
 func (p *Panel) groupViews() []groupView {
@@ -55,6 +62,11 @@ func (p *Panel) groupViews() []groupView {
 			MemberCount: len(g.Members), Members: g.Members, CreatedAt: g.CreatedAt,
 		}
 		v.Proxy = toProxyView(g.Proxy)
+		v.PromptEnabled = g.PromptEnabled
+		if g.PromptEnabled {
+			v.PromptChars = utf8.RuneCountInString(g.PromptText)
+			v.PromptPreview = promptPreview(g.PromptText)
+		}
 		for _, a := range all {
 			if a.Group != g.ID {
 				continue
@@ -326,6 +338,84 @@ func (p *Panel) groupRevealKey(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "key": key})
+}
+
+// promptPreviewRunes 分组列表里提示词预览的字符数上限。
+const promptPreviewRunes = 60
+
+// promptPreview 返回提示词预览：首 promptPreviewRunes 个字符，换行/制表压成空格，
+// 截断时补省略号。按 rune 遍历，多字节/emoji 不会被切坏。
+func promptPreview(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	var b strings.Builder
+	n := 0
+	for _, r := range text {
+		switch {
+		case r == '\n' || r == '\r' || r == '\t':
+			r = ' '
+		}
+		b.WriteRune(r)
+		n++
+		if n >= promptPreviewRunes {
+			b.WriteString("…")
+			break
+		}
+	}
+	return b.String()
+}
+
+// groupGetPrompt 返回分组专属系统提示词全文（分组页打开编辑器时按需拉取）。
+func (p *Panel) groupGetPrompt(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.Groups == nil {
+		writeErr(w, http.StatusNotImplemented, "groups not available")
+		return
+	}
+	g, ok := p.cfg.Groups.Get(r.PathValue("id"))
+	if !ok {
+		writeErr(w, http.StatusNotFound, "group not found")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":      true,
+		"enabled": g.PromptEnabled,
+		"text":    g.PromptText,
+		"chars":   utf8.RuneCountInString(g.PromptText),
+	})
+}
+
+// groupSetPrompt 保存分组专属系统提示词（开关 + 文本）。
+//
+// 生效时机：groups.Store 每次写操作同步落盘并更新内存，请求侧每个请求读一次
+// Store.Prompt —— 保存后的下一个请求即生效，无需重启（与分组代理同理）。
+func (p *Panel) groupSetPrompt(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.Groups == nil {
+		writeErr(w, http.StatusNotImplemented, "groups not available")
+		return
+	}
+	id := r.PathValue("id")
+	var req struct {
+		Enabled bool   `json:"enabled"`
+		Text    string `json:"text"`
+	}
+	if err := decodeJSONBody(r, &req); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := p.cfg.Groups.SetPrompt(id, req.Enabled, req.Text); err != nil {
+		status := http.StatusBadRequest
+		if os.IsNotExist(err) {
+			status = http.StatusNotFound
+		}
+		writeErr(w, status, err.Error())
+		return
+	}
+	log.Printf("panel: 分组系统提示词已保存 id=%s enabled=%v chars=%d（下一请求生效）",
+		id, req.Enabled, utf8.RuneCountInString(req.Text))
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "group": p.groupView(id)})
 }
 
 // groupTestProxy 面板「测试连接」：并行验证两件事——

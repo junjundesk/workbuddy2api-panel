@@ -112,6 +112,38 @@ func (h *Handler) loadLive() livecfg.Snapshot {
 	}
 }
 
+// globalPrompt 返回全局系统提示词模式与文本：面板热配置优先，回退启动期静态字段。
+//
+// 热配置来源于 livecfg 快照（prompt.mode / prompt.file 保存后即时生效）；Live 为
+// nil 或快照未携带 prompt（老装配/测试）时用静态字段，两条路径语义一致。
+func (h *Handler) globalPrompt() (mode, text string) {
+	if s := h.loadLive(); s.PromptMode != "" {
+		return s.PromptMode, s.PromptText
+	}
+	return h.cfg.PromptMode, h.cfg.PromptText
+}
+
+// effectivePrompt 解析本次请求实际使用的系统提示词：分组覆盖 > 全局。
+//
+// 判定依据是 scope.GroupID（请求所用**密钥**所属分组），不是实际选中账号的归属：
+// 开启 call_public 的分组抽到公共池账号时仍用它自己的提示词（调用方是分组密钥，
+// 意图按调用方算）；主密钥请求即便粘性命中分组账号也走全局设置。
+//
+// 分组覆盖固定按 custom（替换）语义执行：删除全部 system/developer，头部插入一条
+// 分组文本（prompt.RewriteObject）。因此分组请求**不参与内容拦截降级**——降级只
+// 服务 passthrough/append，而分组提示词是运营者显式配置的文本，被中性提示词悄悄
+// 替换掉只会让"配了没生效"变成玄学。
+func (h *Handler) effectivePrompt(scope authScope) (mode, text string) {
+	mode, text = h.globalPrompt()
+	if scope.GroupID == "" || h.cfg.Groups == nil {
+		return mode, text
+	}
+	if gt, ok := h.cfg.Groups.Prompt(scope.GroupID); ok {
+		return "custom", gt
+	}
+	return mode, text
+}
+
 // softCooldown 返回当前生效的软冷却基数（热改优先，<=0 回退默认）。
 func (h *Handler) softCooldown() time.Duration {
 	if d := h.loadLive().SoftCooldown; d > 0 {
@@ -851,18 +883,23 @@ func (h *Handler) chatCompletionsIn(w http.ResponseWriter, r *http.Request, in *
 		}
 	}
 
+	// 提示词模式解析（每请求一次，轮转/降级重试复用同一结果）：分组覆盖优先，
+	// 未覆盖时取全局（面板热配置 > 启动期静态字段）。分组覆盖的有效模式是 custom，
+	// 因此本组请求不进降级路径（见 effectivePrompt 注释）。
+	promptMode, promptText := h.effectivePrompt(scope)
+
 	degradedApplied := false
 	if obj != nil {
 		switch {
-		case h.cfg.PromptMode == "custom" && h.cfg.PromptText != "":
-			prompt.RewriteObject(obj, h.cfg.PromptText)
-		case h.cfg.PromptMode == "append" && h.cfg.PromptText != "" && !h.degrade.Active():
-			prompt.AppendObject(obj, h.cfg.PromptText)
-		case (h.cfg.PromptMode == "passthrough" || h.cfg.PromptMode == "append") && h.degrade.Active():
+		case promptMode == "custom" && promptText != "":
+			prompt.RewriteObject(obj, promptText)
+		case promptMode == "append" && promptText != "" && !h.degrade.Active():
+			prompt.AppendObject(obj, promptText)
+		case (promptMode == "passthrough" || promptMode == "append") && h.degrade.Active():
 			prompt.RewriteObject(obj, prompt.Degraded)
 			degradedApplied = true
 		}
-	} else if (h.cfg.PromptMode == "passthrough" || h.cfg.PromptMode == "append") && h.degrade.Active() {
+	} else if (promptMode == "passthrough" || promptMode == "append") && h.degrade.Active() {
 		// 坏 JSON：改写函数本来就原样返回，这里只保留降级状态语义。
 		degradedApplied = true
 	}
@@ -1045,7 +1082,7 @@ func (h *Handler) chatCompletionsIn(w http.ResponseWriter, r *http.Request, in *
 			// 降级重试同样退化为 replace——原文在场只会确定性再撞 400）。
 			// 第二次仍被拦（用户内容本身触发审核）→ 回内容防火墙错误（见下分支）。
 			// 内容问题非账号问题：applyErrorPolicy 不罚账号（见 ErrContentBlocked 分支）。
-			if kind == upstream.ErrContentBlocked && (h.cfg.PromptMode == "passthrough" || h.cfg.PromptMode == "append") && !degradedApplied {
+			if kind == upstream.ErrContentBlocked && (promptMode == "passthrough" || promptMode == "append") && !degradedApplied {
 				h.degrade.Trigger()
 				if obj != nil {
 					prompt.RewriteObject(obj, prompt.Degraded)
