@@ -662,7 +662,7 @@ http://127.0.0.1:7863/panel/
 
 | 视图 | 功能 |
 |---|---|
-| **账号池** | 统计条（账号总数 / 可用 / 冷却中 / 已禁用 / 积分剩余·总额 / 粘性会话）+ 账号表：健康色条与状态标签（可用 / 限流冷却 / 积分冷却 / 熔断 / 连败降权 / 已禁用）、积分量条、成功·失败计数、在途、最近一次用量（次数 / token / 延迟 / 速率）、最近成功时间；单号操作 签到 / 余额 / 任务 / 解冻 / 禁用 / 移除；批量「全部签到」「旅行巡检」「活跃上报」「全部保活」；下方**模型锁池**表列出被上游按模型限流的模型（整池不可用 / 没号可用 / 部分限流）、可选与总数、锁定账号数、最早解锁与全池解锁倒计时、限流原因，无锁定时显示「所有模型均可选」 |
+| **账号池** | 统计条（账号总数 / 可用 / 冷却中 / 已禁用 / 积分剩余·总额 / 粘性会话）+ 账号表：健康色条与状态标签（可用 / 限流冷却 / 积分冷却 / 熔断 / 连败降权 / 已禁用）、积分量条、成功·失败计数、在途、最近一次用量（次数 / token / 延迟 / 速率）、最近成功时间；单号操作 签到 / 余额 / 任务 / 模型 / 测活 / 解冻 / 禁用 / 移除；批量「全部签到」「旅行巡检」「活跃上报」「全部保活」；下方**模型锁池**表列出被上游按模型限流的模型（整池不可用 / 没号可用 / 部分限流）、可选与总数、锁定账号数、最早解锁与全池解锁倒计时、限流原因，无锁定时显示「所有模型均可选」 |
 | **用量** | 指标卡（请求数 / 总 token / prompt / completion / 失败尝试 / 平均延迟，含占比与吐字速率）+ **Token 时序图**（渐变堆叠柱、均值参考线、峰值标注、悬停看单桶明细）+ **用量明细**（按账号 / 按模型 / 按域切换，可按合计 Token / 请求数 / 失败数 / 平均延迟排序，含 prompt·completion 占比条）+ **积分扣除历史**（按账号 / 按模型，折算「积分 / 1M Token」） |
 | **积分构成** | **积分到期分布**（按批次到期日聚合，颜色区分账号）+ **账号对比**（按来源归并的面额 / 余额 / 包数卡片与混合构成条）+ 逐包明细（按到期日排序，默认展开最近到期的 `panel.package_detail_limit` 个，其余与已用完的包折叠） |
 | **任务中心** | 成长任务队列：一键扫描全部账号待办 → 按账号排队执行（账号内串行，账号间可选并发 1-3），进度实时更新；另含开学季券码查询。详见 [任务中心](#-任务中心面板新视图) |
@@ -698,6 +698,7 @@ http://127.0.0.1:7863/panel/
 - **分组密钥**：创建/轮换时显示一次，服务端只保存 SHA-256；`Authorization: Bearer <分组密钥>` 只能访问本组账号，不能访问面板或公共池。主 `api_key` 仍走公共池。
 - **分组代理**：支持 HTTP / SOCKS5（本地 DNS）/ SOCKS5H（远程 DNS）；覆盖聊天、OAuth、余额、模型探测以及签到/保活/旅行/活跃等全部出站请求。代理不可用时直接失败，不回落直连。面板「测试连接」除耗时与 HTTP 状态外，还会显示经该代理的**实际出口 IP 与归属地**（服务端经同一代理访问 `https://myip.ipip.net/` 取回，前端不直连第三方）。
 - **分组导入/添加**：分组页支持单账号或批量 JSON 导入、浏览器 OAuth 添加账号；删除分组时可选「账号移到公共池」或「完全删除（含 auth 文件）」。
+- **单号操作与主页一致**：分组页账号行提供签到 / 余额 / 任务 / 模型 / 测活 / 解冻 / 暂停选号 / 禁用 / 移动 / 导出 / 移除；「任务」「模型」以新标签页打开控制台面板，其余原地执行。
 - **分组系统提示词**：每个分组一张「系统提示词」卡片——开关 + 自定义内容框（最长 64 KiB）。开启后本组密钥的聊天请求按 `custom` 语义整体替换 system/developer（见「系统提示词体系 → 分组级覆盖」）；保存后**下一个请求立即生效**，无需重启。未开启时沿用全局 `prompt.mode`。
 
 **配置热生效**：保存配置后，`api_key`、`cooldown.soft_rate`、`features.sanitize_blacklist_fingerprints`、
@@ -713,17 +714,19 @@ http://127.0.0.1:7863/panel/
 | 分组 | 端点 |
 |---|---|
 | 只读 | `GET overview` · `GET usage`（`hours` 或 `from`/`to`）· `GET packages` · `GET models` · `GET model_probes` · `GET logs` · `GET request_metrics` · `GET request_logs`（`limit` / `outcome` / `account` / `model` / `client_ip` / `user_agent` / `from` / `to`）· `GET config` · `GET tasks/queue` · `GET school/vouchers` |
-| 账号运维 | `POST accounts/{uid}/checkin` · `balance` · `revive` · `disable` · `remove`；`POST checkin_all` · `travel_all` · `activity_all` · `keepalive_all` · `balance_all` |
+| 账号运维 | `POST accounts/{uid}/checkin` · `balance` · `alive` · `revive` · `disable` · `remove`；`POST checkin_all` · `travel_all` · `activity_all` · `keepalive_all` · `balance_all` |
 | 任务 | `GET accounts/{uid}/tasks`；`POST accounts/{uid}/tasks/accept` · `accept_all` · `claim` · `auto` · `auto_all`；`POST tasks/scan_all` · `tasks/run_queue` |
 | 添加账号 | `POST login/start` · `GET login/poll` · `GET login/regions` · `POST import/cockpit` |
 | 号池分组 | `GET groups` · `POST groups` · `PATCH groups/{id}` · `DELETE groups/{id}?account_action=move\|delete` · `POST groups/{id}/key/rotate` · `GET/PUT groups/{id}/prompt` · `PUT groups/{id}/proxy` · `POST groups/{id}/proxy/test` · `POST accounts/{uid}/group` |
 | 写入 | `POST config`（校验 → 落盘 → 热应用，返回需重启字段清单）· `POST usage/save`（立即把内存用量落盘） |
 
-账号运维操作均落到池既有入口（`Revive`/`Disable`/`Remove` 等），与 `/status` 观测口径一致。
+账号运维操作均落到池既有入口（`Revive`/`Disable`/`Remove` 等），与 `/status` 观测口径一致；唯一例外是「测活」——它只做上游诊断、不改写池状态（见下）。
 
 **代理测试返回**：`POST groups/{id}/proxy/test` 用提交的代理**并行**做两件事——连通上游站点（`latency_ms` / `status` / `target`）与探测出口（`exit_ip` / `exit_region` / `ip_latency_ms`，探测失败给 `ip_error`）。两侧独立：代理只对部分域名生效时，`ok:false` 仍可能带回 `exit_ip`，据此可判断是"代理没生效"还是"目标站点不可达"。
 
 **账号级实时模型列表**：`GET /panel/api/accounts/{uid}/models` 用**指定账号直连上游**拉取模型目录（不读 `/v1/models` 与面板的 10 分钟缓存），返回该账号自己可见模型的全部字段，并与**同账号上一次拉取**对比给出 `added`/`removed`（首次调用只建基线，不编造变化）。用途：对比不同账号（套餐 / 域 / 灰度）可见模型的差异、确认某个账号是否真的没有被下发新模型。账号池每行的「模型」按钮即调此接口；「模型与档位」页反映的是该域**首个可用账号**的目录（缓存口径），两者用途不同。
+
+**单账号测活**：`POST /panel/api/accounts/{uid}/alive` 用**该账号直连上游**发一句 `hi`，验证账号当下能否正常对话（主页账号池与号池分组页每行的「测活」按钮即调此接口）。模型不写死：取该账号自己模型目录里的 `isDefault`，没有默认标记时按模型 id 字典序取第一个（同一账号重复测活命中同一模型，结果可比）；请求走该账号所属分组的代理。返回 `ok` / `realm` / `model` / `latency_ms`（发起到读完流）/ `ttfb_ms`（首字节）/ `reply`（回复片段，最多 80 字）/ `total_tokens`；上游失败仍回 **HTTP 200 + `ok:false`**（与代理测试同口径），带 `stage`（`catalog` 模型目录 / `chat` 对话）、`error`，能分类时另带 `kind` 与 `upstream_status`。**不改写池状态**：不记成功 / 失败计数、不改冷却 / 禁用 / 余额、不写用量台账——测活是人工诊断动作，不影响选号与统计；会消耗极少量积分。单次对话阶段上限 30 秒。
 
 **安全响应头**：面板页面与全部 `/panel/api/*` 响应统一带 `Content-Security-Policy`（`default-src 'none'`，脚本仅同源，`frame-ancestors 'none'` 禁嵌套）、`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer` 等；前端脚本独立为同源 `app.js`，不含内联脚本与内联事件处理器。
 

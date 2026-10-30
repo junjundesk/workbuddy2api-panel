@@ -1,5 +1,5 @@
 // Package panel 内嵌式 Web 管理面板：账号池总览、单号运维（解冻/禁用/签到/
-// 刷新余额/移除）、浏览器内 OAuth 添加账号（免重启热加载进池）、手动批量
+// 刷新余额/测活/移除）、浏览器内 OAuth 添加账号（免重启热加载进池）、手动批量
 // 签到/保活，以及运行日志环形缓冲（镜像 log 包与 chat 表格日志）。
 //
 // 设计约束：
@@ -12,6 +12,8 @@ package panel
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -175,6 +177,7 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/resume", p.withAuth(p.accountResume))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/checkin", p.withAuth(p.accountCheckin))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/balance", p.withAuth(p.accountBalance))
+	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/alive", p.withAuth(p.accountAlive))
 	p.mux.HandleFunc("GET /panel/api/accounts/{uid}/models", p.withAuth(p.accountModels))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/remove", p.withAuth(p.accountRemove))
 	p.mux.HandleFunc("GET /panel/api/accounts/{uid}/tasks", p.withAuth(p.accountTasks))
@@ -419,6 +422,35 @@ type accountModelSnapshot struct {
 	at  time.Time
 }
 
+// errGlobalChatDisabled global realm 路由关闭（config global.enabled=false）。
+// 单账号模型列表与测活共用这一处判定：调用方按需映射 400 / ok:false。
+var errGlobalChatDisabled = errors.New("global 路由已关闭（config global.enabled=false）")
+
+// accountModelCatalog 用指定账号**直连上游**拉取它自己可见的模型目录，不读任何缓存，
+// 返回归一化 realm（供调用方按域取 effort 档位等）。CN：/v3/config ∪ 企业端点并集；
+// global：国际版目录探测。单账号模型列表与测活共用这一处 realm 分支，避免两处漂移。
+func (p *Panel) accountModelCatalog(a *auth.Auth) (realm string, infos []upstream.ModelInfo, err error) {
+	realm = a.Realm()
+	if realm == "global" {
+		if !p.cfg.Upstream.GlobalEnabled {
+			return realm, nil, errGlobalChatDisabled
+		}
+		infos = p.cfg.Upstream.FetchGlobalModelInfos(a)
+		if len(infos) == 0 {
+			return realm, nil, fmt.Errorf("上游未返回可用模型（realm=global）")
+		}
+		return realm, infos, nil
+	}
+	infos, err = p.cfg.Upstream.FetchModels(a) // CN：/v3/config ∪ 企业端点并发探测
+	if err != nil {
+		return realm, nil, fmt.Errorf("fetch models: %w", err)
+	}
+	if len(infos) == 0 {
+		return realm, nil, fmt.Errorf("上游未返回可用模型（realm=%s）", realm)
+	}
+	return realm, infos, nil
+}
+
 // accountModels 指定账号的实时模型列表：用该账号**直连上游**拉取，不读任何缓存，
 // 回答"这个账号自己从最上游能看到哪些模型"。
 //
@@ -433,40 +465,24 @@ func (p *Panel) accountModels(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "account not found")
 		return
 	}
-	realm := a.Realm()
-	if realm == "" {
-		realm = "cn" // 旧凭证无 realm：与池内缺省口径一致按 CN
-	}
-
+	// start 仍放在目录探测之前：elapsed_ms 保持「本次请求到目录就绪」的既有语义。
 	start := time.Now()
+	realm, infos, err := p.accountModelCatalog(a)
+	if err != nil {
+		status := http.StatusBadGateway
+		if errors.Is(err, errGlobalChatDisabled) {
+			status = http.StatusBadRequest
+		}
+		writeErr(w, status, err.Error())
+		return
+	}
 	var (
-		infos   []upstream.ModelInfo
 		efforts map[string][]string
 		defs    map[string]string
 	)
 	if realm == "global" {
-		if !p.cfg.Upstream.GlobalEnabled {
-			writeErr(w, http.StatusBadRequest, "global 路由已关闭（config global.enabled=false）")
-			return
-		}
-		infos = p.cfg.Upstream.FetchGlobalModelInfos(a)
-		if len(infos) == 0 {
-			writeErr(w, http.StatusBadGateway, "上游未返回可用模型（realm=global）")
-			return
-		}
 		// global 目录不与 CN 共用 effort 桶（两域同模型名档位不同）。
 		efforts, defs = p.cfg.Upstream.GlobalEffortSnapshot()
-	} else {
-		var err error
-		infos, err = p.cfg.Upstream.FetchModels(a) // CN：/v3/config ∪ 企业端点并发探测
-		if err != nil {
-			writeErr(w, http.StatusBadGateway, "fetch models: "+err.Error())
-			return
-		}
-	}
-	if len(infos) == 0 {
-		writeErr(w, http.StatusBadGateway, "上游未返回可用模型（realm="+realm+"）")
-		return
 	}
 
 	out := make([]map[string]any, 0, len(infos))

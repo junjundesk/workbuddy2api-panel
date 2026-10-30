@@ -111,9 +111,22 @@ function promptCard(g) {
     (on && g.prompt_preview ? '<div class="hint" style="margin-top:8px">预览：<code style="font:11px var(--mono);color:var(--ink-2)">' + esc(g.prompt_preview) + '</code></div>' : '') +
     '<div class="card-f"><span>只影响本组密钥的 /v1/chat/completions 与 /v1/responses</span><span class="grow"></span><button class="xs ghost" data-act="edit-prompt">' + (on ? '编辑' : '配置') + '</button></div></div>';
 }
+// 测活结果：成功带上模型 / 耗时 / 回复片段；失败按阶段（模型目录 / 对话）给出原因。
+// 服务端对上游失败仍回 200 + ok:false（与代理测试同口径），因此这里按 r.ok 选 toast 颜色。
+function aliveToast(r) {
+  if (!r || !r.ok) {
+    const where = r && r.stage === 'catalog' ? '模型目录' : '对话';
+    return '测活失败（' + where + '）：' + ((r && r.error) || '未知错误');
+  }
+  let s = '测活通过';
+  if (r.model) s += ' · ' + r.model;
+  if (r.latency_ms != null) s += ' · ' + r.latency_ms + 'ms';
+  return s + (r.reply ? '：' + r.reply : '');
+}
 // accActs 账号行操作，与主页账号池（app.js renderAccounts）同口径：
 // 企业版不显示签到 / 任务（上游不支持），冻结 → 解冻、暂停 → 恢复选号、否则 → 暂停选号。
-// 任务 / 模型弹窗逻辑较重，复用主页实现：新标签页深链 /panel/?open=tasks&uid=...。
+// 任务 / 模型弹窗逻辑较重，复用主页实现：新标签页深链 /panel/?open=tasks&uid=...
+// 测活与主页一致：服务端用该账号直连上游发一句 hi，结果以 toast 呈现。
 function accActs(a, mode) {
   const u = esc(a.uid);
   const b = (act, label, cls, title) => '<button class="xs ' + (cls || 'ghost') + '" data-act="acc" data-a="' + act + '" data-uid="' + u + '"' + (title ? ' title="' + esc(title) + '"' : '') + '>' + label + '</button>';
@@ -123,6 +136,7 @@ function accActs(a, mode) {
   h += b('balance', a.enterprise ? '额度' : '余额');
   if (!a.enterprise) h += b('tasks', '任务', '', '在控制台打开任务面板');
   h += b('models', '模型', '', '在控制台打开模型面板');
+  h += b('alive', '测活', '', '向该账号发一句 hi 验证能否正常对话（会消耗少量积分；不改选号 / 冷却状态）');
   h += frozen ? b('revive', '解冻', 'primary') : (a.paused ? b('resume', '恢复选号', 'primary') : b('pause', '暂停选号', '', '退出选号，但照常签到 / 保活 / 刷新余额'));
   if (!a.disabled) h += b('disable', '禁用');
   h += '<button class="xs ghost" data-act="move-account" data-uid="' + u + '" title="移动到公共池或其他分组">移动</button>';
@@ -449,6 +463,12 @@ document.addEventListener('click', async e => {
       try {
         if (a === 'checkin') { const r = await api(p + 'checkin', { method: 'POST' }); toast('签到完成' + (r.credits != null ? '，积分 ' + r.credits + (r.credits_total > 0 ? '/' + r.credits_total : '') : '') + (r.checkin_message ? '（' + r.checkin_message + '）' : ''), 'ok'); }
         else if (a === 'balance') { const r = await api(p + 'balance', { method: 'POST' }); toast('余额已更新：' + r.credits + (r.credits_total > 0 ? ' / ' + r.credits_total : ''), 'ok'); }
+        else if (a === 'alive') {
+          // 测活可能在途数秒：按钮显示进行中文案，结果（含上游失败）走 toast。
+          el.textContent = '测活中…';
+          try { const r = await api(p + 'alive', { method: 'POST' }); toast(aliveToast(r), r.ok ? 'ok' : 'err'); }
+          finally { el.textContent = '测活'; }
+        }
         else if (a === 'revive') { await api(p + 'revive', { method: 'POST' }); toast('已解冻', 'ok'); }
         else if (a === 'pause') { await api(p + 'pause', { method: 'POST' }); toast('已暂停选号（签到 / 保活照常）', 'ok'); }
         else if (a === 'resume') { await api(p + 'resume', { method: 'POST' }); toast('已恢复选号', 'ok'); }

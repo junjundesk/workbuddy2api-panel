@@ -427,7 +427,7 @@ function renderAccountGroups(list, groups) {
   const maxCred = Math.max(1, ...list.map(s => s.credits || 0));
   // 固定列宽：各卡片的列上下对齐。
   // 账号列不设宽度，吸收剩余空间；操作列必须显式给宽——表头 .c-acts 的 width:1px 在 fixed 布局下会把它压成 1px，按钮溢出盖住左侧列。
-  const cols = '<colgroup><col style="width:4px"><col><col style="width:200px"><col style="width:100px"><col style="width:90px"><col style="width:50px"><col style="width:300px"><col style="width:90px"><col style="width:400px"></colgroup>';
+  const cols = '<colgroup><col style="width:4px"><col><col style="width:200px"><col style="width:100px"><col style="width:90px"><col style="width:50px"><col style="width:300px"><col style="width:90px"><col style="width:440px"></colgroup>';
   const head = '<thead><tr><th class="mark" aria-hidden="true"></th><th>账号</th><th>状态</th><th>积分</th><th>成功 / 失败</th><th>在途</th><th>用量</th><th>最近成功</th><th class="c-acts"></th></tr></thead>';
   const tag = (n, cls, label) => n ? '<span class="tag ' + cls + '">' + label + ' ' + n + '</span>' : '';
   $('accGroups').innerHTML = groupAccountsForView(list, groups).map(b => {
@@ -520,6 +520,7 @@ function accRowHtml(s, maxCred) {
         (s.enterprise ? '' :
           '<button class="xs ghost" data-a="tasks" data-u="' + esc(s.uid) + '">任务</button>') +
         '<button class="xs ghost" data-a="models" data-u="' + esc(s.uid) + '">模型</button>' +
+        '<button class="xs ghost" data-a="alive" data-u="' + esc(s.uid) + '" title="向该账号发一句 hi 验证能否正常对话（会消耗少量积分；不改选号 / 冷却状态）">测活</button>' +
         (frozen ? '<button class="xs primary" data-a="revive" data-u="' + esc(s.uid) + '">解冻</button>'
                 : (s.paused ? '<button class="xs primary" data-a="resume" data-u="' + esc(s.uid) + '">恢复选号</button>'
                             : '<button class="xs ghost" data-a="pause" data-u="' + esc(s.uid) + '" title="' + (s.enterprise ? '退出选号，但照常保活 / 刷新额度' : '退出选号，但照常签到 / 活跃上报 / 保活 / 刷新余额') + '">暂停选号</button>')) +
@@ -593,6 +594,19 @@ async function loadOverview(quiet) {
   } catch (e) { if (!quiet) toast(e.message, 'err'); }
 }
 
+// 测活结果：成功带上模型 / 耗时 / 回复片段；失败按阶段（模型目录 / 对话）给出原因。
+// 服务端对上游失败仍回 200 + ok:false（与代理测试同口径），因此这里按 r.ok 选 toast 颜色。
+function aliveToast(r) {
+  if (!r || !r.ok) {
+    const where = r && r.stage === 'catalog' ? '模型目录' : '对话';
+    return '测活失败（' + where + '）：' + ((r && r.error) || '未知错误');
+  }
+  let s = '测活通过';
+  if (r.model) s += ' · ' + r.model;
+  if (r.latency_ms != null) s += ' · ' + formatLatency(r.latency_ms);
+  return s + (r.reply ? '：' + r.reply : '');
+}
+
 async function onAccClick(ev) {
   const b = ev.target.closest('button[data-a]');
   if (!b) return;
@@ -607,6 +621,13 @@ async function onAccClick(ev) {
     } else if (a === 'balance') {
       const r = await api('accounts/' + encodeURIComponent(u) + '/balance', { method: 'POST' });
       toast('余额已更新：' + r.credits + (r.credits_total > 0 ? ' / ' + r.credits_total : ''), 'ok');
+    } else if (a === 'alive') {
+      // 测活可能在途数秒：按钮显示进行中文案，结果（含上游失败）走 toast。
+      b.textContent = '测活中…';
+      try {
+        const r = await api('accounts/' + encodeURIComponent(u) + '/alive', { method: 'POST' });
+        toast(aliveToast(r), r.ok ? 'ok' : 'err');
+      } finally { b.textContent = '测活'; }
     } else if (a === 'revive') {
       await api('accounts/' + encodeURIComponent(u) + '/revive', { method: 'POST' });
       toast('已解冻', 'ok');
