@@ -313,7 +313,7 @@ function parseAccounts(text) {
 function updateImportParse() {
   const text = state.importTab === 'single' ? $('importSingle').value : $('importBatch').value;
   const n = text.trim() ? parseAccounts(text).length : -1;
-  $('importParse').textContent = n < 0 ? '等待输入…' : (n ? '识别到 ' + n + ' 个账号' : '没有识别到有效账号（需要 uid + access_token/accessToken）');
+  $('importParse').textContent = n < 0 ? '等待输入…' : (n ? '识别到 ' + n + ' 个账号' : '没有识别到有效账号（需要 uid + access_token/accessToken；也兼容插件 auths 原文件嵌套形 account.uid + auth.accessToken）');
 }
 $('importSingle').addEventListener('input', updateImportParse);
 $('importBatch').addEventListener('input', updateImportParse);
@@ -436,8 +436,12 @@ document.addEventListener('click', async e => {
       const fd = new FormData(); fd.append('file', new Blob([JSON.stringify(arr)], { type: 'application/json' }), 'accounts.json');
       if (state.importGroup) fd.append('group', state.importGroup);
       const r = await api('import/cockpit', { method: 'POST', body: fd });
-      closeVeil('importVeil'); await load(); if (r.errors && r.errors.length) console.warn('import errors:', r.errors);
-      toast('导入完成：成功 ' + r.imported + '，跳过 ' + r.skipped + (r.errors && r.errors.length ? '（' + r.errors[0] + '）' : ''), r.imported ? 'ok' : 'warn'); return;
+      closeVeil('importVeil'); await load();
+      const errs = r.errors || [];
+      if (errs.length) console.warn('import errors:', errs);
+      // toast 放不下全部原因：最多带 2 条，其余只记数量，完整列表见控制台。
+      const errText = errs.length ? '（' + errs.slice(0, 2).join('；') + (errs.length > 2 ? ' 等 ' + errs.length + ' 条' : '') + '）' : '';
+      toast('导入完成：成功 ' + r.imported + '，跳过 ' + r.skipped + errText, r.imported ? 'ok' : 'warn'); return;
     }
     if (act === 'add-account') {
       const g = selectedGroup(); $('addGroupName').textContent = g ? '· ' + g.name : '· 公共号池'; $('addWait').hidden = true; openVeil('addVeil');

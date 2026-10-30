@@ -391,7 +391,7 @@ function renderAccounts(list, groups) {
   }
   // 有总额度（credits_total）→ 进度条按自身 剩余/总额 百分比；旧数据无总额 → 退回池内最高=100%
   const maxCred = Math.max(1, ...list.map(s => s.credits || 0));
-  tb.innerHTML = list.map(s => accRowHtml(s, maxCred)).join('');
+  tb.innerHTML = list.map(s => accRowHtml(s, maxCred, groups)).join('');
 }
 
 // groupAccountsForView 把账号分到「公共池 + 各分组（按创建时间）」桶里。
@@ -427,14 +427,14 @@ function renderAccountGroups(list, groups) {
   const maxCred = Math.max(1, ...list.map(s => s.credits || 0));
   // 固定列宽：各卡片的列上下对齐。
   // 账号列不设宽度，吸收剩余空间；操作列必须显式给宽——表头 .c-acts 的 width:1px 在 fixed 布局下会把它压成 1px，按钮溢出盖住左侧列。
-  const cols = '<colgroup><col style="width:4px"><col><col style="width:200px"><col style="width:100px"><col style="width:90px"><col style="width:50px"><col style="width:300px"><col style="width:90px"><col style="width:440px"></colgroup>';
+  const cols = '<colgroup><col style="width:4px"><col><col style="width:200px"><col style="width:100px"><col style="width:90px"><col style="width:50px"><col style="width:300px"><col style="width:90px"><col style="width:490px"></colgroup>';
   const head = '<thead><tr><th class="mark" aria-hidden="true"></th><th>账号</th><th>状态</th><th>积分</th><th>成功 / 失败</th><th>在途</th><th>用量</th><th>最近成功</th><th class="c-acts"></th></tr></thead>';
   const tag = (n, cls, label) => n ? '<span class="tag ' + cls + '">' + label + ' ' + n + '</span>' : '';
   $('accGroups').innerHTML = groupAccountsForView(list, groups).map(b => {
     const c = accGroupCounts(b.items, now);
     const badge = b.pub ? '未分组' : (b.shared ? '进入公共池' : '独立') + (b.call ? ' · 共用公共池' : '');
     const cred = c.total > 0 ? '积分 ' + c.credits + ' / ' + c.total : (c.credits ? '积分 ' + c.credits : '');
-    const rows = b.items.length ? b.items.map(s => accRowHtml(s, maxCred)).join('')
+    const rows = b.items.length ? b.items.map(s => accRowHtml(s, maxCred, groups)).join('')
       : '<tr><td colspan="9"><div class="empty">' + (b.pub ? '没有未分组的账号' : '这个分组还没有账号') + '</div></td></tr>';
     const k = esc(b.key);
     return '<div class="box gcard' + (fold[b.key] ? ' fold' : '') + '"><header data-gfold="' + k + '" title="点击折叠 / 展开">' +
@@ -450,7 +450,9 @@ function renderAccountGroups(list, groups) {
   }).join('');
 }
 
-function accRowHtml(s, maxCred) {
+function accRowHtml(s, maxCred, groups) {
+    // 有分组时任何账号都能移动；没有分组时只有已分组账号还能移回公共池。
+    const canMove = (groups && groups.length > 0) || !!s.group;
     const bl = (new Date(s.breaker_until || 0) - Date.now()) / 1000;
     const dg = (new Date(s.degrade_until || 0) - Date.now()) / 1000;
     const cool = Math.max(s.cool_remaining_sec || 0, bl > 0 ? bl : 0, dg > 0 ? dg : 0);
@@ -525,6 +527,7 @@ function accRowHtml(s, maxCred) {
                 : (s.paused ? '<button class="xs primary" data-a="resume" data-u="' + esc(s.uid) + '">恢复选号</button>'
                             : '<button class="xs ghost" data-a="pause" data-u="' + esc(s.uid) + '" title="' + (s.enterprise ? '退出选号，但照常保活 / 刷新额度' : '退出选号，但照常签到 / 活跃上报 / 保活 / 刷新余额') + '">暂停选号</button>')) +
         (s.disabled ? '' : '<button class="xs ghost" data-a="disable" data-u="' + esc(s.uid) + '">禁用</button>') +
+        (canMove ? '<button class="xs ghost" data-a="move" data-u="' + esc(s.uid) + '" title="移动到公共池或其他分组">移动</button>' : '') +
         '<button class="xs ghost danger" data-a="remove" data-u="' + esc(s.uid) + '">移除</button>' +
       '</td></tr>';
 }
@@ -607,10 +610,49 @@ function aliveToast(r) {
   return s + (r.reply ? '：' + r.reply : '');
 }
 
+/* 主页账号行「移动」：与分组页同一语义（一个账号只能属于一个分组）。
+   复用 POST accounts/{uid}/group；目标号池来自 overviewData.groups。 */
+let moveUID = null;
+function openMoveModal(uid) {
+  const groups = (overviewData && overviewData.groups) || [];
+  const accounts = (overviewData && overviewData.accounts) || [];
+  const acc = accounts.find(a => a.uid === uid) || null;
+  const current = acc ? (acc.group || '') : '';
+  const opts = [{ id: '', name: '公共号池（未分组）' }].concat(groups.map(g => ({ id: g.id, name: g.name })));
+  const targets = opts.filter(o => o.id !== current);
+  if (!targets.length) { toast('没有可移动的目标号池', 'err'); return; }
+  moveUID = uid;
+  $('moveTarget').innerHTML = opts.map(o =>
+    '<option value="' + esc(o.id) + '"' + (o.id === current ? ' disabled' : '') + '>' +
+    esc(o.name) + (o.id === current ? '（当前）' : '') + '</option>'
+  ).join('');
+  $('moveTarget').value = targets[0].id;
+  const who = acc ? (acc.nickname || acc.uid) : uid;
+  $('moveHint').textContent = '将「' + who + '」移动到目标号池（一个账号只能属于一个分组）。';
+  $('moveVeil').classList.add('on');
+}
+function closeMoveModal() { $('moveVeil').classList.remove('on'); moveUID = null; }
+async function doMove() {
+  if (!moveUID) return;
+  const uid = moveUID, target = $('moveTarget').value;
+  const b = $('btnMoveDo'); b.disabled = true; b.textContent = '移动中…';
+  try {
+    await api('accounts/' + encodeURIComponent(uid) + '/group', { method: 'POST', body: JSON.stringify({ group: target }) });
+    const g = target ? ((overviewData && overviewData.groups) || []).find(x => x.id === target) : null;
+    closeMoveModal();
+    toast('已移动到' + (g ? '「' + g.name + '」' : '公共号池'), 'ok');
+    await loadOverview(true);
+  } catch (e) { toast('移动失败：' + e.message, 'err'); }
+  finally { b.disabled = false; b.textContent = '移动'; }
+}
+if ($('btnMoveCancel')) $('btnMoveCancel').onclick = closeMoveModal;
+if ($('btnMoveDo')) $('btnMoveDo').onclick = doMove;
+
 async function onAccClick(ev) {
   const b = ev.target.closest('button[data-a]');
   if (!b) return;
   const u = b.dataset.u, a = b.dataset.a;
+  if (a === 'move') { openMoveModal(u); return; }
   if (a === 'remove' && !confirm('移除账号将删除池状态与 auths/ 下的凭证文件，且不可恢复。确认移除？')) return;
   if (a === 'disable' && !confirm('禁用后该账号不再参与选号（保号任务默认也跳过），需手动解冻才能恢复。若只是想临时让位、仍要保号，请改用「暂停选号」。确认禁用？')) return;
   b.disabled = true;
@@ -1200,6 +1242,29 @@ $('btnLogPin').onclick = () => {
   logPin = !logPin;
   $('btnLogPin').textContent = '自动滚动：' + (logPin ? '开' : '关');
 };
+// 运行日志「清空」：只清服务端内存环形缓冲（stdout / 文件日志不动）；5 秒轮询不会复活。
+if ($('btnLogClear')) $('btnLogClear').onclick = async () => {
+  const b = $('btnLogClear'); if (b.disabled) return;
+  b.disabled = true; b.textContent = '清空中…';
+  try {
+    await api('logs/clear', { method: 'POST' });
+    await loadLogs();
+    toast('运行日志已清空', 'ok');
+  } catch (e) { toast('清空失败：' + e.message, 'err'); }
+  finally { b.disabled = false; b.textContent = '清空'; }
+};
+// 请求记录「清空」：删除 JSONL 归档 + 清内存最近记录；累计指标与用量保留，因此需 confirm。
+if ($('btnReqClear')) $('btnReqClear').onclick = async () => {
+  if (!confirm('清空请求记录将删除 JSONL 归档文件并清空最近记录（累计指标、用量统计与运行日志历史均不受影响）。确认？')) return;
+  const b = $('btnReqClear'); if (b.disabled) return;
+  b.disabled = true; b.textContent = '清空中…';
+  try {
+    const r = await api('request_logs/clear', { method: 'POST' });
+    await loadLogs();
+    toast('请求记录已清空' + (r.files ? '（删除 ' + r.files + ' 个文件 · ' + fmtBytes(r.bytes) + '）' : ''), 'ok');
+  } catch (e) { toast('清空失败：' + e.message, 'err'); }
+  finally { b.disabled = false; b.textContent = '清空'; }
+};
 
 /* ── 配置 ─────────────────────────────────────────────────────────── */
 const CFG_MAP = {
@@ -1419,7 +1484,8 @@ $('importFile').onchange = async () => {
   const k = localStorage.getItem(LS_KEY);
   if (k) h['Authorization'] = 'Bearer ' + k;
   let imported = 0, skipped = 0;
-  const failed = [];
+  const failed = [];        // 整文件失败：网络 / HTTP / JSON 解析
+  const skipReasons = [];   // 服务端返回的逐条跳过原因，前面补文件名便于对照
   for (const file of files) {
     const fd = new FormData();
     fd.append('file', file);
@@ -1428,17 +1494,25 @@ $('importFile').onchange = async () => {
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
       imported += d.imported || 0; skipped += d.skipped || 0;
-      if (d.errors && d.errors.length) console.warn('import errors (' + file.name + '):', d.errors);
+      (d.errors || []).forEach(msg => skipReasons.push(file.name + '：' + msg));
     } catch (e) { failed.push(file.name + '：' + e.message); }
   }
   if (imported || skipped || !failed.length) {
     $('importDone').hidden = false;
     $('importDone').textContent = (files.length > 1 ? files.length + ' 个文件，' : '') + '导入完成：成功 ' + imported + ' 个' + (skipped ? '，跳过 ' + skipped + ' 个' : '');
   }
-  if (failed.length) {
-    $('importErr').hidden = false;
-    $('importErr').textContent = '导入失败：' + failed.join('；');
+  // 失败文件与跳过原因都放进 #importErr（textContent 赋值：文件名 / 服务端文案不会被当成 HTML）。
+  const errParts = [];
+  if (failed.length) errParts.push('导入失败：' + failed.join('；'));
+  if (skipReasons.length) {
+    const shown = skipReasons.slice(0, 3);
+    errParts.push('跳过原因：' + shown.join('；') + (skipReasons.length > shown.length ? '；另有 ' + (skipReasons.length - shown.length) + ' 条（控制台可看完整列表）' : ''));
   }
+  if (errParts.length) {
+    $('importErr').hidden = false;
+    $('importErr').textContent = errParts.join('；');
+  }
+  if (skipReasons.length) console.warn('import skipped:', skipReasons);
   loadOverview(true);
   $('importFile').value = '';
 };

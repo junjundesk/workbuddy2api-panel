@@ -600,7 +600,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   .gcard .gc { color: var(--ink-3); font-size: 12.5px; }
   .gcard .gs { display: inline-flex; gap: 6px; }
   .gcard .gcred { color: var(--ink-2); font-size: 12.5px; font-variant-numeric: tabular-nums; }
-  .acc.gfix { table-layout: fixed; min-width: 1500px; }
+  .acc.gfix { table-layout: fixed; min-width: 1550px; }
 .acc.gfix .c-acts { width: auto; }
 .acc.gfix td.who { overflow: hidden; }
   .acc.gfix td.acts { display: table-cell; text-align: right; white-space: nowrap; }
@@ -1117,6 +1117,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <span class="grow"></span>
           <span class="note" id="reqSummary">—</span>
           <span class="note" id="reqNote">—</span>
+          <button class="xs ghost danger" id="btnReqClear" title="删除 JSONL 归档并清空最近记录（累计指标、用量与运行日志不受影响）">清空</button>
         </header>
         <div class="fbar" id="reqFilter">
           <input id="reqQ" type="search" placeholder="搜索 IP / UA / 模型 / 账号 / 请求 ID" aria-label="搜索请求记录">
@@ -1160,6 +1161,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
             <button class="xs chip" data-ch="sys">系统</button>
           </span>
           <span class="note" id="logNote">最近 500 行</span>
+          <button class="xs ghost" id="btnLogClear" title="清空面板运行日志（仅内存显示缓冲，不影响控制台 / 文件日志）">清空</button>
           <button class="xs" id="btnLogPin">自动滚动：开</button>
         </header>
         <pre id="logBox"></pre>
@@ -1267,7 +1269,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       </div>
       <!-- 导入 JSON -->
       <div id="addTabImport" class="tab-panel" hidden>
-        <div class="hint" style="margin-bottom:8px">选择 cockpit tools 或面板导出的 JSON 文件批量导入，可一次多选多个文件。</div>
+        <div class="hint" style="margin-bottom:8px">选择 JSON 文件批量导入，可一次多选多个文件：兼容 cockpit tools 扁平数组、面板导出 workbuddy-accounts，以及插件 auths/*.json 原文件（嵌套形）。</div>
         <input type="file" id="importFile" accept=".json,application/json" multiple style="margin-bottom:8px">
         <div id="importDone" class="state ok" hidden></div>
         <div id="importErr" class="state err" hidden></div>
@@ -1298,6 +1300,18 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <span class="grow"></span>
       <button class="primary" id="btnKey">进入</button>
     </footer>
+  </div>
+</div>
+
+<!-- 移动账号（主页账号行「移动」按钮） -->
+<div class="veil" id="moveVeil">
+  <div class="dlg" style="width:460px">
+    <header><h3>移动账号</h3><div class="hint" id="moveHint"></div></header>
+    <div class="body">
+      <label class="fld"><span class="lb">目标号池</span><select id="moveTarget"></select></label>
+      <div class="hint">移动后立即按目标号池的密钥、代理与共享策略生效，账号凭证与状态保持不变。</div>
+    </div>
+    <footer><span class="grow"></span><button id="btnMoveCancel">取消</button><button class="primary" id="btnMoveDo">移动</button></footer>
   </div>
 </div>
 
