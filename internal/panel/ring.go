@@ -84,6 +84,16 @@ func (r *Ring) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// Clear 清空缓冲并返回被丢弃的条目数（面板「清空运行日志」）。
+// 只影响面板内存镜像：stdout / 容器日志 / 文件日志保持原样。
+func (r *Ring) Clear() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := len(r.entries)
+	r.entries = nil
+	return n
+}
+
 // Snapshot 按写入顺序返回缓冲内全部条目（拷贝，调用方可安全持有）。
 func (r *Ring) Snapshot() []LogEntry {
 	r.mu.Lock()

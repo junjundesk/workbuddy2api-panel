@@ -164,8 +164,10 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/groups.js", p.groupsScript)
 	p.mux.HandleFunc("GET /panel/api/overview", p.withAuth(p.overview))
 	p.mux.HandleFunc("GET /panel/api/logs", p.withAuth(p.logsHandler))
+	p.mux.HandleFunc("POST /panel/api/logs/clear", p.withAuth(p.logsClear))
 	p.mux.HandleFunc("GET /panel/api/request_metrics", p.withAuth(p.requestMetrics))
 	p.mux.HandleFunc("GET /panel/api/request_logs", p.withAuth(p.requestLogs))
+	p.mux.HandleFunc("POST /panel/api/request_logs/clear", p.withAuth(p.requestLogsClear))
 	p.mux.HandleFunc("GET /panel/api/models", p.withAuth(p.models))
 	p.mux.HandleFunc("POST /panel/api/login/start", p.withAuth(p.loginStart))
 	p.mux.HandleFunc("GET /panel/api/login/poll", p.withAuth(p.loginPoll))
@@ -312,6 +314,14 @@ func (p *Panel) logsHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"entries": p.logs.Snapshot()})
 }
 
+// logsClear 清空面板运行日志环形缓冲（仅内存镜像；stdout / 容器日志 / 文件日志不受影响）。
+// 清空动作自身经 log.Printf 记一行审计：生产环境该行会重新进入面板缓冲，作为操作痕迹。
+func (p *Panel) logsClear(w http.ResponseWriter, r *http.Request) {
+	n := p.logs.Clear()
+	log.Printf("panel: 清空运行日志 %d 行", n)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "cleared": n})
+}
+
 // requestMetrics 返回进程内请求指标、最近 100 条与归档状态。
 func (p *Panel) requestMetrics(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.RequestLog == nil {
@@ -360,6 +370,24 @@ func (p *Panel) requestLogs(w http.ResponseWriter, r *http.Request) {
 		rows = []reqlog.Event{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"entries": rows, "limit": limit})
+}
+
+// requestLogsClear 清空请求记录：删除 JSONL 归档（requests-*.jsonl）并清空内存最近记录。
+// 进程累计指标（已完成 / 成功率 / 平均耗时）保留——「清记录」不是「重置指标」；
+// usage.json、账号状态与运行日志历史都不受影响（本动作自身经 log.Printf 留一行审计）。
+// 归档关闭时仍会清空内存 recent。
+func (p *Panel) requestLogsClear(w http.ResponseWriter, r *http.Request) {
+	if p.cfg.RequestLog == nil {
+		writeErr(w, http.StatusNotImplemented, "request logger not available")
+		return
+	}
+	files, bytes, err := p.cfg.RequestLog.Clear()
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "clear request logs: "+err.Error())
+		return
+	}
+	log.Printf("panel: 清空请求记录（删除归档 %d 个文件 / %d 字节，内存最近记录已清空）", files, bytes)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "files": files, "bytes": bytes})
 }
 
 // models 实时查询上游模型列表与 reasoning 实际档位（直连上游，不读路由层 1h 缓存）：

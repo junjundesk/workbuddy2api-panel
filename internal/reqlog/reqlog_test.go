@@ -1,6 +1,7 @@
 package reqlog
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -23,6 +24,59 @@ func TestRecorderMetricsAndRecent(t *testing.T) {
 	}
 	if len(s.Recent) != 2 || s.Recent[0].RequestID != "bad" || s.Recent[1].RequestID != "ok" {
 		t.Fatalf("recent = %+v, want newest first", s.Recent)
+	}
+}
+
+// TestClearArchiveAndRecent 清空请求记录：删除归档文件、清空 recent，但累计指标保留。
+// Record 是异步入队；Clear 在 writer goroutine 内先排空队列再删文件，因此无需 sleep。
+func TestClearArchiveAndRecent(t *testing.T) {
+	dir := t.TempDir()
+	r := New(Config{Enabled: true, Dir: dir, MaxBytes: 1 << 20, RetentionDays: 7})
+	defer r.Close()
+	for i := 0; i < 3; i++ {
+		r.Record(Event{RequestID: fmt.Sprintf("r%d", i), Status: 200, OK: true, Outcome: OutcomeSuccess, DurationMs: 10})
+	}
+	files, bytes, err := r.Clear()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if files != 1 || bytes <= 0 {
+		t.Fatalf("clear files=%d bytes=%d want 1 / >0", files, bytes)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("archive still has %d file(s)", len(entries))
+	}
+	rows, err := r.ReadArchive(10, Filter{})
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("archive rows=%+v err=%v want empty", rows, err)
+	}
+	s := r.Snapshot()
+	if len(s.Recent) != 0 {
+		t.Fatalf("recent=%d want 0", len(s.Recent))
+	}
+	if s.Completed != 3 {
+		t.Fatalf("completed=%d want 3（累计指标应保留）", s.Completed)
+	}
+	if s.Archive.Files != 0 || s.Archive.Bytes != 0 {
+		t.Fatalf("archive stats=%+v want 0/0", s.Archive)
+	}
+}
+
+// TestClearWithoutArchive 归档关闭时清空仍清 recent，且返回 0 文件 / 0 字节、无 panic。
+func TestClearWithoutArchive(t *testing.T) {
+	r := New(Config{})
+	defer r.Close()
+	r.Record(Event{RequestID: "a", Status: 200, OK: true, Outcome: OutcomeSuccess})
+	files, bytes, err := r.Clear()
+	if err != nil || files != 0 || bytes != 0 {
+		t.Fatalf("clear files=%d bytes=%d err=%v want 0/0/nil", files, bytes, err)
+	}
+	if len(r.Snapshot().Recent) != 0 {
+		t.Fatalf("recent should be empty")
 	}
 }
 

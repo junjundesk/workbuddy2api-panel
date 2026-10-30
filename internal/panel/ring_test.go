@@ -26,6 +26,26 @@ func TestClassifyLine(t *testing.T) {
 	}
 }
 
+// TestRingClear 清空运行日志：返回丢弃条数、快照归零，清空后可继续写入。
+func TestRingClear(t *testing.T) {
+	r := NewRing(4)
+	if _, err := r.Write([]byte("school a: done\npanel: line\n")); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.Clear(); got != 2 {
+		t.Fatalf("cleared=%d want 2", got)
+	}
+	if es := r.Snapshot(); len(es) != 0 {
+		t.Fatalf("after clear entries=%d want 0", len(es))
+	}
+	if _, err := r.Write([]byte("after clear\n")); err != nil {
+		t.Fatal(err)
+	}
+	if es := r.Snapshot(); len(es) != 1 {
+		t.Fatalf("after rewrite entries=%d want 1", len(es))
+	}
+}
+
 func TestRingWriteStripsTimestamp(t *testing.T) {
 	r := NewRing(4)
 	if _, err := r.Write([]byte("2026/09/14 00:12:34 school x: done\n")); err != nil {

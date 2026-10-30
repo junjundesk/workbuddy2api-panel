@@ -199,6 +199,22 @@ func (r *Recorder) Record(e Event) {
 	}
 }
 
+// Clear 清空请求记录：内存 recent 归零并删除 JSONL 归档文件，返回删除的文件数与字节数。
+// 进程累计指标（completed / succeeded / 成功率 / durationSum）保留——「清记录」不是
+// 「重置指标」；用量（usage.Recorder）、账号状态与运行日志都不受影响。
+func (r *Recorder) Clear() (files int, bytes int64, err error) {
+	if r == nil {
+		return 0, 0, nil
+	}
+	r.mu.Lock()
+	r.recent = r.recent[:0]
+	r.mu.Unlock()
+	if r.archive == nil {
+		return 0, 0, nil
+	}
+	return r.archive.clear()
+}
+
 // Snapshot 返回进程内指标和归档状态。
 func (r *Recorder) Snapshot() Snapshot {
 	if r == nil {
@@ -245,9 +261,17 @@ func round1(v float64) float64 {
 	return float64(int(v*10+0.5)) / 10
 }
 
+// archiveClearResult 清空归档的回执（由 writer goroutine 回传）。
+type archiveClearResult struct {
+	files int
+	bytes int64
+	err   error
+}
+
 type archiveWriter struct {
 	cfg       Config
 	ch        chan Event
+	clearCh   chan chan archiveClearResult
 	stop      chan struct{}
 	done      chan struct{}
 	closeOnce sync.Once
@@ -279,10 +303,11 @@ func newArchiveWriter(cfg Config) *archiveWriter {
 		cfg.QueueSize = defaultQueue
 	}
 	w := &archiveWriter{
-		cfg:  cfg,
-		ch:   make(chan Event, cfg.QueueSize),
-		stop: make(chan struct{}),
-		done: make(chan struct{}),
+		cfg:     cfg,
+		ch:      make(chan Event, cfg.QueueSize),
+		clearCh: make(chan chan archiveClearResult),
+		stop:    make(chan struct{}),
+		done:    make(chan struct{}),
 	}
 	if err := os.MkdirAll(cfg.Dir, 0o700); err != nil {
 		w.setErr(err)
@@ -320,6 +345,8 @@ func (w *archiveWriter) run() {
 		case <-ticker.C:
 			w.flush()
 			w.prune()
+		case rep := <-w.clearCh:
+			w.clearArchive(rep)
 		case <-w.stop:
 			for {
 				select {
@@ -333,6 +360,76 @@ func (w *archiveWriter) run() {
 			}
 		}
 	}
+}
+
+// clearArchive 处理清空请求（只在 writer goroutine 内调用）：
+// 先把已入队事件写完，再 flush / 关闭当前文件，最后删除归档目录下的请求记录文件。
+// 清空之后新到的记录会写入新文件，语义是「清空到这个时点为止」；先 drain 是为了
+// 避免清空前已入队的事件在删文件后重新落盘。
+func (w *archiveWriter) clearArchive(rep chan<- archiveClearResult) {
+drain:
+	for {
+		select {
+		case e := <-w.ch:
+			w.writeEvent(e)
+		default:
+			break drain
+		}
+	}
+	w.flush()
+	w.closeFile()
+	files, bytes, err := removeArchiveFiles(w.cfg.Dir)
+	rep <- archiveClearResult{files: files, bytes: bytes, err: err}
+}
+
+// clear 请求 writer goroutine 清空归档并等待回执；归档未启用 / 已关闭时返回空结果。
+func (w *archiveWriter) clear() (int, int64, error) {
+	if !w.enabled() || w.clearCh == nil {
+		return 0, 0, nil
+	}
+	rep := make(chan archiveClearResult, 1)
+	select {
+	case w.clearCh <- rep:
+	case <-w.done:
+		return 0, 0, nil
+	}
+	select {
+	case res := <-rep:
+		return res.files, res.bytes, res.err
+	case <-w.done:
+		return 0, 0, nil
+	}
+}
+
+// removeArchiveFiles 删除归档目录下全部 requests-*.jsonl，返回成功删除的文件数与字节数。
+// 识别口径与 prune / read 一致；目录不存在视为空操作；部分失败返回首个错误（已删的回滚不了）。
+func removeArchiveFiles(dir string) (files int, bytes int64, err error) {
+	entries, readErr := os.ReadDir(dir)
+	if readErr != nil {
+		if os.IsNotExist(readErr) {
+			return 0, 0, nil
+		}
+		return 0, 0, readErr
+	}
+	var firstErr error
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasPrefix(name, "requests-") || !strings.HasSuffix(name, ".jsonl") {
+			continue
+		}
+		info, statErr := entry.Info()
+		if rmErr := os.Remove(filepath.Join(dir, name)); rmErr != nil {
+			if firstErr == nil {
+				firstErr = rmErr
+			}
+			continue
+		}
+		files++
+		if statErr == nil {
+			bytes += info.Size()
+		}
+	}
+	return files, bytes, firstErr
 }
 
 func (w *archiveWriter) writeEvent(e Event) {
