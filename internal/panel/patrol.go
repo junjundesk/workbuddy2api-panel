@@ -51,10 +51,9 @@ const (
 	patrolUnitHour   = "hour"
 
 	patrolDefaultIntervalHour = 6 // 6h：一天 4 轮，足够发现封号/积分耗尽
-	patrolMinIntervalMinutes  = 5 // 下限 5 分钟：再密就是在打上游
+	patrolMinIntervalMinutes  = 1 // 下限 1 分钟：允许密集巡检（上游压力由使用者自担）
 	patrolMaxIntervalMinutes  = 7 * 24 * 60
-	patrolDefaultConcurrency  = 3
-	patrolMaxConcurrency      = 8
+	patrolDefaultConcurrency  = 3 // 缺省并发；0 = 不限（= 账号数，面板可填 0）
 	// patrolProbeTimeout 单号探测总预算（余额 + 对话两次上游调用）。
 	patrolProbeTimeout = 60 * time.Second
 	// patrolKeepResults 内存里保留的最近结果条数（面板展示用）。
@@ -132,8 +131,13 @@ type patrolRunner struct {
 	running  bool
 	done     int
 	total    int
-	rootCtx  context.Context
-	kick     chan struct{}
+	// skippedBanned 本轮跳过（在封号池分组里）的账号数，仅展示用。
+	skippedBanned int
+	// cancel 当前这一轮的取消函数（nil = 没在跑）。面板「停止」用它中断进行中的
+	// 探测；上一轮的 cancel 在下轮开始时被替换，execute 结束时置 nil。
+	cancel  context.CancelFunc
+	rootCtx context.Context
+	kick    chan struct{}
 }
 
 func newPatrolRunner(p *Panel, path string) *patrolRunner {
@@ -183,11 +187,10 @@ func (s patrolSettings) normalized() patrolSettings {
 			s.IntervalValue = patrolMaxIntervalMinutes
 		}
 	}
-	if s.Concurrency <= 0 {
-		s.Concurrency = patrolDefaultConcurrency
-	}
-	if s.Concurrency > patrolMaxConcurrency {
-		s.Concurrency = patrolMaxConcurrency
+	// 并发：>0 用指定值（不设上限），<=0 = 不限（执行时取账号数）。负数归一成 0，
+	// 避免面板误输入 -1 时被当成"1 路"。
+	if s.Concurrency < 0 {
+		s.Concurrency = 0
 	}
 	// 两项检测都关掉等于"空转巡检"：回落积分检测（纯后台查询、零对话消耗），
 	// 免得运维关掉封号检测后整轮巡检什么都不做还以为在跑。
@@ -361,24 +364,63 @@ func (r *patrolRunner) start(uids []string, dryRun *bool) error {
 	r.running = true
 	r.done = 0
 	r.total = 0
-	ctx := r.rootCtx
+	r.skippedBanned = 0
+	ctx, cancel := context.WithCancel(r.rootCtx)
+	r.cancel = cancel
 	r.mu.Unlock()
 
 	go r.execute(ctx, uids, s)
 	return nil
 }
 
+// stop 停止巡检：取消进行中的一轮（如有），并关闭自动巡检开关（disableAuto）。
+// 返回是否取消到了正在跑的轮次、是否真的关掉了自动巡检。
+//
+// 停止是"两件事"：定时循环由 settings.Enabled 控制（关掉并落盘 + poke 重排），
+// 进行中的轮次由 ctx 取消控制（余额查询没有 ctx 入口，靠 patrolBalanceProbeCtx
+// 放弃等待；对话请求由 ChatStreamContext 的 ctx 直接中断）。
+func (r *patrolRunner) stop(cancelRun, disableAuto bool) (cancelled, autoDisabled bool) {
+	r.mu.Lock()
+	if cancelRun && r.cancel != nil {
+		r.cancel()
+		cancelled = true
+	}
+	if disableAuto && r.settings.Enabled {
+		r.settings.Enabled = false
+		r.saveLocked()
+		autoDisabled = true
+	}
+	r.mu.Unlock()
+	if autoDisabled {
+		r.poke()
+	}
+	return cancelled, autoDisabled
+}
+
 // candidates 选出本轮要巡检的账号（按 uid 稳定排序，便于日志与结果比对）。
-func (r *patrolRunner) candidates(uids []string, skipDisabled bool) []*auth.Auth {
+// candidates 选出本轮要巡检的账号（按 uid 稳定排序，便于日志与结果比对），并返回
+// 被跳过的封号池账号数。
+//
+// 跳过两类：
+//   - skipDisabled 打开时的禁用账号（配置项）；
+//   - **已经在「封号池」里的账号**——封号是终态，再探一次既改不了结论，又会白烧一次
+//     对话（还可能在上游再记一笔风控）。账号解封后人工移回公共池，下一次巡检自然
+//     恢复覆盖它；实时封号归组（NotifyAccountBanned）不受此跳过影响。
+func (r *patrolRunner) candidates(uids []string, skipDisabled bool) (accounts []*auth.Auth, skippedBanned int) {
 	want := map[string]bool{}
 	for _, uid := range uids {
 		if uid = strings.TrimSpace(uid); uid != "" {
 			want[uid] = true
 		}
 	}
+	bannedID := r.p.bannedGroupID()
 	out := make([]*auth.Auth, 0, len(uids))
 	for _, st := range r.p.cfg.Pool.List() {
 		if skipDisabled && st.Disabled {
+			continue
+		}
+		if bannedID != "" && st.Group == bannedID {
+			skippedBanned++
 			continue
 		}
 		if len(want) > 0 && !want[st.UID] {
@@ -388,27 +430,52 @@ func (r *patrolRunner) candidates(uids []string, skipDisabled bool) []*auth.Auth
 			out = append(out, a)
 		}
 	}
-	return out
+	return out, skippedBanned
+}
+
+// bannedGroupID 返回「封号池」分组 id（不存在返回空串）。只读，不创建分组。
+func (p *Panel) bannedGroupID() string {
+	if p.cfg.Groups == nil {
+		return ""
+	}
+	for _, g := range p.cfg.Groups.Groups() {
+		if g.Name == patrolGroupBannedName {
+			return g.ID
+		}
+	}
+	return ""
 }
 
 // execute 并发探测 + 按结论归组。同一时刻只有一个 execute（由 start 的单飞保证）。
 func (r *patrolRunner) execute(ctx context.Context, uids []string, s patrolSettings) {
 	started := time.Now()
-	accounts := r.candidates(uids, s.SkipDisabled)
+	accounts, skippedBanned := r.candidates(uids, s.SkipDisabled)
 	results := make([]patrolResult, len(accounts))
 
 	r.mu.Lock()
 	r.total = len(accounts)
 	r.done = 0
+	r.skippedBanned = skippedBanned
 	r.mu.Unlock()
 
 	dry := ""
 	if s.DryRun {
 		dry = "，试运行不改分组"
 	}
-	log.Printf("panel: 巡检开始（账号 %d 个，检测 %s，并发 %d%s）", len(accounts), patrolChecksText(s), s.Concurrency, dry)
+	skipText := ""
+	if skippedBanned > 0 {
+		skipText = fmt.Sprintf("，跳过封号池 %d 个", skippedBanned)
+	}
+	log.Printf("panel: 巡检开始（账号 %d 个%s，检测 %s，并发 %d%s）", len(accounts), skipText, patrolChecksText(s), s.Concurrency, dry)
 
-	sem := make(chan struct{}, s.Concurrency)
+	conc := s.Concurrency
+	if conc <= 0 {
+		conc = len(accounts) // 0 = 不限：全池并发
+	}
+	if conc < 1 {
+		conc = 1
+	}
+	sem := make(chan struct{}, conc)
 	var wg sync.WaitGroup
 	for i, a := range accounts {
 		wg.Add(1)
@@ -417,6 +484,17 @@ func (r *patrolRunner) execute(ctx context.Context, uids []string, s patrolSetti
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
+			// 已被「停止」取消：不再发新请求，直接标记本轮该号未探测。
+			if ctx.Err() != nil {
+				results[i] = patrolResult{
+					UID: a.UID, Nickname: a.Nickname, Realm: a.Realm(), At: time.Now(),
+					Verdict: patrolVerdictFailed, Detail: "已取消（巡检被手动停止）",
+				}
+				r.mu.Lock()
+				r.done++
+				r.mu.Unlock()
+				return
+			}
 			res := r.p.patrolProbe(ctx, a, s.CheckBan, s.CheckCredit)
 			res.FromGroup = a.Group()
 			res.Group = res.FromGroup
@@ -466,6 +544,7 @@ func (r *patrolRunner) execute(ctx context.Context, uids []string, s patrolSetti
 
 	r.mu.Lock()
 	r.running = false
+	r.cancel = nil
 	r.lastRun = time.Now()
 	r.results = append(r.results, results...)
 	if len(r.results) > patrolKeepResults {
@@ -562,15 +641,7 @@ func (p *Panel) patrolMove(uid, gid string) error {
 // 只在响应副本上打标，不改 pool 内部状态：把账号从封号池移回公共池后标记自然消失，
 // 不需要额外维护一套"封号状态机"。
 func (p *Panel) markBannedAccounts(list []pool.Status) {
-	bannedID := ""
-	if p.cfg.Groups != nil {
-		for _, g := range p.cfg.Groups.Groups() {
-			if g.Name == patrolGroupBannedName {
-				bannedID = g.ID
-				break
-			}
-		}
-	}
+	bannedID := p.bannedGroupID()
 	for i := range list {
 		if bannedID != "" && list[i].Group == bannedID {
 			list[i].Banned = true
@@ -645,7 +716,7 @@ func (p *Panel) patrolProbe(ctx context.Context, a *auth.Auth, checkBan, checkCr
 
 	var balance, chat *patrolResult
 	if checkCredit || checkBan {
-		b := p.patrolBalanceProbe(a)
+		b := p.patrolBalanceProbeCtx(ctx, a)
 		balance = &b
 	}
 	// 已判封号就没必要再打一次对话（省一次上游调用与积分）。
@@ -660,6 +731,24 @@ func (p *Panel) patrolProbe(ctx context.Context, a *auth.Auth, checkBan, checkCr
 		out.Detail = "疑似封号（11140），封号检测已在设置里关闭，未移动"
 	}
 	return out
+}
+
+// patrolBalanceProbeCtx 余额探测的取消包装：UserResourceDetailedWithExpiry 没有
+// ctx 入口（内部固定重试 + 120s HTTP 超时），面板「停止」不能干等它。取消时直接
+// 放弃等待并标记未探测——goroutine 会在 HTTP 超时后自行结束，结果丢弃（不写池、
+// 不影响本轮结论），代价是一次被放弃的在途查询。
+func (p *Panel) patrolBalanceProbeCtx(ctx context.Context, a *auth.Auth) patrolResult {
+	done := make(chan patrolResult, 1)
+	go func() { done <- p.patrolBalanceProbe(a) }()
+	select {
+	case res := <-done:
+		return res
+	case <-ctx.Done():
+		return patrolResult{
+			UID: a.UID, Nickname: a.Nickname, Realm: a.Realm(), At: time.Now(),
+			Verdict: patrolVerdictFailed, Detail: "已取消（巡检被手动停止）", Error: ctx.Err().Error(),
+		}
+	}
 }
 
 // patrolBalanceProbe 余额探测：拿到剩余积分即可判「无积分」；错误信封里的业务码
@@ -845,6 +934,8 @@ type patrolView struct {
 	Running  bool           `json:"running"`
 	Done     int            `json:"done"`
 	Total    int            `json:"total"`
+	// SkippedBanned 本轮因"在封号池分组"被跳过的账号数（封号号不再重复探测）。
+	SkippedBanned int `json:"skipped_banned"`
 	// LastRun 指针：time.Time 零值会被 omitempty 忽略不了，面板会以为"巡检过"。
 	LastRun   *time.Time        `json:"last_run,omitempty"`
 	Results   []patrolResult    `json:"results"`
@@ -861,11 +952,12 @@ func (p *Panel) patrolState(w http.ResponseWriter, r *http.Request) {
 	rp := p.patrol
 	rp.mu.Lock()
 	view := patrolView{
-		Settings:  rp.settings,
-		Running:   rp.running,
-		Done:      rp.done,
-		Total:     rp.total,
-		Available: true,
+		Settings:      rp.settings,
+		Running:       rp.running,
+		Done:          rp.done,
+		Total:         rp.total,
+		SkippedBanned: rp.skippedBanned,
+		Available:     true,
 	}
 	if !rp.lastRun.IsZero() {
 		lastRun := rp.lastRun
@@ -966,6 +1058,42 @@ func (p *Panel) patrolStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "started": true})
+}
+
+// patrolStop POST /panel/api/patrol/stop：停止巡检。
+// body 可选 {cancel_run:true, disable_auto:true}（缺省都停）：
+//   - cancel_run 取消进行中的这一轮（探测立即让位，不再发新请求）；
+//   - disable_auto 关闭自动巡检开关（定时循环挂起，设置落盘）。
+func (p *Panel) patrolStop(w http.ResponseWriter, r *http.Request) {
+	if err := p.patrolReady(); err != nil {
+		writeErr(w, http.StatusNotImplemented, err.Error())
+		return
+	}
+	var req struct {
+		CancelRun   *bool `json:"cancel_run"`
+		DisableAuto *bool `json:"disable_auto"`
+	}
+	if r.ContentLength > 0 {
+		if err := decodeJSONBody(r, &req); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	cancelRun, disableAuto := true, true
+	if req.CancelRun != nil {
+		cancelRun = *req.CancelRun
+	}
+	if req.DisableAuto != nil {
+		disableAuto = *req.DisableAuto
+	}
+	cancelled, autoDisabled := p.patrol.stop(cancelRun, disableAuto)
+	log.Printf("panel: 巡检已停止（取消当前轮=%v，关闭自动巡检=%v）", cancelled, autoDisabled)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":            true,
+		"cancelled":     cancelled,
+		"auto_disabled": autoDisabled,
+		"settings":      p.patrol.snapshotSettings(),
+	})
 }
 
 // patrolReady 接口可用性前置检查：面板未装配池 / 上游 / 分组时返回 501。

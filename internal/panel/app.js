@@ -465,6 +465,7 @@ function renderPatrolReport(d, fill) {
     note.textContent = (d.running
       ? '巡检中 ' + (d.done || 0) + '/' + (d.total || 0)
       : (d.last_run ? '上次巡检 ' + ago(d.last_run) : '尚未巡检') + ' · ' + (rows.length ? rows.length + ' 条记录' : '无记录')) +
+      (d.skipped_banned ? ' · 跳过封号池 ' + d.skipped_banned + ' 个' : '') +
       (st.enabled ? ' · 自动每 ' + patrolIntervalText(st) : ' · 自动巡检已关闭') +
       (st.check_ban ? '' : ' · 封号检测已关') + (st.check_credit ? '' : ' · 积分检测已关');
   }
@@ -485,6 +486,14 @@ async function loadPatrol(fill) {
     renderPatrolReport(d, fill);
     const btn = $('btnPatrolRun');
     if (btn) { btn.disabled = !!d.running; btn.textContent = d.running ? '巡检中…' : '立即巡检'; }
+    const stop = $('btnPatrolStop');
+    if (stop) {
+      const running = !!d.running, auto = !!(d.settings && d.settings.enabled);
+      stop.disabled = !running && !auto;
+      stop.textContent = running ? '停止巡检' : (auto ? '停止自动巡检' : '停止');
+      stop.title = running ? '取消当前这一轮，并关闭自动巡检'
+        : (auto ? '关闭自动巡检（定时循环挂起，可再次保存设置重新开启）' : '当前没有进行中或自动的巡检');
+    }
     if (patrolWasRunning && !d.running) {
       patrolWasRunning = false;
       loadOverview(true);
@@ -519,6 +528,25 @@ async function runPatrol() {
     toast('巡检启动失败：' + e.message, 'err');
   }
 }
+async function stopPatrol() {
+  const running = patrolWasRunning || ($('btnPatrolRun') && $('btnPatrolRun').disabled);
+  if (!confirm(running
+    ? '将立即停止当前巡检，并关闭自动巡检（定时循环挂起）。确认停止？'
+    : '将关闭自动巡检（定时循环挂起）。确认停止？')) return;
+  const b = $('btnPatrolStop');
+  if (b) b.disabled = true;
+  try {
+    const r = await api('patrol/stop', { method: 'POST', body: JSON.stringify({ cancel_run: true, disable_auto: true }) });
+    patrolWasRunning = false;
+    toast('已停止巡检' + (r.auto_disabled ? '（自动巡检已关闭）' : ''), 'ok');
+    loadPatrol(true);
+    loadOverview(true);
+  } catch (e) {
+    toast('停止失败：' + e.message, 'err');
+    if (b) b.disabled = false;
+  }
+}
+
 async function savePatrolSettings() {
   const body = {
     enabled: !!($('patrolEnabled') || {}).checked,
@@ -892,6 +920,7 @@ if ($('btnPatrol')) $('btnPatrol').onclick = openPatrol;
 if ($('btnPatrolClose')) $('btnPatrolClose').onclick = closePatrol;
 if ($('btnPatrolRun')) $('btnPatrolRun').onclick = runPatrol;
 if ($('btnPatrolSave')) $('btnPatrolSave').onclick = savePatrolSettings;
+if ($('btnPatrolStop')) $('btnPatrolStop').onclick = stopPatrol;
 
 // 分组卡片：行内按钮复用 onAccClick；标题栏点击折叠（记住状态）；本组签到 / 余额逐个执行。
 async function runGroupBulk(btn) {

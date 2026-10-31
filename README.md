@@ -722,8 +722,10 @@ http://127.0.0.1:7863/panel/
 
 - **封号看两个来源，任一命中即归组**：① 主链路请求（`/v1/chat/completions`、`/v1/responses`）命中 11140 时，账号按既有策略禁用，并**实时**移入「封号池」，不必等下一轮巡检；② 巡检的对话探针（发一句 `hi`）命中 11140 同样归组。注意 11140 也承载模型级限流文案（`The model provider is rate-limiting...`），那种情况按限流处理，**不会**进封号池。
 - **积分检测零对话消耗**：后台调余额查询接口（与「余额」按钮同一个 `get-user-resource`），剩余 0 即判无积分；不发起对话、不消耗积分。
-- **开关与周期**：面板可设置自动巡检总开关、周期（数值 + **分钟 / 小时** 两档）、封号检测 / 积分检测各自开关、并发（1–8）与「试运行（只报告不改分组；只作用于巡检轮次，主链路实时封号归组照常生效）」。设置落盘 `data/patrol.json`（与 `state_file` 同目录），重启保留；保存后定时循环立即按新周期重排，无需重启进程。
+- **开关与周期**：面板可设置自动巡检总开关、周期（数值 + **分钟 / 小时** 两档；分钟档下限 **1 分钟**、小时档下限 1 小时，上限 7 天）、封号检测 / 积分检测各自开关、并发（**填 0 = 不限**，即全池并发；正数不设上限）与「试运行（只报告不改分组；只作用于巡检轮次，主链路实时封号归组照常生效）」。设置落盘 `data/patrol.json`（与 `state_file` 同目录），重启保留；保存后定时循环立即按新周期重排，无需重启进程。
 - **不污染池状态**：巡检只决定分组归属——不记成功/失败计数、不改冷却/禁用/暂停/积分快照（与「测活」同口径）。探测失败（网络 / 5xx / 模型目录为空）一律不移动：误把健康号扔进封号池比漏检更贵。
+- **停止**：弹窗工具栏的「停止」按当前状态显示为「停止巡检」（有轮次在跑）或「停止自动巡检」（仅定时开启）——一次点击**取消进行中的这一轮**（探测立即让位，对话请求由 ctx 中断、余额查询放弃等待）**并关闭自动巡检开关**（定时循环挂起，设置落盘；想恢复再保存设置打开即可）。接口 `POST /panel/api/patrol/stop`（body 可选 `cancel_run` / `disable_auto`，缺省都停）。
+- **跳过封号池**：已经在「封号池」分组里的账号不再参与巡检——封号是终态，再探一次只会白烧一次对话（还可能在上游再记一笔风控）。账号解封后人工移回公共池，下一轮巡检自然恢复覆盖它；实时封号归组不受此影响。
 - **封号号不计入积分统计**：总览「积分剩余 / 总额」与分组卡片头的积分合计都**排除封号账号**（判据同巡检：在「封号池」分组，或禁用原因含 11140）。封号号的余额既不可用，也不该算进池子的可支配积分；账号行仍展示它的真实余额（tooltip 注明不计入统计），状态标签显示「封号」。把账号从封号池移回公共池后，它立刻重新计入统计。
 - **批量删除账号**：账号池每行左侧勾选框支持**单选 / 多选**，工具条「全选」+「删除所选 (N)」批量删除（池状态 + `auths/` 凭证文件），对应 `POST accounts/remove_batch`（单次上限 500，逐条返回 `removed` / `failed` / `file_errors`）。
 
@@ -744,7 +746,7 @@ http://127.0.0.1:7863/panel/
 | 任务 | `GET accounts/{uid}/tasks`；`POST accounts/{uid}/tasks/accept` · `accept_all` · `claim` · `auto` · `auto_all`；`POST tasks/scan_all` · `tasks/run_queue` |
 | 添加账号 | `POST login/start` · `GET login/poll` · `GET login/regions` · `POST import/cockpit`（兼容 cockpit / 面板导出 / auths 原文件三种 JSON 形态） |
 | 号池分组 | `GET groups` · `POST groups` · `PATCH groups/{id}` · `DELETE groups/{id}?account_action=move\|delete` · `POST groups/{id}/key/rotate` · `GET/PUT groups/{id}/prompt` · `PUT groups/{id}/proxy` · `POST groups/{id}/proxy/test` · `POST accounts/{uid}/group` |
-| 账号巡检 | `GET patrol`（设置 + 运行态 + 最近结果）· `POST patrol`（保存设置）· `POST patrol/run`（立即巡检，body 可带 `dry_run` / `uids`）· `POST accounts/remove_batch`（多选删除账号与凭证文件） |
+| 账号巡检 | `GET patrol`（设置 + 运行态 + 最近结果）· `POST patrol`（保存设置）· `POST patrol/run`（立即巡检，body 可带 `dry_run` / `uids`）· `POST patrol/stop`（取消当前轮 + 关闭自动巡检）· `POST accounts/remove_batch`（多选删除账号与凭证文件） |
 | 写入 | `POST config`（校验 → 落盘 → 热应用，返回需重启字段清单）· `POST usage/save`（立即把内存用量落盘）· `POST logs/clear`（清空运行日志环形缓冲）· `POST request_logs/clear`（删除请求记录 JSONL 归档并清空最近记录） |
 
 账号运维操作均落到池既有入口（`Revive`/`Disable`/`Remove` 等），与 `/status` 观测口径一致；唯一例外是「测活」——它只做上游诊断、不改写池状态（见下）。

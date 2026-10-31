@@ -67,8 +67,14 @@ func (f *patrolUpstream) transport(req *http.Request) (*http.Response, error) {
 // newPatrolPanel 组装「假上游 + 账号池 + 空分组注册表」面板。
 func newPatrolPanel(t *testing.T, fake *patrolUpstream, accounts ...*auth.Auth) (*Panel, *pool.Pool, *groups.Store) {
 	t.Helper()
+	return newPatrolPanelRT(t, rtFunc(fake.transport), accounts...)
+}
+
+// newPatrolPanelRT 用自定义 RoundTripper 组装面板（取消测试用阻塞上游）。
+func newPatrolPanelRT(t *testing.T, rt http.RoundTripper, accounts ...*auth.Auth) (*Panel, *pool.Pool, *groups.Store) {
+	t.Helper()
 	cl := upstream.New()
-	hc := &http.Client{Transport: rtFunc(fake.transport)}
+	hc := &http.Client{Transport: rt}
 	cl.HTTP = hc
 	cl.ChatHTTP = hc
 	pl := pool.New("")
@@ -464,8 +470,8 @@ func TestPatrolSettingsIntervalUnits(t *testing.T) {
 		{patrolSettings{IntervalValue: 6, IntervalUnit: patrolUnitHour}, 6 * time.Hour},
 		{patrolSettings{IntervalValue: 30, IntervalUnit: patrolUnitMinute}, 30 * time.Minute},
 		{patrolSettings{IntervalValue: 0, IntervalUnit: patrolUnitHour}, 6 * time.Hour},
+		{patrolSettings{IntervalValue: 1, IntervalUnit: patrolUnitMinute}, 1 * time.Minute},
 		{patrolSettings{IntervalValue: 0, IntervalUnit: patrolUnitMinute}, 60 * time.Minute},
-		{patrolSettings{IntervalValue: 1, IntervalUnit: patrolUnitMinute}, 5 * time.Minute},
 		{patrolSettings{IntervalValue: 99999, IntervalUnit: patrolUnitMinute}, time.Duration(patrolMaxIntervalMinutes) * time.Minute},
 		{patrolSettings{IntervalValue: 999, IntervalUnit: patrolUnitHour}, time.Duration(patrolMaxIntervalMinutes/60) * time.Hour},
 	}
@@ -520,5 +526,140 @@ func TestOverviewMarksBannedAccounts(t *testing.T) {
 	}
 	if got, _ := out["banned_total"].(float64); got != 2 {
 		t.Errorf("banned_total=%v want 2", out["banned_total"])
+	}
+}
+
+// TestPatrolSkipsBannedGroup 已在「封号池」里的账号不再巡检（封号是终态，再探一次
+// 只是白烧一次对话），并透出 skipped_banned 供面板提示。
+func TestPatrolSkipsBannedGroup(t *testing.T) {
+	fake := newPatrolUpstream()
+	fake.banned["tok-ban"] = `{"code":11140,"msg":"request illegal"}`
+	p, pl, gs := newPatrolPanel(t, fake, acc("u-ban", "tok-ban"), acc("u-ok", "tok-ok"))
+
+	g, _, err := gs.Create(patrolGroupBannedName, "", false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := gs.AddMember(g.ID, "u-ban"); err != nil {
+		t.Fatal(err)
+	}
+	pl.SetGroup("u-ban", g.ID)
+
+	if err := p.patrol.start(nil, boolPtr(false)); err != nil {
+		t.Fatal(err)
+	}
+	waitPatrol(t, p)
+
+	fake.mu.Lock()
+	banHits := fake.chat["tok-ban"]
+	fake.mu.Unlock()
+	if banHits != 0 {
+		t.Errorf("封号池里的账号不该被巡检（chat 命中 %d 次）", banHits)
+	}
+
+	p.patrol.mu.Lock()
+	results := append([]patrolResult(nil), p.patrol.results...)
+	skipped := p.patrol.skippedBanned
+	p.patrol.mu.Unlock()
+	if len(results) != 1 || results[0].UID != "u-ok" {
+		t.Fatalf("results=%+v want 只巡检 u-ok", results)
+	}
+	if skipped != 1 {
+		t.Errorf("skippedBanned=%d want 1", skipped)
+	}
+
+	_, out, raw := call(t, p, "GET", "/panel/api/patrol", "")
+	if got, _ := out["skipped_banned"].(float64); got != 1 {
+		t.Errorf("skipped_banned=%v want 1（raw=%s）", out["skipped_banned"], raw)
+	}
+}
+
+// blockingUpstream 阻塞型上游：billing / chat 都卡住直到 block 关闭或请求被取消。
+// 用于验证面板「停止」能真正中断进行中的一轮。
+type blockingUpstream struct {
+	block chan struct{}
+}
+
+func (f *blockingUpstream) transport(req *http.Request) (*http.Response, error) {
+	if strings.HasSuffix(req.URL.Path, "/console/enterprises/personal/models") {
+		return fakeJSON(http.StatusOK, enterprisePayload("m1")), nil
+	}
+	select {
+	case <-req.Context().Done():
+		return nil, req.Context().Err()
+	case <-f.block:
+		return fakeJSON(http.StatusOK, aliveSSEBody), nil
+	}
+}
+
+// TestPatrolStopCancelsRunning：停止能中断进行中的一轮，并关闭自动巡检开关。
+func TestPatrolStopCancelsRunning(t *testing.T) {
+	bu := &blockingUpstream{block: make(chan struct{})}
+	p, _, _ := newPatrolPanelRT(t, rtFunc(bu.transport), acc("u1", "t1"), acc("u2", "t2"))
+
+	if err := p.patrol.start(nil, boolPtr(false)); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(150 * time.Millisecond) // 让 worker 进入上游等待
+
+	cancelled, autoDisabled := p.patrol.stop(true, true)
+	close(bu.block) // 放开泄漏的在途请求，避免测试结束时残留 goroutine
+	if !cancelled {
+		t.Error("应取消到进行中的一轮")
+	}
+	if !autoDisabled {
+		t.Error("应关闭自动巡检")
+	}
+	waitPatrol(t, p)
+	if got := p.patrol.snapshotSettings().Enabled; got {
+		t.Error("停止后自动巡检开关应为 false")
+	}
+}
+
+// TestPatrolStopWithoutRun：没在跑时只关自动巡检，不报错。
+func TestPatrolStopWithoutRun(t *testing.T) {
+	fake := newPatrolUpstream()
+	p, _, _ := newPatrolPanel(t, fake, acc("u1", "t1"))
+	cancelled, autoDisabled := p.patrol.stop(true, true)
+	if cancelled {
+		t.Error("没有进行中的轮次时不该报 cancelled")
+	}
+	if !autoDisabled {
+		t.Error("应关闭自动巡检")
+	}
+	code, out, raw := call(t, p, "POST", "/panel/api/patrol/stop", "")
+	if code != http.StatusOK {
+		t.Fatalf("code=%d raw=%s", code, raw)
+	}
+	if out["ok"] != true {
+		t.Errorf("out=%v", out)
+	}
+	// 停止接口幂等：再调一次仍 200。
+	if code, _, raw := call(t, p, "POST", "/panel/api/patrol/stop", ""); code != http.StatusOK {
+		t.Fatalf("second stop code=%d raw=%s", code, raw)
+	}
+}
+
+// TestPatrolConcurrencyZeroUnlimited：并发 0 = 不限，全池账号都要有结论。
+func TestPatrolConcurrencyZeroUnlimited(t *testing.T) {
+	fake := newPatrolUpstream()
+	fake.zero["t2"] = true
+	p, _, _ := newPatrolPanel(t, fake, acc("u1", "t1"), acc("u2", "t2"), acc("u3", "t3"))
+	p.patrol.updateSettings(patrolSettings{
+		Enabled: true, IntervalValue: 1, IntervalUnit: patrolUnitHour,
+		CheckBan: false, CheckCredit: true, Concurrency: 0,
+	})
+	if err := p.patrol.start(nil, boolPtr(false)); err != nil {
+		t.Fatal(err)
+	}
+	waitPatrol(t, p)
+	p.patrol.mu.Lock()
+	n := len(p.patrol.results)
+	p.patrol.mu.Unlock()
+	if n != 3 {
+		t.Fatalf("results=%d want 3（并发不限时每个账号都要探到）", n)
+	}
+	if got := p.patrol.snapshotSettings().Concurrency; got != 0 {
+		t.Errorf("concurrency=%d want 0（不限）", got)
 	}
 }
