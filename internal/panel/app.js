@@ -11,6 +11,11 @@ let mdFilter = { q: '', realm: '', cap: '', effort: '', promo: '', sort: 'defaul
 let mdAll = [], mdProbes = {}, mdProbeOf = () => undefined;
 let reqFilter = { q: '', outcome: '', protocol: '' };
 let reqEntries = [];
+/* 账号池多选（单选/多选删除）：勾选集合在重渲染后保持；巡检弹窗的运行态轮询也放这里，
+   与其余视图级状态同处声明，避免顶层 go() 早于声明执行时踩 TDZ。 */
+let accSel = new Set();
+let patrolPoller = null;
+let patrolWasRunning = false;
 let usDim = 'account', usCreditDim = 'account', usSort = 'total';
 let usageData = null;
 let reqRangeState = null; // 请求记录的时间范围（用量页的见 trangeState）
@@ -374,8 +379,171 @@ setTimeout(() => {
   }
 }, 0);
 
+/* ── 账号池多选：单选 / 多选 → 批量删除（池状态 + auths/ 凭证文件） ─── */
+function accSelPrune(list) {
+  const live = new Set((list || []).map(s => s.uid));
+  for (const uid of Array.from(accSel)) if (!live.has(uid)) accSel.delete(uid);
+}
+function accSelSync() {
+  const n = accSel.size;
+  const b = $('btnBulkRemove');
+  if (b) { b.disabled = n === 0; b.textContent = n ? '删除所选 (' + n + ')' : '删除所选'; }
+  const all = $('accSelAll');
+  if (all) {
+    const total = ((overviewData && overviewData.accounts) || []).length;
+    all.checked = total > 0 && n === total;
+    all.indeterminate = n > 0 && n < total;
+  }
+}
+function accSelAll(on) {
+  const list = (overviewData && overviewData.accounts) || [];
+  if (on) list.forEach(s => accSel.add(s.uid)); else accSel.clear();
+  renderAccounts(list, (overviewData && overviewData.groups) || []);
+  accSelSync();
+}
+async function accBulkRemove() {
+  const uids = Array.from(accSel);
+  if (!uids.length) return;
+  if (!confirm('将删除 ' + uids.length + ' 个账号：池状态与 auths/ 下的凭证文件一并删除，且不可恢复。\n\n确认删除？')) return;
+  const b = $('btnBulkRemove');
+  if (b) { b.disabled = true; b.textContent = '删除中…'; }
+  try {
+    const r = await api('accounts/remove_batch', { method: 'POST', body: JSON.stringify({ uids }) });
+    const ok = (r.removed || []).length, bad = (r.failed || []).length, fe = (r.file_errors || []).length;
+    accSel.clear();
+    toast('已删除 ' + ok + ' 个账号' + (bad ? '，失败 ' + bad : '') + (fe ? '，凭证文件删除失败 ' + fe : ''), bad || fe ? 'err' : 'ok');
+    await loadOverview(true);
+  } catch (e) {
+    toast('删除失败：' + e.message, 'err');
+  } finally {
+    if (b) { b.disabled = accSel.size === 0; b.textContent = accSel.size ? '删除所选 (' + accSel.size + ')' : '删除所选'; }
+  }
+}
+
+/* ── 巡检（封号 11140 / 积分 0 自动归组） ─────────────────────────── */
+function patrolVerdictLabel(v) {
+  return { ok: '正常', banned: '封号', no_credit: '无积分', rate_limited: '模型级限流' }[v] || '探测失败';
+}
+function patrolVerdictCls(v) {
+  return v === 'banned' ? 'bad' : (v === 'no_credit' ? 'warn' : (v === 'ok' ? 'ok' : ''));
+}
+function patrolGroupName(id) {
+  if (!id) return '公共池';
+  const g = ((overviewData && overviewData.groups) || []).find(x => x.id === id);
+  return g ? g.name : '其他分组';
+}
+function patrolIntervalText(st) {
+  const v = Number(st && st.interval_value) || 0;
+  return st && st.interval_unit === 'minute' ? v + ' 分钟' : v + ' 小时';
+}
+function renderPatrolReport(d, fill) {
+  const tb = $('patrolBody');
+  if (!tb) return;
+  const rows = d.results || [];
+  if (!rows.length) {
+    tb.innerHTML = '<tr><td colspan="6"><div class="empty">还没有巡检记录，点「立即巡检」开始</div></td></tr>';
+  } else {
+    tb.innerHTML = rows.map(r => {
+      const unlimited = r.credits_total === -1;
+      const cred = r.credits == null ? '—' : (unlimited ? '不限'
+        : (r.credits_total > 0 ? r.credits + '/' + r.credits_total : String(r.credits)));
+      const code = r.code ? String(r.code) : (r.http_status ? 'HTTP ' + r.http_status : '—');
+      const short = String(r.uid || '');
+      const moved = r.moved ? ' <span class="tag ok">已移动</span>' : '';
+      return '<tr><td><div>' + esc(r.nickname || '未命名') + '</div><div class="pid">' +
+          esc(short.length > 16 ? short.slice(0, 16) + '…' : short) + '</div></td>' +
+        '<td><span class="tag ' + patrolVerdictCls(r.verdict) + '">' + esc(patrolVerdictLabel(r.verdict)) + '</span></td>' +
+        '<td class="num">' + esc(code) + '</td>' +
+        '<td class="num">' + esc(cred) + '</td>' +
+        '<td>' + esc(patrolGroupName(r.group)) + moved + '</td>' +
+        '<td style="color:var(--ink-3)">' + esc(r.detail || r.error || '') + '</td></tr>';
+    }).join('');
+  }
+  const note = $('patrolNote');
+  if (note) {
+    const st = d.settings || {};
+    note.textContent = (d.running
+      ? '巡检中 ' + (d.done || 0) + '/' + (d.total || 0)
+      : (d.last_run ? '上次巡检 ' + ago(d.last_run) : '尚未巡检') + ' · ' + (rows.length ? rows.length + ' 条记录' : '无记录')) +
+      (st.enabled ? ' · 自动每 ' + patrolIntervalText(st) : ' · 自动巡检已关闭') +
+      (st.check_ban ? '' : ' · 封号检测已关') + (st.check_credit ? '' : ' · 积分检测已关');
+  }
+  if (fill && d.settings) {
+    const st = d.settings;
+    if ($('patrolEnabled')) $('patrolEnabled').checked = !!st.enabled;
+    if ($('patrolInterval')) $('patrolInterval').value = st.interval_value;
+    if ($('patrolUnit')) $('patrolUnit').value = st.interval_unit === 'minute' ? 'minute' : 'hour';
+    if ($('patrolConc')) $('patrolConc').value = st.concurrency;
+    if ($('patrolBan')) $('patrolBan').checked = !!st.check_ban;
+    if ($('patrolCredit')) $('patrolCredit').checked = !!st.check_credit;
+    if ($('patrolDry')) $('patrolDry').checked = !!st.dry_run;
+  }
+}
+async function loadPatrol(fill) {
+  try {
+    const d = await api('patrol');
+    renderPatrolReport(d, fill);
+    const btn = $('btnPatrolRun');
+    if (btn) { btn.disabled = !!d.running; btn.textContent = d.running ? '巡检中…' : '立即巡检'; }
+    if (patrolWasRunning && !d.running) {
+      patrolWasRunning = false;
+      loadOverview(true);
+      toast('巡检完成，已按结论归组', 'ok');
+    }
+    patrolWasRunning = !!d.running;
+  } catch (e) {
+    const note = $('patrolNote');
+    if (note) note.textContent = e.message;
+  }
+}
+function openPatrol() {
+  $('patrolVeil').classList.add('on');
+  loadPatrol(true);
+  if (!patrolPoller) patrolPoller = setInterval(() => loadPatrol(false), 2000);
+}
+function closePatrol() {
+  $('patrolVeil').classList.remove('on');
+  if (patrolPoller) { clearInterval(patrolPoller); patrolPoller = null; }
+}
+async function runPatrol() {
+  const dry = !!($('patrolDry') || {}).checked;
+  const btn = $('btnPatrolRun');
+  if (btn) { btn.disabled = true; btn.textContent = '巡检中…'; }
+  try {
+    await api('patrol/run', { method: 'POST', body: JSON.stringify({ dry_run: dry }) });
+    patrolWasRunning = true;
+    toast('巡检已开始，结果见下表', 'ok');
+    loadPatrol(false);
+  } catch (e) {
+    if (btn) { btn.disabled = false; btn.textContent = '立即巡检'; }
+    toast('巡检启动失败：' + e.message, 'err');
+  }
+}
+async function savePatrolSettings() {
+  const body = {
+    enabled: !!($('patrolEnabled') || {}).checked,
+    interval_value: Number(($('patrolInterval') || {}).value) || 0,
+    interval_unit: ($('patrolUnit') || {}).value || 'hour',
+    concurrency: Number(($('patrolConc') || {}).value) || 0,
+    check_ban: !!($('patrolBan') || {}).checked,
+    check_credit: !!($('patrolCredit') || {}).checked,
+    dry_run: !!($('patrolDry') || {}).checked,
+  };
+  try {
+    const r = await api('patrol', { method: 'POST', body: JSON.stringify(body) });
+    const st = r.settings || {};
+    toast('巡检设置已保存' + (st.enabled ? '：自动每 ' + patrolIntervalText(st) : '：自动巡检已关闭') +
+      '（' + (st.check_ban ? '封号' : '') + (st.check_ban && st.check_credit ? '+' : '') + (st.check_credit ? '积分' : '') + '检测）', 'ok');
+    loadPatrol(false);
+  } catch (e) {
+    toast('保存失败：' + e.message, 'err');
+  }
+}
+
 /* ── 账号池 ───────────────────────────────────────────────────────── */
 function renderAccounts(list, groups) {
+  accSelPrune(list);
+  accSelSync();
   const tb = $('accBody');
   // 有分组 → 每组一张卡片（方案 B），原单表隐藏；没有分组 → 与原来完全一致的单表。
   const gbox = $('accGroups'), wrap = $('accTblWrap');
@@ -410,8 +578,10 @@ function accCoolSec(s, now) {
 }
 // accGroupCounts 分组标题上的状态计数与积分合计，口径与行内状态标签一致。
 function accGroupCounts(items, now) {
-  const c = { ok: 0, cool: 0, paused: 0, off: 0, credits: 0, total: 0 };
+  const c = { ok: 0, cool: 0, paused: 0, off: 0, credits: 0, total: 0, banned: 0 };
   items.forEach(s => {
+    // 封号号算「禁用」但**不计积分**：它既不可用，也不该抬高分组头的积分合计。
+    if (s.banned) { c.banned++; c.off++; return; }
     if (s.disabled) c.off++;
     else if (s.paused) c.paused++;
     else if (accCoolSec(s, now) > 0) c.cool++;
@@ -441,7 +611,7 @@ function renderAccountGroups(list, groups) {
       '<span class="car">▾</span><span class="gdot" style="background:' + esc(b.color || 'var(--ink-3)') + '"></span>' +
       '<span class="gn">' + esc(b.name) + '</span><span class="gbadge">' + badge + '</span>' +
       '<span class="gc">' + b.items.length + ' 个账号</span>' +
-      '<span class="gs">' + tag(c.ok, 'ok', '可用') + tag(c.cool, 'warn', '冷却') + tag(c.paused, 'warn', '暂停') + tag(c.off, 'bad', '禁用') + '</span>' +
+      '<span class="gs">' + tag(c.ok, 'ok', '可用') + tag(c.cool, 'warn', '冷却') + tag(c.paused, 'warn', '暂停') + tag(c.off, 'bad', '禁用') + tag(c.banned, 'bad', '封号') + '</span>' +
       '<span class="gcred">' + cred + '</span><span class="grow"></span>' +
       (!b.pub && b.items.some(taskEligible) ? '<button class="xs" data-gtask="' + k + '" title="扫描本组账号的成长任务待办并排队执行，进度在任务中心查看">任务执行</button>' : '') +
       (b.items.length ? '<button class="xs" data-gbulk="checkin" data-g="' + k + '" title="逐个签到本组账号（跳过禁用 / 企业版）">本组签到</button>' +
@@ -457,7 +627,8 @@ function accRowHtml(s, maxCred, groups) {
     const dg = (new Date(s.degrade_until || 0) - Date.now()) / 1000;
     const cool = Math.max(s.cool_remaining_sec || 0, bl > 0 ? bl : 0, dg > 0 ? dg : 0);
     let cls = '', tag;
-    if (s.disabled) { cls = 'off'; tag = '<span class="tag bad">已禁用</span>'; }
+    if (s.banned) { cls = 'off'; tag = '<span class="tag bad" title="上游 11140 request illegal：已封号，积分不计入池统计">封号</span>'; }
+    else if (s.disabled) { cls = 'off'; tag = '<span class="tag bad">已禁用</span>'; }
     else if (s.paused) { cls = 'off'; tag = '<span class="tag warn">已暂停选号</span>'; }
     else if (cool > 0) {
       cls = 'cool';
@@ -480,7 +651,8 @@ function accRowHtml(s, maxCred, groups) {
     // 成本台账 tooltip（model_costs）：每模型实测单价（≤0 = 实测免费），运维据此
     // 看「为什么总选它」——免费号垄断 / 单价排序一眼可见。
     let credTip;
-    if (unlimited) credTip = '企业版不限量（上游 limitNum=-1）';
+    if (s.banned) credTip = '封号账号（11140）：余额不可用，不计入池积分统计';
+    else if (unlimited) credTip = '企业版不限量（上游 limitNum=-1）';
     else if (s.credits_total > 0) {
       credTip = (s.enterprise ? '企业版剩余额度 ' : '剩余 ')
         + s.credits + ' / ' + (s.enterprise ? '分配 ' : '总额 ') + s.credits_total + '（' + pct + '%）';
@@ -500,7 +672,7 @@ function accRowHtml(s, maxCred, groups) {
     const usageTitle = '最近一次：' + req + ' 次 / ' + totalTok + ' / 延迟 ' + latency + ' / ' + rate;
     return '<tr class="' + cls + '" title="uid: ' + esc(s.uid) + '">' +
       '<td class="mark" aria-hidden="true"><i></i></td>' +
-      '<td class="who"><div class="nm">' + (s.nickname ? esc(s.nickname) : '<span style="color:var(--ink-3)">未命名</span>') + (s.realm === 'global' ? ' <span class="realm-tag">国际版</span>' : '') + (s.enterprise ? ' <span class="realm-tag">企业版</span>' : '') + '</div><div class="id">' + esc(short) + '</div></td>' +
+      '<td class="who"><div class="nm"><label class="acc-pick" title="选中后可批量删除"><input type="checkbox" data-sel="' + esc(s.uid) + '"' + (accSel.has(s.uid) ? ' checked' : '') + '></label>' + (s.nickname ? esc(s.nickname) : '<span style="color:var(--ink-3)">未命名</span>') + (s.realm === 'global' ? ' <span class="realm-tag">国际版</span>' : '') + (s.enterprise ? ' <span class="realm-tag">企业版</span>' : '') + '</div><div class="id">' + esc(short) + '</div></td>' +
       '<td>' + tag + note + rateLimits + '</td>' +
       '<td class="cred" title="' + esc(credTip) + '"><div class="n">' + cred + '</div><div class="bar"><i style="width:' + pct + '%"></i></div></td>' +
       '<td class="num">' + (s.success_count || 0) + ' <span style="color:var(--ink-3)">/</span> <span style="color:var(--bad)">' + (s.err_total || 0) + '</span></td>' +
@@ -579,9 +751,17 @@ async function loadOverview(quiet) {
     $('sDisabled').textContent = d.disabled;
     // 暂停选号单列（issue #125）：它只关选号、照常签到保活，与禁用是两种状态。
     if ($('sPaused')) $('sPaused').textContent = d.paused == null ? '-' : d.paused;
-    const remSum = (d.accounts || []).reduce((a, s) => a + (s.credits || 0), 0);
-  const totSum = (d.accounts || []).reduce((a, s) => a + (s.credits_total || 0), 0);
-  $('sCredits').textContent = totSum > 0 ? remSum + ' / ' + totSum : remSum;
+    // 封号号（上游 11140）的余额既不可用也不该算进池总资产：统计只算未封号账号。
+    const allAcc = d.accounts || [];
+    const counted = allAcc.filter(s => !s.banned);
+    const bannedN = allAcc.length - counted.length;
+    const remSum = counted.reduce((a, s) => a + (s.credits || 0), 0);
+    const totSum = counted.reduce((a, s) => a + (s.credits_total || 0), 0);
+    $('sCredits').textContent = totSum > 0 ? remSum + ' / ' + totSum : remSum;
+    const credStat = $('sCredits') && $('sCredits').parentElement;
+    if (credStat) credStat.title = bannedN
+      ? '不含 ' + bannedN + ' 个封号账号（11140）的积分'
+      : '池内全部账号的积分合计';
     $('sSticky').textContent = d.sticky_sessions;
     $('navSub').textContent = 'v' + d.version;
     $('navVer').textContent = 'v' + d.version;
@@ -589,7 +769,10 @@ async function loadOverview(quiet) {
     $('navState').textContent = d.healthy > 0 ? '服务正常' : (d.total ? '无可用账号' : '待添加账号');
     const p = $('navPulse');
     p.className = 'pulse' + (d.healthy > 0 ? '' : (d.total ? ' warn' : ' bad'));
-    $('accNote').textContent = d.in_flight_full ? d.in_flight_full + ' 个账号在途占满' : '';
+    $('accNote').textContent = [
+      d.in_flight_full ? d.in_flight_full + ' 个账号在途占满' : '',
+      bannedN ? bannedN + ' 个封号账号不计入积分统计' : '',
+    ].filter(Boolean).join(' · ');
     const up = Math.floor(d.uptime_sec);
     $('subMeta').textContent = '运行 ' + (up >= 86400 ? Math.floor(up / 86400) + ' 天 ' : '') + Math.floor(up % 86400 / 3600) + ' 时 ' + Math.floor(up % 3600 / 60) + ' 分';
     renderAccounts(d.accounts || [], d.groups);
@@ -694,6 +877,21 @@ async function onAccClick(ev) {
   finally { b.disabled = false; loadOverview(true); }
 }
 $('accBody').addEventListener('click', onAccClick);
+
+/* 多选：行内勾选框（分组卡片与单表共用同一委托；change 比 click 稳——click 时
+   checked 状态在部分浏览器仍未落定）。工具条与巡检弹窗按钮各自绑定。 */
+document.addEventListener('change', ev => {
+  const cb = ev.target && ev.target.closest ? ev.target.closest('input[data-sel]') : null;
+  if (!cb) return;
+  if (cb.checked) accSel.add(cb.dataset.sel); else accSel.delete(cb.dataset.sel);
+  accSelSync();
+});
+if ($('accSelAll')) $('accSelAll').addEventListener('change', ev => accSelAll(ev.target.checked));
+if ($('btnBulkRemove')) $('btnBulkRemove').onclick = accBulkRemove;
+if ($('btnPatrol')) $('btnPatrol').onclick = openPatrol;
+if ($('btnPatrolClose')) $('btnPatrolClose').onclick = closePatrol;
+if ($('btnPatrolRun')) $('btnPatrolRun').onclick = runPatrol;
+if ($('btnPatrolSave')) $('btnPatrolSave').onclick = savePatrolSettings;
 
 // 分组卡片：行内按钮复用 onAccClick；标题栏点击折叠（记住状态）；本组签到 / 余额逐个执行。
 async function runGroupBulk(btn) {

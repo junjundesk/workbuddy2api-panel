@@ -82,6 +82,12 @@ type Error struct {
 	Kind   ErrKind
 	Status int
 	Msg    string
+	// Code 上游业务信封 code（11140 request illegal / 6004 模型限额 / 14018 积分耗尽等）。
+	// 0 = 响应里没有可解析的业务 code（HTML 拦截页 / 空体 / 纯文本）。
+	// Kind 说「怎么处置」（冷却 / 禁用 / 换号），Code 说「上游到底为什么」——
+	// 11140 同时承载封号（request illegal）与模型级限流两种语义，只有 code + Kind
+	// 一起看才能断言；面板巡检据此判定封号，不做文案猜测。
+	Code int
 	// RetryAfter 上游明示的等待时长（Retry-After 秒 / retry-after-ms /
 	// x-ratelimit-reset 头解析，见 ParseRetryAfter）。零值 = 上游未明示，
 	// 冷却时长回落调用方计算值。挂载点选在 Error 信封：Kind 决定「罚不罚」，
@@ -320,6 +326,51 @@ func hasBusinessCode(body, want string) bool {
 			}
 		}
 		return false
+	}
+	return walk(root)
+}
+
+// envelopeCode 解析上游响应里的业务信封 code：顶层 {"code":11140}、嵌套
+// {"error":{"data":{"code":11140}}}、数字字符串 "11140" 都认。
+// 0 = 没有可解析的业务 code（拦截页 / 空体 / 非 JSON）。
+//
+// 与 hasBusinessCode 的分工：后者做「是不是某个 code」的布尔断言（Classify 用），
+// 本函数把 code 原样取出填进 Error.Code，供巡检 / 运维按具体业务原因判定，
+// 不依赖 truncated 的 Msg 文本做正则（msg 被截断到 200 字节，长 body 会丢 code）。
+func envelopeCode(raw []byte) int {
+	var root any
+	if err := json.Unmarshal(raw, &root); err != nil {
+		return 0
+	}
+	var walk func(any) int
+	walk = func(value any) int {
+		switch node := value.(type) {
+		case map[string]any:
+			if code, ok := node["code"]; ok {
+				switch v := code.(type) {
+				case float64:
+					if v != 0 {
+						return int(v)
+					}
+				case string:
+					if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil && n != 0 {
+						return n
+					}
+				}
+			}
+			for _, child := range node {
+				if n := walk(child); n != 0 {
+					return n
+				}
+			}
+		case []any:
+			for _, child := range node {
+				if n := walk(child); n != 0 {
+					return n
+				}
+			}
+		}
+		return 0
 	}
 	return walk(root)
 }
@@ -1043,7 +1094,7 @@ func (c *Client) doJSON(a *auth.Auth, req *http.Request) (json.RawMessage, error
 	}
 	if resp.StatusCode >= 400 {
 		kind := Classify(resp.StatusCode, string(raw))
-		return nil, &Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200)}
+		return nil, &Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200), Code: envelopeCode(raw)}
 	}
 	var env apiEnvelope
 	if err := json.Unmarshal(raw, &env); err != nil {
@@ -1054,7 +1105,7 @@ func (c *Client) doJSON(a *auth.Auth, req *http.Request) (json.RawMessage, error
 		if kind == ErrNone {
 			kind = ErrClient
 		}
-		return nil, &Error{Kind: kind, Status: resp.StatusCode, Msg: fmt.Sprintf("code=%d msg=%s", env.Code, truncate(env.Msg, 160))}
+		return nil, &Error{Kind: kind, Status: resp.StatusCode, Msg: fmt.Sprintf("code=%d msg=%s", env.Code, truncate(env.Msg, 160)), Code: env.Code}
 	}
 	return env.Data, nil
 }
@@ -1255,7 +1306,7 @@ func (c *Client) ChatStreamParsed(ctx context.Context, a *auth.Auth, raw []byte,
 			if kind == ErrNone {
 				return nil, resp.StatusCode, raw, nil
 			}
-			ue := &Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200)}
+			ue := &Error{Kind: kind, Status: resp.StatusCode, Msg: truncate(string(raw), 200), Code: envelopeCode(raw)}
 			if d, ok := ParseRetryAfter(resp.Header); ok {
 				ue.RetryAfter = d
 			}

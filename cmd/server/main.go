@@ -314,7 +314,9 @@ func main() {
 		Live:        live,
 		// 模型上限探测数据（scripts/probe_max_tokens.py --panel-out 写入）：
 		// 与 state 文件同目录，缺省 data/output_probes.json。
-		ProbeFile:  stateSibling(cfg.StateFile, "output_probes.json"),
+		ProbeFile: stateSibling(cfg.StateFile, "output_probes.json"),
+		// 巡检设置与最近结果（与 state 文件同目录，缺省 data/patrol.json）。
+		PatrolFile: stateSibling(cfg.StateFile, "patrol.json"),
 		ConfigPath: *cfgPath,
 		LoadConfig: func() (any, error) {
 			return Load(*cfgPath)
@@ -350,6 +352,8 @@ func main() {
 		// 来源记录开关经 livecfg 热生效；此处同时填静态字段，供 Live 为 nil 的
 		// 裸用/测试路径拿到同一缺省值。
 		RecordClientInfo: cfg.Logging.RequestClientInfo,
+		// 主链路 11140 实时归组：账号被封时立刻进「封号池」，不必等下一轮巡检。
+		OnAccountBanned: pn.NotifyAccountBanned,
 		// handler 侧第三道闸（global realm）：false（显式逃生门）时不列 global: 模型名。
 		GlobalEnabled: cfg.Global.Enabled,
 		// Responses 流式首事件提前开局（缺省 true，server.responses_early_created 可关）。
@@ -360,6 +364,8 @@ func main() {
 	defer stop()
 	go sch.Run(ctx)
 	sch.StartBalanceRefresh(ctx, cfg.BalanceRefreshInterval)
+	// 账号巡检（封号 11140 / 积分 0 自动归组）：独立分钟级循环，设置可在面板在线改。
+	pn.StartPatrol(ctx)
 
 	// 启动即预热模型积分倍率表：倍率只在 FetchModels/FetchGlobalModelInfos 成功时
 	// 填充（两者均懒触发），重启后到首次 /v1/models 或面板模型页被访问之前，

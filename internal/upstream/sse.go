@@ -164,7 +164,7 @@ func Aggregate(r io.Reader) (map[string]any, error) {
 						if kind == ErrNone {
 							kind = ErrServer // 无法分类的错误帧属上游故障：喂熔断，不猜业务语义
 						}
-						return nil, &Error{Kind: kind, Status: http.StatusBadRequest, Msg: payload}
+						return nil, &Error{Kind: kind, Status: http.StatusBadRequest, Msg: payload, Code: envelopeCode([]byte(payload))}
 					}
 					// 有效事件计数：仅 JSON 解析成功的数据帧计入（解析失败沿用静默 continue）。
 					validEvents++

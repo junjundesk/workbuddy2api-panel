@@ -65,6 +65,10 @@ type Config struct {
 	// RequestLog 请求指标与归档（nil = 对应接口返回 501）。
 	RequestLog *reqlog.Recorder
 
+	// PatrolFile 巡检设置与最近结果文件（缺省 data/patrol.json；空 = 不落盘，
+	// 设置只在本次进程内有效）。巡检目标分组（封号池 / 无积分）由本包自动创建。
+	PatrolFile string
+
 	// ProbeFile 模型输出上限探测结果文件（scripts/probe_max_tokens.py --panel-out
 	// 写入；空或文件不存在 = model_probes 端点返回空集，面板不显示任何实测标注）。
 	// 只读展示：网关不解析、不依赖其内容做任何路由/出站决策。
@@ -100,6 +104,9 @@ type Panel struct {
 	// 条目数 = 账号数，天然有界。
 	snapMu    sync.Mutex
 	snapshots map[string]accountModelSnapshot
+
+	// patrol 账号巡检（patrol.go）：设置 + 最近结果 + 自动巡检循环。
+	patrol *patrolRunner
 }
 
 // tryLockAccount 尝试锁定账号的任务执行；已在执行返回 false。
@@ -150,6 +157,7 @@ func New(cfg Config) *Panel {
 		logs:    NewRing(500),
 		logins:  map[string]loginSession{},
 	}
+	p.patrol = newPatrolRunner(p, cfg.PatrolFile)
 	p.routes()
 	return p
 }
@@ -213,6 +221,10 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/groups/{id}/prompt", p.withAuth(p.groupGetPrompt))
 	p.mux.HandleFunc("PUT /panel/api/groups/{id}/prompt", p.withAuth(p.groupSetPrompt))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/group", p.withAuth(p.accountSetGroup))
+	p.mux.HandleFunc("POST /panel/api/accounts/remove_batch", p.withAuth(p.accountsRemoveBatch))
+	p.mux.HandleFunc("GET /panel/api/patrol", p.withAuth(p.patrolState))
+	p.mux.HandleFunc("POST /panel/api/patrol", p.withAuth(p.patrolConfigure))
+	p.mux.HandleFunc("POST /panel/api/patrol/run", p.withAuth(p.patrolStart))
 	p.mux.HandleFunc("POST /panel/api/accounts/export", p.withAuth(p.accountsExport))
 	p.mux.HandleFunc("GET /panel/api/config", p.withAuth(p.getConfig))
 	p.mux.HandleFunc("POST /panel/api/config", p.withAuth(p.saveConfig))
@@ -267,6 +279,8 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.StickyCount != nil {
 		sticky = p.cfg.StickyCount()
 	}
+	accounts := p.cfg.Pool.List()
+	p.markBannedAccounts(accounts)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"version":         p.cfg.Version,
 		"uptime_sec":      int(time.Since(p.started).Seconds()),
@@ -279,7 +293,8 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 		"disabled":        disabled,
 		"paused":          paused,
 		"in_flight_full":  inFlightFull,
-		"accounts":        p.cfg.Pool.List(),
+		"accounts":        accounts,
+		"banned_total":    countBanned(accounts),
 		// model_locks 模型级限流全清单（哪些模型不能用、锁了几个号、还要锁多久）：
 		// 与 accounts 的账号池视图互补，前端「模型锁池」表直接渲染。无锁时为 null。
 		"model_locks": p.cfg.Pool.ModelLockView(),

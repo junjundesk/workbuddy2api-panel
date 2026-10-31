@@ -606,6 +606,20 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   .acc.gfix td.acts { display: table-cell; text-align: right; white-space: nowrap; }
   .acc.gfix td.acts > button + button { margin-left: 5px; }
 
+  /* 账号池多选：行首勾选框 + 工具条「全选 / 删除所选」。 */
+  .acc-selall { display: inline-flex; align-items: center; gap: 4px; font-size: 12px;
+    color: var(--ink-3); cursor: pointer; white-space: nowrap; }
+  .acc-selall input, .acc-pick input { accent-color: var(--accent); margin: 0; cursor: pointer; }
+  .acc-pick { display: inline-flex; align-items: center; margin-right: 6px; vertical-align: -2px; }
+  /* 巡检弹窗：设置行 + 结果表。 */
+  .patrol-cfg { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; margin-bottom: 12px; }
+  .patrol-cfg label { display: inline-flex; align-items: center; gap: 5px; font-size: 12.5px;
+    color: var(--ink-2); white-space: nowrap; }
+  .patrol-cfg input[type=number] { width: 64px; }
+  .patrol-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .patrol-bar .note { color: var(--ink-3); font-size: 12px; }
+  #patrolBody td { font-size: 12.5px; vertical-align: middle; }
+  #patrolBody .pid { font-family: var(--mono); font-size: 11.5px; color: var(--ink-3); }
 </style>
 </head>
 <body>
@@ -687,6 +701,9 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <h3>账号池</h3>
           <span class="grow"></span>
           <span class="note" id="accNote"></span>
+          <button class="xs" id="btnPatrol" title="巡检全部账号：封号（上游 code 11140）与积分 0 的账号自动移入「封号池」「无积分」分组">巡检</button>
+          <label class="acc-selall" title="全选当前账号池（含各分组）"><input type="checkbox" id="accSelAll">全选</label>
+          <button class="xs ghost danger" id="btnBulkRemove" disabled title="删除所选的账号：池状态与 auths/ 下的凭证文件一并删除，不可恢复">删除所选</button>
           <button class="xs" id="btnCheckinAll">全部签到</button>
           <button class="xs" id="btnTravelAll">旅行巡检</button>
           <button class="xs" id="btnActivityAll">活跃上报</button>
@@ -1312,6 +1329,45 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       <div class="hint">移动后立即按目标号池的密钥、代理与共享策略生效，账号凭证与状态保持不变。</div>
     </div>
     <footer><span class="grow"></span><button id="btnMoveCancel">取消</button><button class="primary" id="btnMoveDo">移动</button></footer>
+  </div>
+</div>
+
+<!-- 账号巡检：封号（11140）/ 积分 0 自动归组，含设置与最近一轮结果 -->
+<div class="veil" id="patrolVeil">
+  <div class="dlg" style="width:820px">
+    <header>
+      <h3>账号巡检</h3>
+      <div class="hint">封号检测：用户请求或账号状态命中 <b>code 11140</b> 即移入「封号池」（请求命中实时生效，巡检时再按周期核对账号状态）。积分检测：后台按周期调余额接口，剩余 <b>0</b> 移入「无积分」。分组不存在时自动创建（隔离分组，不进入公共池）。</div>
+    </header>
+    <div class="body">
+      <div class="patrol-cfg">
+        <label><input type="checkbox" id="patrolEnabled"> 自动巡检</label>
+        <label>周期 <input type="number" id="patrolInterval" min="1" step="1">
+          <select id="patrolUnit" class="xs">
+            <option value="hour">小时</option>
+            <option value="minute">分钟</option>
+          </select>
+        </label>
+        <label>并发 <input type="number" id="patrolConc" min="1" max="8"></label>
+        <label><input type="checkbox" id="patrolDry"> 试运行（只报告不改分组）</label>
+      </div>
+      <div class="patrol-cfg patrol-checks">
+        <label title="用户请求命中 11140 时实时移入；巡检时再发一次对话确认账号状态"><input type="checkbox" id="patrolBan"> 封号检测（code 11140）</label>
+        <label title="巡检时在后台调余额查询接口，剩余 0 即移入无积分池（不消耗对话积分）"><input type="checkbox" id="patrolCredit"> 积分检测（余额 0）</label>
+      </div>
+      <div class="patrol-bar">
+        <button class="xs primary" id="btnPatrolRun">立即巡检</button>
+        <button class="xs" id="btnPatrolSave">保存设置</button>
+        <span class="note" id="patrolNote"></span>
+      </div>
+      <div class="tbl-wrap" style="max-height:400px">
+        <table class="acc">
+          <thead><tr><th>账号</th><th>结论</th><th>业务码</th><th>积分</th><th>所在分组</th><th>说明</th></tr></thead>
+          <tbody id="patrolBody"></tbody>
+        </table>
+      </div>
+    </div>
+    <footer><span class="grow"></span><button id="btnPatrolClose">关闭</button></footer>
   </div>
 </div>
 

@@ -92,6 +92,10 @@ type Status struct {
 	Enterprise     bool   `json:"enterprise,omitempty"`
 	Disabled       bool   `json:"disabled"`
 	DisabledReason string `json:"disabled_reason,omitempty"` // 仅 disabled 账号：禁用原因（运维可见）
+	// Banned 面板判定的封号账号（上游业务码 11140）。池内**不维护**该状态：由 panel
+	// 在出响应前按「账号在封号池分组」或「禁用原因含 11140」标注。用途是把封号号的
+	// 余额排除在池积分统计之外——封号号的余额既用不了，也不该算进池子的可支配积分。
+	Banned bool `json:"banned,omitempty"`
 	// Paused 暂停选号：退出选号候选（与 disabled 一样不参与选号），但**照常参与**
 	// 签到 / 活跃上报 / 保活 / 余额刷新四类保号任务。与 disabled 正交——disabled 是
 	// 「授权/session 终态，需人工 revive」，paused 是「运维临时让位」（多号轮换场景），

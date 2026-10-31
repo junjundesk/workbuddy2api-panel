@@ -50,6 +50,11 @@ type Config struct {
 	SoftCooldown time.Duration // 429/限流文案软冷却基数，默认 600s（连续触发指数退避，封顶 soft_rate_max）
 	RefreshSkew  time.Duration // token 提前刷新窗口，默认 10m
 
+	// OnAccountBanned 账号被上游判为封禁（11140 request illegal）时的回调（可选）。
+	// 面板据此把账号实时移入「封号池」分组。回调在请求路径上调用，实现方须自行
+	// 异步化（不要在这里做文件 IO）。
+	OnAccountBanned func(uid string)
+
 	// Panel 管理面板 handler（可选；nil = 不挂载）。挂载在 /panel/ 前缀下，
 	// 面板自带 Bearer 鉴权（同一 api_key）与内嵌静态资源，主路由只做转发。
 	Panel http.Handler
@@ -1702,8 +1707,14 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		//   - 14017（trial not activated）→ register 未完成，补完 register 后可能自愈，
 		//     **保持软冷却**（禁用会让用户补完 register 后仍无法用）。
 		// 大小写不敏感（与 Classify 的 marker 匹配同口径）。
-		if strings.Contains(strings.ToLower(body), "request illegal") {
+		// 判据双通道：body 文本（"request illegal"）或业务码 11140——部分响应 body 被
+		// 截断 / 本地化后文本匹配不到，但 code 仍在。任一命中即封号。
+		if strings.Contains(strings.ToLower(body), "request illegal") || (uerr != nil && uerr.Code == 11140) {
 			h.cfg.Pool.Disable(uid, "account banned by upstream (11140 request illegal), re-login required")
+			// 面板实时归组（封号池）：与巡检同一套结论，只是不等下一轮巡检。
+			if h.cfg.OnAccountBanned != nil {
+				h.cfg.OnAccountBanned(uid)
+			}
 			return
 		}
 		h.cfg.Pool.Cooldown(uid, pool.CoolSoft, h.softCooldown(), "account fault (14017)")
