@@ -658,9 +658,19 @@ type Client struct {
 	// CliVersion 出站 UA 中 `CLI/<ver>` 段版本。空 = 内置默认（官方内置 CLI 2.137.1）。
 	CliVersion string
 
-	// ClientName 用量归属头取值（X-Product / X-IDE-Name / X-IDE-Type / X-IDE-Version）。
-	// 空 = 旧行为：X-Product="SaaS"，不设 X-IDE-*（向后兼容，不突变归因）。
+	// ClientName 产品身份头取值（X-IDE-Name / X-IDE-Type / X-IDE-Version）。
+	// 空 = 官方桌面端形态 "WorkBuddy"；配 "SaaS" 还原旧行为（不设 X-IDE-*）。
+	// 注意：X-Product **不再**跟随本项（见 ProductName），二者绑在一起必然错一头。
 	ClientName string
+
+	// ProductName 出站 X-Product 取值（渠道位）。
+	// 空 = 内置默认 "SaaS"（官方 IDE 实测值）；config upstream.product_name 可覆盖。
+	ProductName string
+
+	// SendDeviceHeaders 是否注入自造的 X-Machine-ID / X-Session-ID（默认 false）。
+	// 官方桌面端 chat 面不发这两个头，保留等于给网关留一个每账号恒定的稳定指纹。
+	// config upstream.send_device_headers 可开（仅用于排障/兼容旧行为）。
+	SendDeviceHeaders bool
 
 	// PassthroughIP 是否透传客户端 IP 给上游（X-Forwarded-For/X-Real-IP 首段）。
 	// 缺省 false（反代安全边界）；handler 在 chat 路径按请求把 clientIP 传入 ChatStream。

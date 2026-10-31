@@ -949,7 +949,12 @@ func (h *Handler) chatCompletionsIn(w http.ResponseWriter, r *http.Request, in *
 	//     粘性 key 进程内稳定生成；粘性 key 也空时走轮级兜底（TurnKey/TurnRequestID），
 	//     无 user 消息时退化成本请求级随机——轮转内捕获一次即共享；
 	//   - messageID 在 ChatHeaders 内每条消息生成（消息级独立，无需外部可见）。
-	chatMeta := upstream.ChatMeta{ConversationID: in.convID}
+	chatMeta := upstream.ChatMeta{ConversationID: in.convID, SessionKey: in.sessKey}
+	// 请求类型：客户端本身是 IDE 时透传辅助请求语义（标题/摘要类），其余一律 main。
+	// 决定 X-Agent-Type / X-Agent-Purpose / 是否发 X-Root-Request-ID。
+	if r.Header.Get("X-Agent-Type") == "auxiliary" {
+		chatMeta.AgentType = "auxiliary"
+	}
 	if v := r.Header.Get("X-Conversation-Request-ID"); v != "" {
 		chatMeta.ConversationRequestID = v
 	} else if turnKey != "" && sessKey != "" {
