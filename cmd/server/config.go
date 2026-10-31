@@ -156,9 +156,15 @@ type Config struct {
 		ClientVersion string `json:"client_version"`
 		// CliVersion 出站 UA 中 `CLI/<ver>` 段的版本。空 = 内置默认（官方内置 CLI 2.137.1）。
 		CliVersion string `json:"cli_version"`
-		// ClientName 用量归属头取值（X-Product / X-IDE-Name / X-IDE-Type / X-IDE-Version）。
-		// 空 = 旧行为 X-Product="SaaS" 不设 X-IDE-*；配 "WorkBuddy" 则四头跟随。
+		// ClientName 产品身份头取值（X-IDE-Name / X-IDE-Type / X-IDE-Version）。
+		// 空 = 官方桌面端形态 "WorkBuddy"；配 "SaaS" 还原旧行为（不设 X-IDE-*）。
 		ClientName string `json:"client_name"`
+		// ProductName 出站 X-Product 取值（渠道位，与产品身份解耦）。
+		// 空 = 内置默认 "SaaS"（官方 IDE 5.9.3 实测值）。
+		ProductName string `json:"product_name"`
+		// SendDeviceHeaders 是否注入自造的 X-Machine-ID / X-Session-ID（默认 false）。
+		// 官方桌面端 chat 面不发这两个头；开启仅用于排障/兼容旧行为。
+		SendDeviceHeaders *bool `json:"send_device_headers"`
 		// DeviceToken 设备风控 Token（X-Device-Token 头）全局兜底；空 = 不注入。
 		// 每号 auth 文件的 device_token 键优先于本项。
 		DeviceToken string `json:"device_token"`
@@ -443,6 +449,14 @@ func applyEnv(c *Config) {
 	}
 	if v := os.Getenv("WB2A_CLIENT_NAME"); v != "" {
 		c.Upstream.ClientName = v
+	}
+	if v := os.Getenv("WB2A_PRODUCT_NAME"); v != "" {
+		c.Upstream.ProductName = v
+	}
+	if v := os.Getenv("WB2A_SEND_DEVICE_HEADERS"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			c.Upstream.SendDeviceHeaders = &b
+		}
 	}
 	if v := os.Getenv("WB2A_DEVICE_TOKEN"); v != "" {
 		c.Upstream.DeviceToken = v
