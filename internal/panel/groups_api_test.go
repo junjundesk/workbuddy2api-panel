@@ -106,6 +106,83 @@ func TestAccountMoveBetweenGroups(t *testing.T) {
 	}
 }
 
+// 按分组导出账号：单选分组、多选分组（跨组并集）、public 公共池口径，
+// 以及与 uids 混用时的并集行为。
+func TestAccountsExportByGroups(t *testing.T) {
+	p, gs, pl := newGroupsPanel(t)
+	g1, _, _ := gs.Create("A", "", false, false)
+	g2, _, _ := gs.Create("B", "", false, false)
+	// u1 -> A，u2 -> B；u3 未分组。gs.AddMember 同步写池归属。
+	for _, m := range []struct{ gid, uid string }{{g1.ID, "u1"}, {g2.ID, "u2"}} {
+		if err := gs.AddMember(m.gid, m.uid); err != nil {
+			t.Fatal(err)
+		}
+		pl.SetGroup(m.uid, m.gid)
+	}
+	pl.Add(&auth.Auth{UID: "u3", AccessToken: "at3", RefreshToken: "rt3", ExpiresAt: 9999999999})
+
+	// 单选分组：只导出该组账号。
+	code, out, raw := call(t, p, "POST", "/panel/api/accounts/export", `{"groups":["`+g1.ID+`"]}`)
+	if code != 200 {
+		t.Fatalf("export by group code=%d %s", code, raw)
+	}
+	accs, _ := out["accounts"].([]any)
+	if len(accs) != 1 {
+		t.Fatalf("single group accounts=%v", accs)
+	}
+	a0, _ := accs[0].(map[string]any)
+	if a0["uid"] != "u1" {
+		t.Fatalf("uid=%v", a0["uid"])
+	}
+	if a0["group"] != g1.ID || a0["groupName"] != "A" {
+		t.Fatalf("group fields=%v", a0)
+	}
+
+	// 多选分组：跨组并集。
+	code, out, raw = call(t, p, "POST", "/panel/api/accounts/export", `{"groups":["`+g1.ID+`","`+g2.ID+`"]}`)
+	if code != 200 {
+		t.Fatalf("export multi code=%d %s", code, raw)
+	}
+	accs, _ = out["accounts"].([]any)
+	if len(accs) != 2 {
+		t.Fatalf("multi group accounts=%v", accs)
+	}
+
+	// public = 未分组账号（无共享组时）。
+	code, out, raw = call(t, p, "POST", "/panel/api/accounts/export", `{"groups":["public"]}`)
+	if code != 200 {
+		t.Fatalf("export public code=%d %s", code, raw)
+	}
+	accs, _ = out["accounts"].([]any)
+	if len(accs) != 1 {
+		t.Fatalf("public accounts=%v", accs)
+	}
+	if a0, _ := accs[0].(map[string]any); a0["uid"] != "u3" {
+		t.Fatalf("public uid=%v", a0["uid"])
+	}
+
+	// uids 与 groups 混用 = 并集，且去重。
+	code, out, raw = call(t, p, "POST", "/panel/api/accounts/export", `{"uids":["u1"],"groups":["`+g1.ID+`"]}`)
+	if code != 200 {
+		t.Fatalf("export mixed code=%d %s", code, raw)
+	}
+	accs, _ = out["accounts"].([]any)
+	if len(accs) != 1 {
+		t.Fatalf("mixed should dedupe to 1, got %v", accs)
+	}
+
+	// 未知分组报 400（不能静默导出空集）；全空报 400。
+	if code, _, raw = call(t, p, "POST", "/panel/api/accounts/export", `{"groups":["g_nope"]}`); code != 400 {
+		t.Fatalf("unknown group code=%d %s", code, raw)
+	}
+	if code, _, _ = call(t, p, "POST", "/panel/api/accounts/export", `{"groups":[]}`); code != 400 {
+		t.Fatalf("empty groups code=%d", code)
+	}
+	if code, _, _ = call(t, p, "POST", "/panel/api/accounts/export", `{}`); code != 400 {
+		t.Fatalf("empty body code=%d", code)
+	}
+}
+
 func TestAccountsExportReimportable(t *testing.T) {
 	p, _, _ := newGroupsPanel(t)
 	code, out, raw := call(t, p, "POST", "/panel/api/accounts/export", `{"uids":["u1","u2","u1","ghost"]}`)

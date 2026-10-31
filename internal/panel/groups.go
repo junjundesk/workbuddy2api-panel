@@ -553,27 +553,43 @@ type exportAccount struct {
 	RefreshToken string `json:"refreshToken"`
 	ExpiresAt    int64  `json:"expiresAt"`
 	Group        string `json:"group,omitempty"`
+	// GroupName 分组显示名（导出时快照，便于人工核对；导入侧忽略）。
+	GroupName string `json:"groupName,omitempty"`
 }
 
-// accountsExport 导出所选账号凭证（含 access/refresh token，属敏感数据，仅鉴权后可用）。
+// accountsExport 导出账号凭证（含 access/refresh token，属敏感数据，仅鉴权后可用）。
 //
 //	POST /panel/api/accounts/export  {"uids":["..."]}
+//	POST /panel/api/accounts/export  {"groups":["g_xxx","public"]}
+//
+// uids 与 groups 可同时给，两者取并集（uid 去重）。groups 支持真实分组 id 与保留
+// id "public"（= 未分组账号 + 开启共享的分组账号，与面板「公共号池」口径一致），
+// 用来支持「按分组导出」与「跨分组多选导出」。
 func (p *Panel) accountsExport(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		UIDs []string `json:"uids"`
+		UIDs   []string `json:"uids"`
+		Groups []string `json:"groups"`
 	}
 	if err := decodeJSONBody(r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if len(req.UIDs) == 0 {
-		writeErr(w, http.StatusBadRequest, "uids is required")
+	// 分组 id 先校验：未知分组直接报错（否则会静默导出空集，让人以为"没账号"）。
+	if bad := p.unknownGroupIDs(req.Groups); len(bad) > 0 {
+		writeErr(w, http.StatusBadRequest, "unknown group: "+strings.Join(bad, ", "))
+		return
+	}
+	uids := make([]string, 0, len(req.UIDs)+16)
+	uids = append(uids, req.UIDs...)
+	uids = append(uids, p.exportUIDsForGroups(req.Groups)...)
+	if len(uids) == 0 {
+		writeErr(w, http.StatusBadRequest, "uids or groups is required")
 		return
 	}
 	seen := map[string]bool{}
-	out := make([]exportAccount, 0, len(req.UIDs))
+	out := make([]exportAccount, 0, len(uids))
 	var missing []string
-	for _, uid := range req.UIDs {
+	for _, uid := range uids {
 		uid = strings.TrimSpace(uid)
 		if uid == "" || seen[uid] {
 			continue
@@ -587,7 +603,7 @@ func (p *Panel) accountsExport(w http.ResponseWriter, r *http.Request) {
 		out = append(out, exportAccount{
 			UID: a.UID, Nickname: a.Nickname, Realm: a.Realm(), Domain: a.Domain,
 			EnterpriseID: a.EnterpriseID, AccessToken: a.AccessToken, RefreshToken: a.RefreshToken,
-			ExpiresAt: a.ExpiresAt, Group: a.Group(),
+			ExpiresAt: a.ExpiresAt, Group: a.Group(), GroupName: p.groupNameOf(a.Group()),
 		})
 	}
 	if len(out) == 0 {
@@ -600,8 +616,86 @@ func (p *Panel) accountsExport(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"format": "workbuddy-accounts", "version": 1, "exported_at": time.Now().Unix(),
-		"accounts": out, "missing": missing,
+		"accounts": out, "missing": missing, "groups": req.Groups,
 	})
+}
+
+// unknownGroupIDs 找出请求里不存在的分组 id（"public" 视为合法保留 id）。
+func (p *Panel) unknownGroupIDs(ids []string) []string {
+	out := []string{}
+	for _, raw := range ids {
+		id := strings.TrimSpace(raw)
+		if id == "" || id == publicGroupID {
+			continue
+		}
+		if p.cfg.Groups == nil {
+			out = append(out, id)
+			continue
+		}
+		if _, ok := p.cfg.Groups.Get(id); !ok {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// exportUIDsForGroups 按分组 id 展开账号 uid 列表。保留 id "public" 表示
+// 公共号池：未分组账号 + 开启「进入公共池」的分组账号（与面板口径一致）。
+// 未知分组由调用方 unknownGroupIDs 事先挡掉，这里的跳过分支只是防御。
+func (p *Panel) exportUIDsForGroups(ids []string) []string {
+	out := []string{}
+	if len(ids) == 0 {
+		return out
+	}
+	shared := map[string]bool{}
+	if p.cfg.Groups != nil {
+		for _, g := range p.cfg.Groups.Groups() {
+			if g.SharedPool {
+				shared[g.ID] = true
+			}
+		}
+	}
+	for _, raw := range ids {
+		id := strings.TrimSpace(raw)
+		if id == "" {
+			continue
+		}
+		if id == publicGroupID {
+			for _, a := range p.cfg.Pool.List() {
+				if a.Group == "" || shared[a.Group] {
+					out = append(out, a.UID)
+				}
+			}
+			continue
+		}
+		if p.cfg.Groups == nil {
+			continue
+		}
+		if _, ok := p.cfg.Groups.Get(id); !ok {
+			continue
+		}
+		// 用池内实际分组归属（SetGroup 写入），而不是 groups.json 的 members 列表：
+		// 后者可能与池状态短暂不同步（移动账号时先改池再改存储）。
+		for _, a := range p.cfg.Pool.List() {
+			if a.Group == id {
+				out = append(out, a.UID)
+			}
+		}
+	}
+	return out
+}
+
+// groupNameOf 分组显示名；未分组账号记为「公共号池（未分组）」。
+func (p *Panel) groupNameOf(id string) string {
+	if id == "" {
+		return "公共号池（未分组）"
+	}
+	if p.cfg.Groups != nil {
+		if g, ok := p.cfg.Groups.Get(id); ok && g.Name != "" {
+			return g.Name
+		}
+	}
+	return id
 }
 
 func decodeJSONBody(r *http.Request, out any) error {

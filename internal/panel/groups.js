@@ -1,7 +1,7 @@
 'use strict';
 const $ = id => document.getElementById(id);
 const COLORS = ['#5b7cfa','#3ddc97','#f5b544','#c084fc','#f0655f','#38bdf8','#fb923c','#a3e635'];
-const state = { groups: [], accounts: [], selected: 'public', editing: null, groupColor: COLORS[0], proxyGroup: null, proxyType: 'socks5h', importGroup: null, importTab: 'single', promptGroup: null, confirm: null, publicProxy: null, sel: new Set(), revealed: {}, moveUids: [] };
+const state = { groups: [], accounts: [], selected: 'public', editing: null, selPools: new Set(), exportTab: 'pools', exportPools: new Set(), groupColor: COLORS[0], proxyGroup: null, proxyType: 'socks5h', importGroup: null, importTab: 'single', promptGroup: null, confirm: null, publicProxy: null, sel: new Set(), revealed: {}, moveUids: [] };
 
 function esc(s) { return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 function fmt(n) { return Number(n || 0).toLocaleString('zh-CN'); }
@@ -67,17 +67,34 @@ function renderStats() {
     '<div class="stat"><div class="v">' + proxies + '</div><div class="k">代理出口<span>HTTP / SOCKS5 / SOCKS5H</span></div></div>';
   $('topMeta').textContent = '公共池 ' + pub.length + ' · ' + state.groups.length + ' 个分组 · ' + groupAcc.length + ' 个分组账号';
 }
+// poolRow 一个号池行：左侧勾选框（用于按号池导出）+ 右侧按钮（切换当前视图）。
+// 勾选框与按钮分开两个元素：checkbox 不能放在 button 内部，事件会互相干扰。
+function poolRow(id, name, meta, count, cls, color) {
+  const checked = state.selPools.has(id) ? ' checked' : '';
+  return '<div class="pool-row"><input type="checkbox" data-act="sel-pool" data-id="' + esc(id) + '"' + checked + ' title="勾选此号池以便批量导出">' +
+    '<button class="pool-item ' + cls + (state.selected === id ? ' on' : '') + '" data-act="select" data-id="' + esc(id) + '">' +
+    (color ? '<span class="gdot" style="--c:' + esc(color) + '"></span>' : '<span class="gdot"></span>') +
+    '<span><b>' + esc(name) + '</b><em>' + esc(meta) + '</em></span><span class="cnt">' + count + '</span></button></div>';
+}
 function renderRail() {
-  let html = '<button class="pool-item public ' + (state.selected === 'public' ? 'on' : '') + '" data-act="select" data-id="public"><span class="gdot"></span><span><b>公共号池</b><em>未分组 + 共享分组</em></span><span class="cnt">' + publicAccounts().length + '</span></button>';
+  let html = poolRow('public', '公共号池', '未分组 + 共享分组', publicAccounts().length, 'public', '');
   html += '<div class="rail-sec">专属分组 <span>' + state.groups.length + '</span><button data-act="new-group">＋</button></div>';
   state.groups.forEach(g => {
     const bits = [g.member_count + ' 个账号', g.shared_pool ? '共享' : '独立'];
     if (g.call_public) bits.push('共用公共池');
     if (g.prompt_enabled) bits.push('自定义提示词');
     if (!g.has_key) bits.push('缺密钥');
-    html += '<button class="pool-item ' + (state.selected === g.id ? 'on' : '') + '" data-act="select" data-id="' + esc(g.id) + '"><span class="gdot" style="--c:' + esc(g.color || '#5b7cfa') + '"></span><span><b>' + esc(g.name) + '</b><em>' + esc(bits.join(' · ')) + '</em></span><span class="cnt">' + g.member_count + '</span></button>';
+    html += poolRow(g.id, g.name, bits.join(' · '), g.member_count, '', g.color || '#5b7cfa');
   });
   $('railList').innerHTML = html;
+  updatePoolSelUI();
+}
+// updatePoolSelUI 同步号池勾选状态与「导出所选号池」按钮的可用性。
+function updatePoolSelUI() {
+  const btn = $('railExport'); if (!btn) return;
+  const n = state.selPools.size;
+  btn.disabled = !n;
+  btn.textContent = n ? '导出所选号池（' + n + '）' : '导出所选号池';
 }
 function keyCard(g) {
   const shown = state.revealed[g.id];
@@ -196,16 +213,59 @@ function updateSelUI() {
   const all = document.querySelector('[data-act="sel-all"]'); if (all) { all.checked = n > 0 && n === list.length; all.indeterminate = n > 0 && n < list.length; }
 }
 function selectedVisible() { return visibleAccounts().filter(a => state.sel.has(a.uid)).map(a => a.uid); }
-async function exportAccounts(uids) {
-  if (!uids.length) { toast('请先勾选账号', 'err'); return; }
-  const r = await api('accounts/export', { method: 'POST', body: JSON.stringify({ uids }) });
+// exportAccounts 导出账号 JSON。uids = 勾选的账号；groups = 按号池（分组）导出。
+// 两者可同时给，服务端取并集。groups 用 'public' 表示公共号池。
+async function exportAccounts(uids, groups) {
+  uids = uids || []; groups = groups || [];
+  if (!uids.length && !groups.length) { toast('请先勾选账号或号池', 'err'); return; }
+  const r = await api('accounts/export', { method: 'POST', body: JSON.stringify({ uids: uids, groups: groups }) });
   const data = { format: r.format, version: r.version, exported_at: r.exported_at, accounts: r.accounts };
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob); const link = document.createElement('a');
   const ts = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
-  link.href = url; link.download = uids.length === 1 ? 'workbuddy-' + uids[0] + '.json' : 'workbuddy-accounts-' + ts + '.json';
+  const one = r.accounts.length === 1;
+  link.href = url; link.download = one ? 'workbuddy-' + r.accounts[0].uid + '.json' : 'workbuddy-accounts-' + ts + '.json';
   document.body.appendChild(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
   toast('已导出 ' + r.accounts.length + ' 个账号' + (r.missing && r.missing.length ? '（' + r.missing.length + ' 个不存在已跳过）' : '') + '；文件含登录凭证，请妥善保管', 'warn');
+}
+
+// 导出弹窗：两种口径——按号池（分组，多选）与按勾选账号。
+// 号池口径支持单选（只导一个分组）、多选（跨分组一起导）。
+function openExportModal(tab) {
+  state.exportTab = tab || 'pools';
+  // 号池口径默认带上侧栏已勾选的号池；账号口径带上表格里已勾选的账号。
+  state.exportPools = new Set(state.selPools);
+  renderExportModal();
+  openVeil('exportVeil');
+}
+function switchExportTab(t) {
+  state.exportTab = t;
+  document.querySelectorAll('#exportVeil .tab').forEach(b => b.classList.toggle('on', b.dataset.tab === t));
+  $('exportPoolsPanel').hidden = t !== 'pools';
+  $('exportAccountsPanel').hidden = t !== 'accounts';
+  renderExportModal();
+}
+function renderExportModal() {
+  // 号池清单：公共号池 + 全部分组，逐个带计数与勾选框。
+  const pools = [{ id: 'public', name: '公共号池', meta: '未分组 + 共享分组', n: publicAccounts().length }].concat(
+    state.groups.map(g => ({ id: g.id, name: g.name, meta: (g.shared_pool ? '共享' : '独立') + ' · ' + g.member_count + ' 个账号', n: g.member_count })));
+  $('exportPoolList').innerHTML = pools.map(p =>
+    '<label class="radio"><input type="checkbox" data-act="export-pool" data-id="' + esc(p.id) + '"' + (state.exportPools.has(p.id) ? ' checked' : '') +
+    '><span><b>' + esc(p.name) + '</b> <span class="hint">' + esc(p.meta) + '</span></span></label>').join('');
+  // 账号口径：列出当前视图里已勾选的账号。
+  const sel = visibleAccounts().filter(a => state.sel.has(a.uid));
+  $('exportSelList').innerHTML = sel.length
+    ? sel.map(a => '<div class="hint">' + esc(a.nickname || a.uid.slice(0, 8)) + ' <code>' + esc(a.uid) + '</code></div>').join('')
+    : '<div class="hint">当前列表还没有勾选账号，请回到列表用左侧复选框勾选。</div>';
+  // 预估导出数量。
+  let n = 0;
+  if (state.exportTab === 'pools') {
+    pools.forEach(p => { if (state.exportPools.has(p.id)) n += p.id === 'public' ? publicAccounts().length : (state.groups.find(g => g.id === p.id) || {}).member_count || 0; });
+    $('exportPreview').textContent = n ? '将导出约 ' + n + ' 个账号（' + state.exportPools.size + ' 个号池）' : '未勾选号池';
+  } else {
+    n = sel.length;
+    $('exportPreview').textContent = n ? '将导出 ' + n + ' 个账号' : '未勾选账号';
+  }
 }
 function openMoveModal(uids) {
   state.moveUids = uids;
@@ -341,6 +401,32 @@ document.addEventListener('click', async e => {
     if (act === 'select') { state.selected = el.dataset.id; state.sel.clear(); renderAll(); return; }
     if (act === 'sel-one') { if (el.checked) state.sel.add(el.dataset.uid); else state.sel.delete(el.dataset.uid); updateSelUI(); return; }
     if (act === 'sel-all') { const on = el.checked; visibleAccounts().forEach(a => { if (on) state.sel.add(a.uid); else state.sel.delete(a.uid); }); document.querySelectorAll('[data-act="sel-one"]').forEach(c => { c.checked = on; }); updateSelUI(); return; }
+    if (act === 'sel-pool') {
+      if (el.checked) state.selPools.add(el.dataset.id); else state.selPools.delete(el.dataset.id);
+      updatePoolSelUI(); return;
+    }
+    if (act === 'sel-groups-all') {
+      const ids = ['public'].concat(state.groups.map(g => g.id));
+      const all = ids.every(id => state.selPools.has(id));
+      ids.forEach(id => { if (all) state.selPools.delete(id); else state.selPools.add(id); });
+      renderRail(); return;
+    }
+    if (act === 'export-groups') { openExportModal('pools'); return; }
+    if (act === 'export-tab') { switchExportTab(el.dataset.tab); return; }
+    if (act === 'export-pool') {
+      if (el.checked) state.exportPools.add(el.dataset.id); else state.exportPools.delete(el.dataset.id);
+      renderExportModal(); return;
+    }
+    if (act === 'export-do') {
+      if (state.exportTab === 'pools') {
+        const groups = Array.from(state.exportPools);
+        if (!groups.length) { toast('请先勾选号池', 'err'); return; }
+        closeVeil('exportVeil'); await exportAccounts([], groups); return;
+      }
+      const uids = selectedVisible();
+      if (!uids.length) { toast('请先勾选账号', 'err'); return; }
+      closeVeil('exportVeil'); await exportAccounts(uids); return;
+    }
     if (act === 'export-sel') { await exportAccounts(selectedVisible()); return; }
     if (act === 'export-account') { await exportAccounts([el.dataset.uid]); return; }
     if (act === 'move-sel') { const u = selectedVisible(); if (!u.length) { toast('请先勾选账号', 'err'); return; } openMoveModal(u); return; }

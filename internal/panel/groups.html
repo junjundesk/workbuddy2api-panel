@@ -52,6 +52,11 @@ input:focus,select:focus,textarea:focus { outline:none; border-color:var(--accen
 .rail-head .t { font-size:13px; font-weight:620; }
 .rail-head .d { color:var(--ink-3); font-size:11px; margin-top:3px; }
 .rail-list { padding:8px; }
+.rail-tools { display:flex; gap:6px; margin-top:9px; align-items:center; }
+.rail-tools .hint { font-size:11px; color:var(--ink-3); }
+.pool-row { display:flex; align-items:center; gap:7px; margin-bottom:3px; }
+.pool-row > input { width:auto; flex:none; margin:0; cursor:pointer; }
+.pool-row > .pool-item { flex:1; min-width:0; margin-bottom:0; }
 .pool-item { width:100%; display:grid; grid-template-columns:7px minmax(0,1fr) auto; gap:9px; align-items:center; text-align:left; padding:9px; border:1px solid transparent; background:transparent; border-radius:8px; margin-bottom:3px; color:var(--ink-2); }
 .pool-item:hover { background:var(--surface-2); border-color:transparent; color:var(--ink); }
 .pool-item.on { background:var(--accent-soft); border-color:color-mix(in srgb,var(--accent) 30%,transparent); color:var(--ink); }
@@ -175,7 +180,7 @@ input:focus,select:focus,textarea:focus { outline:none; border-color:var(--accen
       <div class="stats" id="stats"></div>
       <div class="gp-layout">
         <aside class="box gp-rail">
-          <div class="rail-head"><div class="t">号池</div><div class="d">按访问密钥隔离</div></div>
+          <div class="rail-head"><div class="t">号池</div><div class="d">按访问密钥隔离</div><div class="rail-tools"><button class="xs ghost" data-act="sel-groups-all">全选</button><button class="xs" id="railExport" data-act="export-groups" disabled title="把所选号池的账号导出为 JSON（可按分组 / 跨分组多选）">导出所选号池</button></div></div>
           <div class="rail-list" id="railList"></div>
         </aside>
         <div id="detail"></div>
@@ -196,6 +201,12 @@ input:focus,select:focus,textarea:focus { outline:none; border-color:var(--accen
 <div class="veil" id="addVeil"><div class="dlg" style="width:560px"><header><h3>添加账号 <span id="addGroupName" class="hint"></span></h3></header><div class="body"><div class="hint">浏览器 OAuth 登录，账号会直接落入当前分组；OAuth 请求走该组代理。</div><div style="height:10px"></div><label class="fld"><span class="lb">版本</span><select id="addRealm"><option value="cn">国内版 CN</option><option value="global">国际版 Global</option></select></label><button class="primary" data-act="start-login">获取授权链接</button><div id="addWait" hidden><div class="url" id="addUrl"></div><div class="state"><span class="dots">等待授权完成</span></div></div></div><footer><span class="grow"></span><button data-act="close" data-target="addVeil">关闭</button></footer></div></div>
 
 <div class="veil" id="keyVeil" data-lock="1"><div class="dlg" style="width:560px"><header><h3>分组密钥</h3><div class="hint">之后可在分组详情点击「显示」随时查看；重新生成后旧密钥立即失效。</div></header><div class="body"><div class="key-big" id="keyBig"></div><div class="modal-warn">此密钥只能访问本组账号，不能访问公共池或其他分组。</div></div><footer><button class="ghost" data-act="copy-key">复制密钥</button><span class="grow"></span><button class="primary" data-act="close" data-target="keyVeil">我已保存</button></footer></div></div>
+
+<div class="veil" id="exportVeil"><div class="dlg" style="width:620px"><header><h3>导出账号 JSON</h3><div class="hint">导出内容含登录凭证（access / refresh token），可在其他实例直接导入。请妥善保管。</div></header><div class="body">
+<div class="tabs"><button class="tab on" data-act="export-tab" data-tab="pools">按号池（分组）</button><button class="tab" data-act="export-tab" data-tab="accounts">按勾选账号</button></div>
+<div id="exportPoolsPanel"><div class="hint" style="margin-bottom:8px">勾选要导出的号池（可多选，跨分组一起导出）。「公共号池」= 未分组账号 + 开启共享的分组账号。</div><div id="exportPoolList"></div></div>
+<div id="exportAccountsPanel" hidden><div class="hint" style="margin-bottom:8px">导出当前列表里勾选的账号（表格左上角复选框）。</div><div id="exportSelList" class="hint"></div></div>
+<div class="hint" id="exportPreview" style="margin-top:10px"></div></div><footer><span class="grow"></span><button data-act="close" data-target="exportVeil">取消</button><button class="primary" data-act="export-do">导出 JSON</button></footer></div></div>
 
 <div class="veil" id="moveVeil"><div class="dlg" style="width:460px"><header><h3>移动账号</h3><div class="hint" id="moveHint"></div></header><div class="body"><label class="fld"><span class="lb">目标号池</span><select id="moveTarget"></select></label><div class="hint">移动后立即按目标号池的密钥、代理与共享策略生效，账号凭证与状态保持不变。</div></div><footer><span class="grow"></span><button data-act="close" data-target="moveVeil">取消</button><button class="primary" data-act="move-do">移动</button></footer></div></div>
 
