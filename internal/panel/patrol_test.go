@@ -3,6 +3,7 @@
 package panel
 
 import (
+	"context"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -18,8 +19,9 @@ import (
 )
 
 // patrolUpstream 假上游：模型目录（企业端点）+ chat SSE + 余额。
-// 按 Authorization 里的 token 区分账号：f.banned 的账号 chat 回 403 11140，
-// f.zero 的账号余额回空 Accounts（= 剩余 0），其余账号一切正常。
+// 按 Authorization 里的 token 区分账号：f.banned 的账号余额接口回 403 业务码（11140），
+// f.zero 的账号余额回空 Accounts（= 剩余 0），其余账号一切正常。巡检只打余额接口，
+// chat 只记命中次数（默认设置下必须恒为 0）。
 type patrolUpstream struct {
 	mu sync.Mutex
 
@@ -46,13 +48,15 @@ func (f *patrolUpstream) transport(req *http.Request) (*http.Response, error) {
 	case strings.HasSuffix(req.URL.Path, "/console/enterprises/personal/models"):
 		return fakeJSON(http.StatusOK, enterprisePayload("m1")), nil
 	case strings.HasSuffix(req.URL.Path, "/v2/chat/completions"):
+		// 巡检不该走到这里（默认 ProbeChat=false）；保留计数供测试断言"一次都没发"。
 		f.chat[token]++
-		if body, ok := f.banned[token]; ok && body != "" {
-			return fakeJSON(http.StatusForbidden, body), nil
-		}
 		return fakeJSON(http.StatusOK, aliveSSEBody), nil
 	case strings.HasSuffix(req.URL.Path, "/v2/billing/meter/get-user-resource"):
 		f.bill[token]++
+		if body, ok := f.banned[token]; ok && body != "" {
+			// 封号/限流由余额接口的业务信封暴露（巡检只调这个接口）。
+			return fakeJSON(http.StatusForbidden, body), nil
+		}
 		if f.zero[token] {
 			// Accounts 为空 = 没有任何积分包 → remain/total 均为 0。
 			return fakeJSON(http.StatusOK, `{"code":0,"data":{"Response":{"Data":{"Accounts":[]}}}}`), nil
@@ -551,10 +555,10 @@ func TestPatrolSkipsBannedGroup(t *testing.T) {
 	waitPatrol(t, p)
 
 	fake.mu.Lock()
-	banHits := fake.chat["tok-ban"]
+	banHits := fake.bill["tok-ban"]
 	fake.mu.Unlock()
 	if banHits != 0 {
-		t.Errorf("封号池里的账号不该被巡检（chat 命中 %d 次）", banHits)
+		t.Errorf("封号池里的账号不该被巡检（余额接口命中 %d 次）", banHits)
 	}
 
 	p.patrol.mu.Lock()
@@ -661,5 +665,83 @@ func TestPatrolConcurrencyZeroUnlimited(t *testing.T) {
 	}
 	if got := p.patrol.snapshotSettings().Concurrency; got != 0 {
 		t.Errorf("concurrency=%d want 0（不限）", got)
+	}
+}
+
+// TestPatrolAutoTickerFixedCadence 自动巡检是**固定节拍定时器**：节拍到点就触发，
+// 上一轮没结束就跳过本次（而不是"等上一轮结束再计时"）。用阻塞上游让第一轮卡住，
+// 观察后续节拍仍按时到来并被跳过。
+func TestPatrolAutoTickerFixedCadence(t *testing.T) {
+	bu := &blockingUpstream{block: make(chan struct{})}
+	p, _, _ := newPatrolPanelRT(t, rtFunc(bu.transport), acc("u1", "t1"))
+	p.patrol.tickOverride = 40 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p.StartPatrol(ctx)
+	p.StartPatrol(ctx) // 幂等：不该叠加第二个 ticker
+	time.Sleep(280 * time.Millisecond)
+
+	p.patrol.mu.Lock()
+	skipped := p.patrol.skippedTicks
+	running := p.patrol.running
+	p.patrol.mu.Unlock()
+
+	close(bu.block) // 放开阻塞的请求，让本轮收尾
+	cancel()
+	waitPatrol(t, p)
+
+	if !running {
+		t.Error("第一轮应仍在跑（上游被阻塞）")
+	}
+	if skipped < 2 {
+		t.Errorf("skippedTicks=%d want >=2：固定节拍应在上一轮未结束时继续到点并跳过", skipped)
+	}
+}
+
+// TestPatrolAutoTickerStopsWhenDisabled 关闭自动巡检后不再有新节拍。
+func TestPatrolAutoTickerStopsWhenDisabled(t *testing.T) {
+	fake := newPatrolUpstream()
+	p, _, _ := newPatrolPanel(t, fake, acc("u1", "t1"))
+	p.patrol.tickOverride = 30 * time.Millisecond
+	p.patrol.updateSettings(patrolSettings{Enabled: false, IntervalValue: 1, IntervalUnit: patrolUnitHour, CheckCredit: true, Concurrency: 1})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p.StartPatrol(ctx)
+	time.Sleep(150 * time.Millisecond)
+
+	p.patrol.mu.Lock()
+	runs := len(p.patrol.results)
+	p.patrol.mu.Unlock()
+	if runs != 0 {
+		t.Errorf("自动巡检关闭时不该跑轮次，results=%d", runs)
+	}
+}
+
+// TestPatrolDefaultNeverProbesChat 默认设置（ProbeChat=false）下巡检**绝不**发起
+// 对话请求：封号只靠用户请求命中 11140 + 余额接口返回码，避免后台烧积分。
+func TestPatrolDefaultNeverProbesChat(t *testing.T) {
+	fake := newPatrolUpstream()
+	fake.zero["t2"] = true
+	p, _, _ := newPatrolPanel(t, fake, acc("u1", "t1"), acc("u2", "t2"))
+
+	if p.patrol.snapshotSettings().ProbeChat {
+		t.Fatal("默认设置不该开启对话探测")
+	}
+	if err := p.patrol.start(nil, boolPtr(false)); err != nil {
+		t.Fatal(err)
+	}
+	waitPatrol(t, p)
+
+	fake.mu.Lock()
+	chatHits := fake.chat["t1"] + fake.chat["t2"]
+	billHits := fake.bill["t1"] + fake.bill["t2"]
+	fake.mu.Unlock()
+	if chatHits != 0 {
+		t.Errorf("巡检不该发起对话请求（chat 命中 %d 次）", chatHits)
+	}
+	if billHits == 0 {
+		t.Error("积分检测应调用余额接口")
 	}
 }

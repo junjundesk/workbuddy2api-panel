@@ -84,6 +84,11 @@ type patrolSettings struct {
 	// CheckCredit 积分检测：巡检时调余额查询接口，剩余 0 判无积分。
 	// 纯后台调用，不消耗对话积分。
 	CheckCredit bool `json:"check_credit"`
+	// ProbeChat 主动对话探测（缺省关）：巡检时给每个账号发一句 hi（与「测活」同一条
+	// 链路），能发现"还没有任何请求触发过"的封号。代价是每号每轮一次真实对话（少量
+	// 积分 + 一次上游风控面），因此默认关闭；封号的主通道是主链路请求命中 11140 的
+	// 实时归组，巡检侧只做余额接口错误码的顺带判定。
+	ProbeChat   bool `json:"probe_chat"`
 	Concurrency int  `json:"concurrency"`
 	// SkipDisabled 跳过已禁用账号（禁用号不接流量，巡检价值低）。缺省 false：
 	// 封号与禁用是两件事，禁用号同样可能被封，运维想看到结论。
@@ -138,6 +143,12 @@ type patrolRunner struct {
 	cancel  context.CancelFunc
 	rootCtx context.Context
 	kick    chan struct{}
+	// started 定时循环是否已启动（StartPatrol 幂等：重复调用不叠加 goroutine）。
+	started bool
+	// skippedTicks 累计「到点触发时上一轮还没结束」的跳过次数（固定节拍不等待）。
+	skippedTicks int
+	// tickOverride 仅供测试：>0 时用它替代设置里的周期（生产恒 0）。
+	tickOverride time.Duration
 }
 
 func newPatrolRunner(p *Panel, path string) *patrolRunner {
@@ -159,7 +170,11 @@ func defaultPatrolSettings() patrolSettings {
 		IntervalUnit:  patrolUnitHour,
 		CheckBan:      true,
 		CheckCredit:   true,
-		Concurrency:   patrolDefaultConcurrency,
+		// ProbeChat 显式关闭：巡检**绝不**主动发起对话（巡检是后台动作，不该消耗
+		// 用户积分）。封号的主通道是用户请求命中 11140 的实时归组；巡检侧只用余额
+		// 接口的返回码顺带判定，那是一次计费查询、零对话消耗。
+		ProbeChat:   false,
+		Concurrency: patrolDefaultConcurrency,
 	}
 }
 
@@ -292,15 +307,30 @@ func (p *Panel) StartPatrol(ctx context.Context) {
 	if r == nil {
 		return
 	}
-	if ctx != nil {
-		r.mu.Lock()
-		r.rootCtx = ctx
+	r.mu.Lock()
+	if r.started {
+		// 幂等：重复调用不叠加第二个 ticker。
+		if ctx != nil {
+			r.rootCtx = ctx
+		}
 		r.mu.Unlock()
+		return
 	}
+	r.started = true
+	if ctx != nil {
+		r.rootCtx = ctx
+	}
+	r.mu.Unlock()
 	go r.loop(ctx)
 }
 
 // loop 按设置间隔自动巡检。设置变更（poke）立即按新间隔重排，关闭时挂起等待。
+// loop 自动巡检的定时器：**固定节拍**（ticker）。设 1 分钟就是每 1 分钟一个节拍，
+// 不会因为某轮跑久了把后续节拍整体后移（旧实现是"本轮结束再等一个间隔"，周期会漂）。
+//
+// 节拍到点时若上一轮还没结束（慢上游 / 全池并发打满），本次**直接跳过**（单飞保护，
+// 只记一行日志 + 累计 skipped_ticks）：下一拍照常到来，既不让慢轮次拖垮频率，也不会
+// 把上游打出一串并发风暴。
 func (r *patrolRunner) loop(ctx context.Context) {
 	if ctx == nil {
 		return
@@ -308,6 +338,7 @@ func (r *patrolRunner) loop(ctx context.Context) {
 	for {
 		s := r.snapshotSettings()
 		if !s.Enabled {
+			// 自动巡检关闭：挂起等待重排信号（面板重新打开或改周期时 poke）。
 			select {
 			case <-ctx.Done():
 				return
@@ -315,34 +346,32 @@ func (r *patrolRunner) loop(ctx context.Context) {
 			}
 			continue
 		}
-		timer := time.NewTimer(s.interval())
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return
-		case <-r.kick:
-			timer.Stop()
-		case <-timer.C:
-			if err := r.start(nil, nil); err != nil {
-				log.Printf("panel: 自动巡检跳过：%v", err)
-				continue
+		interval := s.interval()
+		if r.tickOverride > 0 {
+			interval = r.tickOverride
+		}
+		ticker := time.NewTicker(interval)
+		log.Printf("panel: 自动巡检已排程：每 %s 触发一次（上一轮未结束时跳过该次）", interval)
+	rearm:
+		for {
+			select {
+			case <-ctx.Done():
+				ticker.Stop()
+				return
+			case <-r.kick:
+				// 设置变更（改周期 / 关闭自动巡检）：按新设置重排。
+				ticker.Stop()
+				break rearm
+			case <-ticker.C:
+				if err := r.start(nil, nil); err != nil {
+					if errors.Is(err, errPatrolRunning) {
+						log.Printf("panel: 自动巡检触发时上一轮尚未结束，跳过本次（下一拍照常）")
+					} else {
+						log.Printf("panel: 自动巡检启动失败：%v", err)
+					}
+				}
 			}
-			// 等本轮跑完再排下一轮，避免慢上游把轮次叠加成并发风暴。
-			r.wait()
 		}
-	}
-}
-
-// wait 阻塞到当前轮结束（未在跑时立即返回）。
-func (r *patrolRunner) wait() {
-	for {
-		r.mu.Lock()
-		running := r.running
-		r.mu.Unlock()
-		if !running {
-			return
-		}
-		time.Sleep(500 * time.Millisecond)
 	}
 }
 
@@ -353,6 +382,7 @@ var errPatrolRunning = errors.New("巡检正在执行中")
 func (r *patrolRunner) start(uids []string, dryRun *bool) error {
 	r.mu.Lock()
 	if r.running {
+		r.skippedTicks++
 		r.mu.Unlock()
 		return errPatrolRunning
 	}
@@ -495,7 +525,7 @@ func (r *patrolRunner) execute(ctx context.Context, uids []string, s patrolSetti
 				r.mu.Unlock()
 				return
 			}
-			res := r.p.patrolProbe(ctx, a, s.CheckBan, s.CheckCredit)
+			res := r.p.patrolProbe(ctx, a, s)
 			res.FromGroup = a.Group()
 			res.Group = res.FromGroup
 			if !s.DryRun {
@@ -558,16 +588,23 @@ func (r *patrolRunner) execute(ctx context.Context, uids []string, s patrolSetti
 }
 
 // patrolChecksText 日志/面板用的检测项描述。
+// patrolChecksText 日志/面板用的检测项描述。对话探测单独标注——它是唯一会消耗
+// 对话积分的项，日志里必须能一眼看出来。
 func patrolChecksText(s patrolSettings) string {
-	switch {
-	case s.CheckBan && s.CheckCredit:
-		return "封号+积分"
-	case s.CheckBan:
-		return "仅封号"
-	case s.CheckCredit:
-		return "仅积分"
+	parts := make([]string, 0, 3)
+	if s.CheckBan {
+		parts = append(parts, "封号")
 	}
-	return "无"
+	if s.CheckCredit {
+		parts = append(parts, "积分")
+	}
+	if s.ProbeChat {
+		parts = append(parts, "对话探测")
+	}
+	if len(parts) == 0 {
+		return "无"
+	}
+	return strings.Join(parts, "+")
 }
 
 func patrolVerdictText(v string) string {
@@ -698,9 +735,13 @@ func (p *Panel) NotifyAccountBanned(uid string) {
 	}()
 }
 
-// patrolProbe 单账号探测：积分检测跑余额查询、封号检测跑对话探针，合并成一条结论。
-// 两项都开时先余额后对话——余额更便宜，且已判封号时省掉一次对话请求。
-func (p *Panel) patrolProbe(ctx context.Context, a *auth.Auth, checkBan, checkCredit bool) patrolResult {
+// patrolProbe 单账号探测：**只打余额查询接口**（计费域，零对话消耗）。
+//
+// 封号判定的主通道是用户被动请求命中 11140 的实时归组（NotifyAccountBanned）；
+// 巡检侧只顺带读余额接口返回的业务码，不发任何 chat 请求——巡检是后台定时动作，
+// 不该替用户烧积分。ProbeChat 是显式可选项且默认关闭，普通部署永远不会走到对话。
+// 两项检测都开时也只查一次余额（同一次查询同时产出积分与业务码）。
+func (p *Panel) patrolProbe(ctx context.Context, a *auth.Auth, s patrolSettings) patrolResult {
 	res := patrolResult{
 		UID:      a.UID,
 		Nickname: a.Nickname,
@@ -715,18 +756,21 @@ func (p *Panel) patrolProbe(ctx context.Context, a *auth.Auth, checkBan, checkCr
 	defer cancel()
 
 	var balance, chat *patrolResult
-	if checkCredit || checkBan {
+	// 余额查询是两项检测的共同基础：积分判 0，封号判余额接口返回的 11140。
+	// 它只打计费接口，不消耗对话积分。
+	if s.CheckCredit || s.CheckBan {
 		b := p.patrolBalanceProbeCtx(ctx, a)
 		balance = &b
 	}
-	// 已判封号就没必要再打一次对话（省一次上游调用与积分）。
-	if checkBan && (balance == nil || balance.Verdict != patrolVerdictBanned) {
+	// 对话探测是**可选项**（默认关）：会真实发一句 hi，消耗少量积分。只有显式打开
+	// 才发，已判封号时也跳过（省一次上游调用）。
+	if s.ProbeChat && (balance == nil || balance.Verdict != patrolVerdictBanned) {
 		c := p.patrolChatProbe(ctx, a)
 		chat = &c
 	}
 	out := combinePatrol(res, balance, chat)
 	// 封号检测关闭时，余额/对话路径顺带暴露的 11140 也不搬号——开关要真的说了算。
-	if !checkBan && out.Verdict == patrolVerdictBanned {
+	if !s.CheckBan && out.Verdict == patrolVerdictBanned {
 		out.Verdict = patrolVerdictFailed
 		out.Detail = "疑似封号（11140），封号检测已在设置里关闭，未移动"
 	}
@@ -936,6 +980,8 @@ type patrolView struct {
 	Total    int            `json:"total"`
 	// SkippedBanned 本轮因"在封号池分组"被跳过的账号数（封号号不再重复探测）。
 	SkippedBanned int `json:"skipped_banned"`
+	// SkippedTicks 累计「节拍到点但上一轮还没结束」的跳过次数（固定节拍不排队）。
+	SkippedTicks int `json:"skipped_ticks"`
 	// LastRun 指针：time.Time 零值会被 omitempty 忽略不了，面板会以为"巡检过"。
 	LastRun   *time.Time        `json:"last_run,omitempty"`
 	Results   []patrolResult    `json:"results"`
@@ -957,6 +1003,7 @@ func (p *Panel) patrolState(w http.ResponseWriter, r *http.Request) {
 		Done:          rp.done,
 		Total:         rp.total,
 		SkippedBanned: rp.skippedBanned,
+		SkippedTicks:  rp.skippedTicks,
 		Available:     true,
 	}
 	if !rp.lastRun.IsZero() {
@@ -997,6 +1044,7 @@ func (p *Panel) patrolConfigure(w http.ResponseWriter, r *http.Request) {
 		IntervalUnit  *string `json:"interval_unit"`
 		CheckBan      *bool   `json:"check_ban"`
 		CheckCredit   *bool   `json:"check_credit"`
+		ProbeChat     *bool   `json:"probe_chat"`
 		Concurrency   *int    `json:"concurrency"`
 		SkipDisabled  *bool   `json:"skip_disabled"`
 		DryRun        *bool   `json:"dry_run"`
@@ -1020,6 +1068,9 @@ func (p *Panel) patrolConfigure(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.CheckCredit != nil {
 		s.CheckCredit = *req.CheckCredit
+	}
+	if req.ProbeChat != nil {
+		s.ProbeChat = *req.ProbeChat
 	}
 	if req.Concurrency != nil {
 		s.Concurrency = *req.Concurrency

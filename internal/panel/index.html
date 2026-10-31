@@ -1337,7 +1337,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   <div class="dlg" style="width:820px">
     <header>
       <h3>账号巡检</h3>
-      <div class="hint">封号检测：用户请求或账号状态命中 <b>code 11140</b> 即移入「封号池」（请求命中实时生效，巡检时再按周期核对账号状态）。积分检测：后台按周期调余额接口，剩余 <b>0</b> 移入「无积分」。分组不存在时自动创建（隔离分组，不进入公共池）。巡检会**跳过「封号池」内的账号**（解封后移回公共池即恢复覆盖）。</div>
+      <div class="hint">封号检测：用户请求命中 <b>code 11140</b> 时实时移入「封号池」；巡检时只用<b>余额接口的返回码</b>顺带核对（<b>不发对话、不消耗积分</b>）。积分检测：后台按周期调余额接口，剩余 <b>0</b> 移入「无积分」。分组不存在时自动创建（隔离分组，不进入公共池）。巡检会**跳过「封号池」内的账号**（解封后移回公共池即恢复覆盖）。</div>
     </header>
     <div class="body">
       <div class="patrol-cfg">
@@ -1352,7 +1352,7 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
         <label><input type="checkbox" id="patrolDry"> 试运行（只报告不改分组）</label>
       </div>
       <div class="patrol-cfg patrol-checks">
-        <label title="用户请求命中 11140 时实时移入；巡检时再发一次对话确认账号状态"><input type="checkbox" id="patrolBan"> 封号检测（code 11140）</label>
+        <label title="用户请求命中 11140 时实时移入；巡检只用余额接口的返回码核对（零对话消耗，绝不主动测活）"><input type="checkbox" id="patrolBan"> 封号检测（code 11140）</label>
         <label title="巡检时在后台调余额查询接口，剩余 0 即移入无积分池（不消耗对话积分）"><input type="checkbox" id="patrolCredit"> 积分检测（余额 0）</label>
       </div>
       <div class="patrol-bar">
