@@ -1,7 +1,7 @@
 'use strict';
 const $ = id => document.getElementById(id);
 const COLORS = ['#5b7cfa','#3ddc97','#f5b544','#c084fc','#f0655f','#38bdf8','#fb923c','#a3e635'];
-const state = { groups: [], accounts: [], selected: 'public', editing: null, selPools: new Set(), exportTab: 'pools', exportPools: new Set(), groupColor: COLORS[0], proxyGroup: null, proxyType: 'socks5h', importGroup: null, importTab: 'single', promptGroup: null, confirm: null, publicProxy: null, sel: new Set(), revealed: {}, moveUids: [] };
+const state = { groups: [], accounts: [], selected: 'public', editing: null, selPools: new Set(), exportTab: 'pools', exportPools: new Set(), groupColor: COLORS[0], proxyGroup: null, proxyType: 'socks5h', importGroup: null, importTab: 'single', promptGroup: null, promptDraft: { system: [], user: [], replaces: [] }, confirm: null, publicProxy: null, sel: new Set(), revealed: {}, moveUids: [] };
 
 function esc(s) { return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 function fmt(n) { return Number(n || 0).toLocaleString('zh-CN'); }
@@ -123,10 +123,14 @@ function shareCard(g) {
 function promptCard(g) {
   const on = !!g.prompt_enabled;
   const n = g.prompt_chars || 0;
-  return '<div class="card wide"><div class="card-h"><h3>系统提示词</h3>' + (on ? '<span class="tag accent">已启用 · ' + n + ' 字</span>' : '<span class="tag mute">继承全局</span>') + '</div>' +
-    '<label class="switch-row"><span class="sw-text"><b>启用本组专属系统提示词</b><em>' + (on ? '本组密钥请求的 system 会被替换为下方内容' : '沿用配置页 prompt.mode 设置') + '</em></span><input type="checkbox" data-act="toggle-prompt"' + (on ? ' checked' : '') + '><span class="track"><i></i></span></label>' +
-    (on && g.prompt_preview ? '<div class="hint" style="margin-top:8px">预览：<code style="font:11px var(--mono);color:var(--ink-2)">' + esc(g.prompt_preview) + '</code></div>' : '') +
-    '<div class="card-f"><span>只影响本组密钥的 /v1/chat/completions 与 /v1/responses</span><span class="grow"></span><button class="xs ghost" data-act="edit-prompt">' + (on ? '编辑' : '配置') + '</button></div></div>';
+  const ec = g.prompt_entries || 0, rc = g.prompt_replaces || 0;
+  const bits = [];
+  if (ec) bits.push(ec + ' 条提示词');
+  if (rc) bits.push(rc + ' 条替换');
+  return '<div class="card wide"><div class="card-h"><h3>提示词规则</h3>' + (on ? '<span class="tag accent">已启用 · ' + (bits.length ? bits.join(' · ') : '空规则') + '</span>' : '<span class="tag mute">继承全局</span>') + '</div>' +
+    '<label class="switch-row"><span class="sw-text"><b>启用本组专属提示词规则</b><em>' + (on ? '系统/用户提示词与关键词替换对本组密钥请求生效' : '沿用配置页 prompt.mode 设置') + '</em></span><input type="checkbox" data-act="toggle-prompt"' + (on ? ' checked' : '') + '><span class="track"><i></i></span></label>' +
+    (on && g.prompt_preview ? '<div class="hint" style="margin-top:8px">系统提示词预览：<code style="font:11px var(--mono);color:var(--ink-2)">' + esc(g.prompt_preview) + '</code></div>' : '') +
+    '<div class="card-f"><span>只影响本组密钥的 /v1/chat/completions 与 /v1/responses' + (on && n ? ' · ' + n + ' 字' : '') + '</span><span class="grow"></span><button class="xs ghost" data-act="edit-prompt">' + (on ? '编辑' : '配置') + '</button></div></div>';
 }
 // 测活结果：成功带上模型 / 耗时 / 回复片段；失败按阶段（模型目录 / 对话）给出原因。
 // 服务端对上游失败仍回 200 + ok:false（与代理测试同口径），因此这里按 r.ok 选 toast 颜色。
@@ -329,33 +333,96 @@ function updateProxyUI() {
   $('proxyHint').textContent = proxyHint(state.proxyType);
   const p = $('proxyPort'); if (!p.value || p.value === '1080' || p.value === '8080') p.value = state.proxyType === 'http' ? 8080 : 1080;
 }
-function updatePromptCount() { $('promptCount').textContent = ($('promptText').value || '').length + ' 字'; }
-// openPromptModal 先按需 GET 全文（列表只回预览），再展示编辑器。
+/* ── 提示词规则编辑器 ────────────────────────────────────────────────
+ * 规则拆成两类：多条提示词（system 整体替换客户端 system / user 前置注入）与
+ * 关键词替换（请求消息文本里出现即替换）。列表接口只回条数与预览，正文在打开
+ * 弹窗时按需 GET 一次。
+ *
+ * 增删都先 readPromptRows() 把当前 DOM 收进 state.promptDraft 再重渲染：否则
+ * "删第 2 条"时第 3 条刚输入的内容会被上一轮 DOM 覆盖（行下标会整体前移）。 */
+const PROMPT_ROLE_NAME = { system: '系统提示词', user: '用户提示词' };
+function promptTextRow(kind, text, idx) {
+  const ph = kind === 'system' ? '例如：你是一个只回答数据查询问题的助手，回答直接、简短。' : '例如：先用一句话给结论，再列要点。';
+  return '<div class="pr-row"><textarea class="code-area" data-pr-text data-kind="' + kind + '" data-idx="' + idx + '" rows="3" placeholder="' + ph + '">' + esc(text || '') + '</textarea>' +
+    '<button class="xs ghost danger pr-del" data-act="prompt-del" data-kind="' + kind + '" data-idx="' + idx + '">删除</button></div>';
+}
+function promptReplaceRow(r, idx) {
+  const scope = r.scope || 'all';
+  const opt = (v, t) => '<option value="' + v + '"' + (scope === v ? ' selected' : '') + '>' + t + '</option>';
+  return '<div class="pr-row pr-kv">' +
+    '<input data-pr-match data-idx="' + idx + '" placeholder="关键词" value="' + esc(r.match || '') + '">' +
+    '<span class="pr-arrow">→</span>' +
+    '<input data-pr-with data-idx="' + idx + '" placeholder="替换为（留空 = 删除）" value="' + esc(r.with || '') + '">' +
+    '<select data-pr-scope data-idx="' + idx + '">' + opt('all', '全部消息') + opt('system', '仅 system') + opt('user', '仅 user') + '</select>' +
+    '<button class="xs ghost danger pr-del" data-act="prompt-del" data-kind="replace" data-idx="' + idx + '">删除</button></div>';
+}
+function renderPromptRows() {
+  const d = state.promptDraft;
+  $('promptSystemList').innerHTML = d.system.length ? d.system.map((x, i) => promptTextRow('system', x, i)).join('') : '<div class="pr-empty">还没有' + PROMPT_ROLE_NAME.system + '，点右上角「添加」</div>';
+  $('promptUserList').innerHTML = d.user.length ? d.user.map((x, i) => promptTextRow('user', x, i)).join('') : '<div class="pr-empty">还没有' + PROMPT_ROLE_NAME.user + '，点右上角「添加」</div>';
+  $('promptReplaceList').innerHTML = d.replaces.length ? d.replaces.map((x, i) => promptReplaceRow(x, i)).join('') : '<div class="pr-empty">还没有关键词替换规则，点右上角「添加」</div>';
+}
+function readPromptRows() {
+  const d = state.promptDraft;
+  d.system = Array.from(document.querySelectorAll('#promptSystemList [data-pr-text]')).map(el => el.value);
+  d.user = Array.from(document.querySelectorAll('#promptUserList [data-pr-text]')).map(el => el.value);
+  d.replaces = Array.from(document.querySelectorAll('#promptReplaceList .pr-row')).map(row => ({
+    match: row.querySelector('[data-pr-match]').value,
+    with: row.querySelector('[data-pr-with]').value,
+    scope: row.querySelector('[data-pr-scope]').value,
+  }));
+}
+function promptCounts() {
+  const d = state.promptDraft;
+  const sys = d.system.filter(s => s.trim()).length;
+  const usr = d.user.filter(s => s.trim()).length;
+  const rep = d.replaces.filter(r => (r.match || '').trim()).length;
+  const chars = d.system.concat(d.user).reduce((n, s) => n + (s || '').length, 0);
+  return { sys, usr, rep, chars };
+}
+function updatePromptCount() {
+  const c = promptCounts();
+  $('promptCount').textContent = '系统 ' + c.sys + ' 条 · 用户 ' + c.usr + ' 条 · 关键词 ' + c.rep + ' 条 · 共 ' + c.chars + ' 字';
+}
+// openPromptModal 先按需 GET 全文（列表只回条数/预览），再展示编辑器。
 // forceEnable：从卡片开关"开启"进入时强制勾选，用户看到内容后再保存。
 async function openPromptModal(g, forceEnable) {
   state.promptGroup = g.id;
+  state.promptDraft = { system: [], user: [], replaces: [] };
   $('promptGroupName').textContent = '· ' + g.name;
   const r = await api('groups/' + g.id + '/prompt');
+  const entries = Array.isArray(r.entries) ? r.entries : [];
+  entries.forEach(e => { if (!e) return; if (e.role === 'user') state.promptDraft.user.push(e.text || ''); else state.promptDraft.system.push(e.text || ''); });
+  // 旧版只有单条正文：补成一条系统提示词，保证编辑器打开就能看到原文。
+  if (!entries.length && r.text) state.promptDraft.system.push(r.text);
+  if (!state.promptDraft.system.length && !state.promptDraft.user.length) state.promptDraft.system.push('');
+  state.promptDraft.replaces = (Array.isArray(r.replaces) ? r.replaces : []).map(x => ({ match: (x && x.match) || '', with: (x && x.with) || '', scope: (x && x.scope) || 'all' }));
   $('promptEnabled').checked = forceEnable ? true : !!r.enabled;
-  $('promptText').value = r.text || '';
+  renderPromptRows();
   updatePromptCount();
   openVeil('promptVeil');
 }
 async function savePrompt() {
   const g = state.promptGroup ? groupOf(state.promptGroup) : null;
   if (!g) return;
+  readPromptRows();
+  const d = state.promptDraft;
+  const entries = [];
+  d.system.forEach(x => { if (x.trim()) entries.push({ role: 'system', text: x }); });
+  d.user.forEach(x => { if (x.trim()) entries.push({ role: 'user', text: x }); });
+  const replaces = d.replaces.filter(r => (r.match || '').trim()).map(r => ({ match: r.match, with: r.with, scope: r.scope }));
   const enabled = $('promptEnabled').checked;
-  const text = $('promptText').value;
-  if (enabled && !text.trim()) { toast('已开启开关，请填写提示词内容（或关闭开关再保存）', 'err'); return; }
+  if (enabled && !entries.length && !replaces.length) { toast('已开启开关，请至少填写一条提示词或关键词替换（或关闭开关再保存）', 'err'); return; }
   try {
-    await api('groups/' + g.id + '/prompt', { method: 'PUT', body: JSON.stringify({ enabled, text }) });
+    await api('groups/' + g.id + '/prompt', { method: 'PUT', body: JSON.stringify({ enabled, entries, replaces }) });
   } catch (e) {
     renderDetail(); // 保存失败：卡片开关退回服务端真实状态
     throw e;
   }
   closeVeil('promptVeil'); await load();
-  toast(enabled ? '已保存，下一个请求立即生效' : '已关闭本组提示词，恢复沿用全局设置', enabled ? 'ok' : 'warn');
+  toast(enabled ? '已保存，下一个请求立即生效' : '已关闭本组提示词规则，恢复沿用全局设置', enabled ? 'ok' : 'warn');
 }
+$('promptVeil').addEventListener('input', () => { readPromptRows(); updatePromptCount(); });
 function openImportModal() {
   state.importGroup = state.selected === 'public' ? null : state.selected;
   $('importGroupName').textContent = state.importGroup ? '· ' + groupOf(state.importGroup).name : '· 公共号池';
@@ -377,7 +444,6 @@ function updateImportParse() {
 }
 $('importSingle').addEventListener('input', updateImportParse);
 $('importBatch').addEventListener('input', updateImportParse);
-$('promptText').addEventListener('input', updatePromptCount);
 // 支持一次多选多个 JSON 文件：逐个解析后按 uid 去重合并成一个数组放进批量文本框。
 // 解析失败 / 无有效账号的文件单独计数提示，不影响其他文件。
 $('importFile').addEventListener('change', async () => {
@@ -492,13 +558,35 @@ document.addEventListener('click', async e => {
       const g = selectedGroup(); if (!g) return;
       if (el.checked) { await openPromptModal(g, true); return; } // 开启必须先确认内容
       try {
+        // 关闭时把规则原样回传：只发 enabled=false 的旧版报文会走兼容分支、清掉
+        // 新版的 entries/replaces（下次开启变成空规则）。
         const cur = await api('groups/' + g.id + '/prompt');
-        await api('groups/' + g.id + '/prompt', { method: 'PUT', body: JSON.stringify({ enabled: false, text: cur.text || '' }) });
-        await load(); toast('已关闭本组提示词，恢复沿用全局设置', 'warn');
+        await api('groups/' + g.id + '/prompt', { method: 'PUT', body: JSON.stringify({ enabled: false, entries: cur.entries || [], replaces: cur.replaces || [] }) });
+        await load(); toast('已关闭本组提示词规则，恢复沿用全局设置', 'warn');
       } catch (e) { el.checked = true; throw e; } // 失败回滚开关视觉
       return;
     }
     if (act === 'prompt-save') { await savePrompt(); return; }
+    if (act === 'prompt-add') {
+      readPromptRows();
+      const kind = el.dataset.role;
+      if (kind === 'replace') state.promptDraft.replaces.push({ match: '', with: '', scope: 'all' });
+      else if (kind === 'user') state.promptDraft.user.push('');
+      else state.promptDraft.system.push('');
+      renderPromptRows(); updatePromptCount();
+      const list = $(kind === 'replace' ? 'promptReplaceList' : (kind === 'user' ? 'promptUserList' : 'promptSystemList'));
+      const focus = list.querySelectorAll('input,textarea'); if (focus.length) focus[focus.length - 1].focus();
+      return;
+    }
+    if (act === 'prompt-del') {
+      readPromptRows();
+      const kind = el.dataset.kind, idx = Number(el.dataset.idx) || 0;
+      if (kind === 'replace') state.promptDraft.replaces.splice(idx, 1);
+      else if (kind === 'user') state.promptDraft.user.splice(idx, 1);
+      else state.promptDraft.system.splice(idx, 1);
+      renderPromptRows(); updatePromptCount();
+      return;
+    }
     if (act === 'edit-proxy') { openProxyModal(selectedGroup() || null); return; }
     if (act === 'proxy-type') { state.proxyType = el.dataset.type; updateProxyUI(); return; }
     if (act === 'proxy-save') {

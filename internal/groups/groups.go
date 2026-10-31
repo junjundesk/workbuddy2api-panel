@@ -18,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/junjundesk/workbuddy2api-panel/internal/prompt"
 )
 
 // Proxy 分组出站代理配置。Type 取 http / socks5 / socks5h。
@@ -39,10 +41,16 @@ type Group struct {
 	// PromptEnabled / PromptText 分组专属系统提示词（replaces 语义：整体替换客户端
 	// system / developer 消息，见 internal/prompt 与 internal/server 的 effectivePrompt）。
 	// 关闭或文本空白时沿用全局 prompt 配置；改动经面板保存即对后续请求生效。
-	PromptEnabled bool   `json:"prompt_enabled,omitempty"`
-	PromptText    string `json:"prompt_text,omitempty"`
-	KeyHash       string `json:"key_hash,omitempty"`
-	KeyHint       string `json:"key_hint,omitempty"`
+	//
+	// PromptText 是**旧版单条文本**的兼容字段（面板老版本 / 手工编辑的 groups.json）；
+	// 新版走 PromptEntries + PromptReplaces（多条系统/用户提示词 + 关键词替换，见
+	// internal/prompt/rules.go）。两者同时存在时以条目为准。
+	PromptEnabled  bool             `json:"prompt_enabled,omitempty"`
+	PromptText     string           `json:"prompt_text,omitempty"`
+	PromptEntries  []prompt.Entry   `json:"prompt_entries,omitempty"`
+	PromptReplaces []prompt.Replace `json:"prompt_replaces,omitempty"`
+	KeyHash        string           `json:"key_hash,omitempty"`
+	KeyHint        string           `json:"key_hint,omitempty"`
 	// Key 分组密钥明文（groups.json 0600 落盘，供面板手动查看）；旧分组可能为空。
 	Key       string    `json:"key,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
@@ -291,48 +299,122 @@ func (s *Store) SetPublicProxy(p *Proxy) error {
 	return nil
 }
 
-// MaxPromptBytes 单分组系统提示词文本上限（64 KiB）。
+// MaxPromptBytes 单分组提示词配置总字节上限（64 KiB）。
 //
-// 分组提示词整段替换 system（2KB 级别就够用），上限只用于挡住"误把整个语料
-// 粘进来"：groups.json 每次写操作都会整体重写、读路径也随分组快照加载，无上限
-// 会让一次误操作长期拖慢所有分组的配置读写。
+// 规则由"多条提示词 + 关键词替换"组成，整段替换 system（2KB 级别就够用），上限
+// 只用于挡住"误把整个语料粘进来"：groups.json 每次写操作都会整体重写、读路径也随
+// 分组快照加载，无上限会让一次误操作长期拖慢所有分组的配置读写。
 const MaxPromptBytes = 64 << 10
 
-// Prompt 返回分组当前生效的系统提示词（未启用 / 文本全空白 / 分组不存在 → false）。
+// 规则条数与单条关键词长度上限。规则是**每请求**都要线性遍历一次的热配置，
+// 条数失控会抬高所有聊天请求的固定开销；上限只防误配置，不影响正常使用。
+const (
+	MaxPromptEntries     = 16
+	MaxPromptReplaces    = 32
+	MaxReplaceMatchBytes = 1 << 10
+)
+
+// Prompt 返回分组当前生效的**系统**提示词文本（未启用 / 无系统条目 / 分组不存在 → false）。
 //
-// 与 Get 的区别：这是每个聊天请求都会走一次的热路径，只做 RLock + map 查找 +
-// 返回不可变 string，不 cloneGroup（不复制 Members 切片）。
-//
-// "文本全空白视为未启用"是防御性判定：groups.json 可能被手工编辑成
-// prompt_enabled=true 但正文为空，此时宁可沿用全局提示词，也不能给上游塞一条
-// 空 system（那会变成另一种指纹差异）。
+// 兼容旧字段：条目为空时回退 PromptText。这是每个聊天请求都会走一次的热路径，
+// 只做 RLock + map 查找 + 字符串拼接，不 cloneGroup（不复制 Members 切片）。
 func (s *Store) Prompt(id string) (string, bool) {
-	id = strings.TrimSpace(id)
-	if id == "" {
+	rs, ok := s.Rules(id)
+	if !ok {
 		return "", false
 	}
-	s.mu.RLock()
-	g, ok := s.groups[id]
-	if !ok || !g.PromptEnabled || strings.TrimSpace(g.PromptText) == "" {
-		s.mu.RUnlock()
+	text := rs.SystemText()
+	if strings.TrimSpace(text) == "" {
 		return "", false
 	}
-	text := g.PromptText
-	s.mu.RUnlock()
 	return text, true
 }
 
-// SetPrompt 设置/清除分组专属系统提示词。
-//   - enabled 且文本全空白 → 报错（避免"开关开着但等于没开"的静默状态）；
-//   - 关闭开关时保留文本，下次开启无需重填，但不生效；
-//   - 写盘失败回滚内存值（与 SetProxy 同 pattern）。
+// Rules 返回分组当前生效的提示词规则（未启用 / 规则为空 / 分组不存在 → false）。
+//
+// 兼容口径：旧版只有 PromptText（单条 system），读取时补成一条 system 条目；
+// 新写入的 entries/replaces 优先。返回的 Rules 已 Normalize（空条目已丢弃）。
+func (s *Store) Rules(id string) (prompt.Rules, bool) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return prompt.Rules{}, false
+	}
+	s.mu.RLock()
+	g, ok := s.groups[id]
+	if !ok || !g.PromptEnabled {
+		s.mu.RUnlock()
+		return prompt.Rules{}, false
+	}
+	rs := prompt.Rules{Entries: g.PromptEntries, Replaces: g.PromptReplaces}
+	if len(rs.Entries) == 0 && len(rs.Replaces) == 0 && strings.TrimSpace(g.PromptText) != "" {
+		rs.Entries = []prompt.Entry{{Role: prompt.RoleSystem, Text: g.PromptText}}
+	}
+	s.mu.RUnlock()
+	rs = rs.Normalize()
+	if rs.Empty() {
+		return prompt.Rules{}, false
+	}
+	return rs, true
+}
+
+// SetPrompt 设置旧版单条系统提示词（保留给旧面板请求与旧调用方）。
+//
+// 关闭开关时保留文本，下次开启无需重填，但不生效；写盘失败回滚内存值
+// （与 SetProxy 同 pattern）。
 func (s *Store) SetPrompt(id string, enabled bool, text string) error {
-	if len(text) > MaxPromptBytes {
-		return fmt.Errorf("prompt text too large: %d bytes (limit %d)", len(text), MaxPromptBytes)
+	var rs prompt.Rules
+	if strings.TrimSpace(text) != "" {
+		rs.Entries = []prompt.Entry{{Role: prompt.RoleSystem, Text: text}}
 	}
-	if enabled && strings.TrimSpace(text) == "" {
-		return fmt.Errorf("prompt text is required when enabled")
+	rs = rs.Normalize()
+	if err := checkPromptRules(enabled, rs); err != nil {
+		return err
 	}
+	return s.writePrompt(id, enabled, text, rs)
+}
+
+// SetPromptRules 设置多条提示词（system / user）+ 关键词替换规则。
+//   - enabled 且规则全空 → 报错（避免"开关开着但等于没开"的静默状态）；
+//   - 关闭开关时保留规则，下次开启无需重填，但不生效；
+//   - 写盘失败回滚内存值。
+func (s *Store) SetPromptRules(id string, enabled bool, rs prompt.Rules) error {
+	rs = rs.Normalize()
+	if err := checkPromptRules(enabled, rs); err != nil {
+		return err
+	}
+	return s.writePrompt(id, enabled, "", rs)
+}
+
+// checkPromptRules 校验开关与规则的组合约束、数量上限与总字节上限。
+// 关闭状态下同样校验字节上限：一次误粘就该被挡住，不该先写进 groups.json 再说。
+func checkPromptRules(enabled bool, rs prompt.Rules) error {
+	if enabled && rs.Empty() {
+		return fmt.Errorf("prompt rules are required when enabled")
+	}
+	if len(rs.Entries) > MaxPromptEntries {
+		return fmt.Errorf("too many prompt entries: %d (limit %d)", len(rs.Entries), MaxPromptEntries)
+	}
+	if len(rs.Replaces) > MaxPromptReplaces {
+		return fmt.Errorf("too many keyword replacements: %d (limit %d)", len(rs.Replaces), MaxPromptReplaces)
+	}
+	total := 0
+	for _, e := range rs.Entries {
+		total += len(e.Text)
+	}
+	for _, rp := range rs.Replaces {
+		if len(rp.Match) > MaxReplaceMatchBytes {
+			return fmt.Errorf("keyword too long: %d bytes (limit %d)", len(rp.Match), MaxReplaceMatchBytes)
+		}
+		total += len(rp.Match) + len(rp.With)
+	}
+	if total > MaxPromptBytes {
+		return fmt.Errorf("prompt text too large: %d bytes (limit %d)", total, MaxPromptBytes)
+	}
+	return nil
+}
+
+// writePrompt 两条写路径的共同实现：持锁写内存 + 落盘，失败回滚。
+func (s *Store) writePrompt(id string, enabled bool, text string, rs prompt.Rules) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	g, ok := s.groups[id]
@@ -340,9 +422,12 @@ func (s *Store) SetPrompt(id string, enabled bool, text string) error {
 		return os.ErrNotExist
 	}
 	oldEnabled, oldText := g.PromptEnabled, g.PromptText
+	oldEntries, oldReplaces := g.PromptEntries, g.PromptReplaces
 	g.PromptEnabled, g.PromptText = enabled, text
+	g.PromptEntries, g.PromptReplaces = rs.Entries, rs.Replaces
 	if err := s.saveLocked(); err != nil {
 		g.PromptEnabled, g.PromptText = oldEnabled, oldText
+		g.PromptEntries, g.PromptReplaces = oldEntries, oldReplaces
 		return err
 	}
 	return nil

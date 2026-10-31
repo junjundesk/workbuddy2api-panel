@@ -15,6 +15,7 @@ import (
 
 	"github.com/junjundesk/workbuddy2api-panel/internal/groups"
 	"github.com/junjundesk/workbuddy2api-panel/internal/pool"
+	"github.com/junjundesk/workbuddy2api-panel/internal/prompt"
 	"github.com/junjundesk/workbuddy2api-panel/internal/upstream"
 )
 
@@ -44,9 +45,11 @@ type groupView struct {
 	// 分组专属系统提示词：列表只回元数据（开关 / 字数 / 首 60 字预览），
 	// 正文按需 GET /panel/api/groups/{id}/prompt —— 分组页每次操作都会重拉列表，
 	// 把最长 64 KiB 的正文塞进列表没有展示价值。
-	PromptEnabled bool   `json:"prompt_enabled"`
-	PromptChars   int    `json:"prompt_chars,omitempty"`
-	PromptPreview string `json:"prompt_preview,omitempty"`
+	PromptEnabled  bool   `json:"prompt_enabled"`
+	PromptChars    int    `json:"prompt_chars,omitempty"`
+	PromptPreview  string `json:"prompt_preview,omitempty"`
+	PromptEntries  int    `json:"prompt_entries,omitempty"`
+	PromptReplaces int    `json:"prompt_replaces,omitempty"`
 }
 
 func (p *Panel) groupViews() []groupView {
@@ -64,8 +67,13 @@ func (p *Panel) groupViews() []groupView {
 		v.Proxy = toProxyView(g.Proxy)
 		v.PromptEnabled = g.PromptEnabled
 		if g.PromptEnabled {
-			v.PromptChars = utf8.RuneCountInString(g.PromptText)
-			v.PromptPreview = promptPreview(g.PromptText)
+			v.PromptChars = utf8.RuneCountInString(groupPromptText(g))
+			v.PromptPreview = promptPreview(groupPromptText(g))
+			v.PromptEntries = len(g.PromptEntries)
+			if v.PromptEntries == 0 && strings.TrimSpace(g.PromptText) != "" {
+				v.PromptEntries = 1 // 旧版单条文本也算一条
+			}
+			v.PromptReplaces = len(g.PromptReplaces)
 		}
 		for _, a := range all {
 			if a.Group != g.ID {
@@ -340,6 +348,19 @@ func (p *Panel) groupRevealKey(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "key": key})
 }
 
+// groupPromptText 返回分组配置里的系统提示词正文（新版条目优先，旧版单条回退）。
+// 只用于面板展示与字数统计，不参与请求改写（请求侧走 groups.Rules）。
+func groupPromptText(g groups.Group) string {
+	if len(g.PromptEntries) == 0 {
+		return g.PromptText
+	}
+	rs := prompt.Rules{Entries: g.PromptEntries}
+	if text := rs.SystemText(); text != "" {
+		return text
+	}
+	return g.PromptText
+}
+
 // promptPreviewRunes 分组列表里提示词预览的字符数上限。
 const promptPreviewRunes = 60
 
@@ -367,7 +388,11 @@ func promptPreview(text string) string {
 	return b.String()
 }
 
-// groupGetPrompt 返回分组专属系统提示词全文（分组页打开编辑器时按需拉取）。
+// groupGetPrompt 返回分组提示词规则的全文（分组页打开编辑器时按需拉取）。
+//
+// 同时返回三段口径，前端按需使用：
+//   - entries / replaces：新版多条规则（编辑器回填的唯一来源）；
+//   - text / chars：系统提示词合并后的文本与字数（旧前端与卡片预览仍可用）。
 func (p *Panel) groupGetPrompt(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.Groups == nil {
 		writeErr(w, http.StatusNotImplemented, "groups not available")
@@ -378,19 +403,37 @@ func (p *Panel) groupGetPrompt(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "group not found")
 		return
 	}
+	rs := prompt.Rules{Entries: g.PromptEntries, Replaces: g.PromptReplaces}.Normalize()
+	if len(g.PromptEntries) == 0 && strings.TrimSpace(g.PromptText) != "" {
+		rs.Entries = []prompt.Entry{{Role: prompt.RoleSystem, Text: g.PromptText}}
+	}
+	if rs.Entries == nil {
+		rs.Entries = []prompt.Entry{}
+	}
+	if rs.Replaces == nil {
+		rs.Replaces = []prompt.Replace{}
+	}
+	text := rs.SystemText()
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":      true,
-		"enabled": g.PromptEnabled,
-		"text":    g.PromptText,
-		"chars":   utf8.RuneCountInString(g.PromptText),
+		"ok":       true,
+		"enabled":  g.PromptEnabled,
+		"text":     text,
+		"chars":    utf8.RuneCountInString(text),
+		"entries":  rs.Entries,
+		"replaces": rs.Replaces,
 	})
 }
 
-// groupSetPrompt 保存分组专属系统提示词（开关 + 文本）。
+// groupSetPrompt 保存分组提示词规则（开关 + 多条提示词 + 关键词替换）。
+//
+// 兼容两种请求体：
+//   - {"enabled":true,"text":"..."}：旧版单条系统提示词（旧面板 / 脚本）；
+//   - {"enabled":true,"entries":[...],"replaces":[...]}：新版规则（只要出现任一新
+//     字段就按新规则处理，text 不再写盘——避免新旧两套正文并存后口径漂移）。
 //
 // 生效时机：groups.Store 每次写操作同步落盘并更新内存，请求侧每个请求读一次
-// Store.Prompt —— 保存后的下一个请求即生效，无需重启（与分组代理同理）。
+// Store.Rules —— 保存后的下一个请求即生效，无需重启（与分组代理同理）。
 func (p *Panel) groupSetPrompt(w http.ResponseWriter, r *http.Request) {
 	if p.cfg.Groups == nil {
 		writeErr(w, http.StatusNotImplemented, "groups not available")
@@ -398,14 +441,27 @@ func (p *Panel) groupSetPrompt(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.PathValue("id")
 	var req struct {
-		Enabled bool   `json:"enabled"`
-		Text    string `json:"text"`
+		Enabled  bool             `json:"enabled"`
+		Text     *string          `json:"text"`
+		Entries  []prompt.Entry   `json:"entries"`
+		Replaces []prompt.Replace `json:"replaces"`
 	}
 	if err := decodeJSONBody(r, &req); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := p.cfg.Groups.SetPrompt(id, req.Enabled, req.Text); err != nil {
+	var err error
+	rulesMode := req.Entries != nil || req.Replaces != nil
+	if rulesMode {
+		err = p.cfg.Groups.SetPromptRules(id, req.Enabled, prompt.Rules{Entries: req.Entries, Replaces: req.Replaces})
+	} else {
+		text := ""
+		if req.Text != nil {
+			text = *req.Text
+		}
+		err = p.cfg.Groups.SetPrompt(id, req.Enabled, text)
+	}
+	if err != nil {
 		status := http.StatusBadRequest
 		if os.IsNotExist(err) {
 			status = http.StatusNotFound
@@ -413,8 +469,13 @@ func (p *Panel) groupSetPrompt(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, status, err.Error())
 		return
 	}
-	log.Printf("panel: 分组系统提示词已保存 id=%s enabled=%v chars=%d（下一请求生效）",
-		id, req.Enabled, utf8.RuneCountInString(req.Text))
+	g, _ := p.cfg.Groups.Get(id)
+	rs := prompt.Rules{}
+	if g.ID != "" {
+		rs = prompt.Rules{Entries: g.PromptEntries, Replaces: g.PromptReplaces}.Normalize()
+	}
+	log.Printf("panel: 分组提示词规则已保存 id=%s enabled=%v entries=%d replaces=%d chars=%d（下一请求生效）",
+		id, req.Enabled, len(rs.Entries), len(rs.Replaces), utf8.RuneCountInString(rs.SystemText()))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "group": p.groupView(id)})
 }
 

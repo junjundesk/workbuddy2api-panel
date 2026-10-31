@@ -133,6 +133,9 @@ func (h *Handler) globalPrompt() (mode, text string) {
 // 分组文本（prompt.RewriteObject）。因此分组请求**不参与内容拦截降级**——降级只
 // 服务 passthrough/append，而分组提示词是运营者显式配置的文本，被中性提示词悄悄
 // 替换掉只会让"配了没生效"变成玄学。
+//
+// 新版分组提示词规则（多条 system/user + 关键词替换）在 groupRules 里单独解析，
+// 优先级高于这里的单条文本；本函数保留旧字段口径（Rules 为空时才会走到）。
 func (h *Handler) effectivePrompt(scope authScope) (mode, text string) {
 	mode, text = h.globalPrompt()
 	if scope.GroupID == "" || h.cfg.Groups == nil {
@@ -142,6 +145,22 @@ func (h *Handler) effectivePrompt(scope authScope) (mode, text string) {
 		return "custom", gt
 	}
 	return mode, text
+}
+
+// groupRules 返回本次请求所属分组的提示词规则（多条提示词 + 关键词替换）。
+//
+// 与 effectivePrompt 同口径：判定依据是**密钥作用域**（scope.GroupID），不是实际
+// 选中账号的归属。分组规则优先于全局 prompt.mode：只要分组开启且规则非空，就按
+// 规则改写出站请求（系统提示词整体替换、用户提示词前置注入、关键词替换），不再
+// 走全局的 custom/append/passthrough 分支。
+//
+// 为什么分组规则**不参与内容拦截降级**：规则是运营者显式配置的文本，被中性提示
+// 词悄悄替换掉只会让"配了没生效"变成玄学（与分组单条提示词的历史口径一致）。
+func (h *Handler) groupRules(scope authScope) (prompt.Rules, bool) {
+	if scope.GroupID == "" || h.cfg.Groups == nil {
+		return prompt.Rules{}, false
+	}
+	return h.cfg.Groups.Rules(scope.GroupID)
 }
 
 // softCooldown 返回当前生效的软冷却基数（热改优先，<=0 回退默认）。
@@ -883,13 +902,19 @@ func (h *Handler) chatCompletionsIn(w http.ResponseWriter, r *http.Request, in *
 		}
 	}
 
-	// 提示词模式解析（每请求一次，轮转/降级重试复用同一结果）：分组覆盖优先，
-	// 未覆盖时取全局（面板热配置 > 启动期静态字段）。分组覆盖的有效模式是 custom，
-	// 因此本组请求不进降级路径（见 effectivePrompt 注释）。
+	// 提示词模式解析（每请求一次，轮转/降级重试复用同一结果）：分组规则 > 分组单条
+	// 提示词/全局（面板热配置 > 启动期静态字段）。分组规则与分组单条提示词都按
+	// "运营者显式配置"处理，因此本组请求不进降级路径（见 groupRules 注释）。
 	promptMode, promptText := h.effectivePrompt(scope)
+	// 分组规则（多条提示词 + 关键词替换）优先于全局模式；规则存在时不再进降级分支。
+	rules, hasRules := h.groupRules(scope)
 
 	degradedApplied := false
-	if obj != nil {
+	if hasRules {
+		if obj != nil {
+			prompt.ApplyObject(obj, rules)
+		}
+	} else if obj != nil {
 		switch {
 		case promptMode == "custom" && promptText != "":
 			prompt.RewriteObject(obj, promptText)
@@ -1082,7 +1107,7 @@ func (h *Handler) chatCompletionsIn(w http.ResponseWriter, r *http.Request, in *
 			// 降级重试同样退化为 replace——原文在场只会确定性再撞 400）。
 			// 第二次仍被拦（用户内容本身触发审核）→ 回内容防火墙错误（见下分支）。
 			// 内容问题非账号问题：applyErrorPolicy 不罚账号（见 ErrContentBlocked 分支）。
-			if kind == upstream.ErrContentBlocked && (promptMode == "passthrough" || promptMode == "append") && !degradedApplied {
+			if kind == upstream.ErrContentBlocked && (promptMode == "passthrough" || promptMode == "append") && !degradedApplied && !hasRules {
 				h.degrade.Trigger()
 				if obj != nil {
 					prompt.RewriteObject(obj, prompt.Degraded)
