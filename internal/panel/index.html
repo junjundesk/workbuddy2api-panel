@@ -112,6 +112,26 @@ body {
 .qdot.skip { background: var(--ink-3); }
 @keyframes qpulse { 50% { opacity: .35; } }
 @media (prefers-reduced-motion: reduce) { .qdot.run { animation: none; } }
+/* 本组测活：弹窗内的滚动待办清单。状态点复用任务中心的 .qdot 五态（wait/run/done/err/skip），
+   行布局按测活字段定制（账号 / 状态词 / 结果），与 .qrow 的五行任务行区分开。 */
+.alive-list { max-height: 348px; overflow: auto; margin: 14px -20px 0; border-top: 1px solid var(--line-soft); }
+.alive-row {
+  display: grid; grid-template-columns: 14px minmax(140px, 190px) 92px minmax(0, 1fr);
+  gap: 10px; align-items: center; padding: 8px 20px; font-size: 13px;
+  border-bottom: 1px solid var(--line-soft);
+}
+.alive-row:last-child { border-bottom: none; }
+.alive-row:hover { background: var(--surface-2); }
+.alive-row .who { min-width: 0; }
+.alive-row .who .nm { font-weight: 550; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.alive-row .who .id { font: 10.5px var(--mono); color: var(--ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.alive-row .st { font-size: 12.5px; color: var(--ink-3); white-space: nowrap; }
+.alive-row.run .st { color: var(--accent); }
+.alive-row.done .st { color: var(--ok); }
+.alive-row.err .st { color: var(--bad); }
+.alive-row .msg { font-size: 12px; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.alive-row .msg .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.alive-row.err .msg { color: var(--bad); }
 .srow { display: grid; grid-template-columns: minmax(150px, 210px) 1fr auto; gap: 14px; align-items: center; padding: 13px 16px; }
 .srow + .srow { border-top: 1px solid var(--line-soft); }
 .srow .who .nm { font-weight: 600; font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1369,6 +1389,26 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
       </div>
     </div>
     <footer><span class="grow"></span><button id="btnPatrolClose">关闭</button></footer>
+  </div>
+</div>
+
+<!-- 本组测活：逐个账号发一句 hi，结果在可滚动的待办清单里逐条更新 -->
+<div class="veil" id="aliveVeil">
+  <div class="dlg" style="width:680px">
+    <header>
+      <h3>本组测活 <span class="hint" id="aliveTitle"></span></h3>
+      <div class="hint">逐个向本组账号发一句 hi，验证账号此刻能否正常对话（每个账号消耗少量积分；<b>不改</b>选号 / 冷却 / 成功率统计）。结果逐条更新在下方清单。</div>
+    </header>
+    <div class="body" style="overflow:hidden;padding-bottom:6px">
+      <div class="qprog" style="padding:0"><div class="qbar"><i id="aliveBar"></i></div><span class="note" id="aliveProgText">准备中…</span></div>
+      <div class="alive-list" id="aliveList"></div>
+    </div>
+    <footer>
+      <span class="note" id="aliveSum"></span>
+      <span class="grow"></span>
+      <button class="ghost" id="aliveStop" disabled>停止</button>
+      <button class="primary" id="btnAliveClose">关闭</button>
+    </footer>
   </div>
 </div>
 

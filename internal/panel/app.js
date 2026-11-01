@@ -642,6 +642,8 @@ function renderAccountGroups(list, groups) {
       '<span class="gs">' + tag(c.ok, 'ok', '可用') + tag(c.cool, 'warn', '冷却') + tag(c.paused, 'warn', '暂停') + tag(c.off, 'bad', '禁用') + tag(c.banned, 'bad', '封号') + '</span>' +
       '<span class="gcred">' + cred + '</span><span class="grow"></span>' +
       (!b.pub && b.items.some(taskEligible) ? '<button class="xs" data-gtask="' + k + '" title="扫描本组账号的成长任务待办并排队执行，进度在任务中心查看">任务执行</button>' : '') +
+      // 本组测活只在分组（独立号池）出现：公共池是混合来源，测活对象不明确，且它是默认池不宜一键打满。
+      (!b.pub && b.items.length ? '<button class="xs" data-galive="' + k + '" title="逐个向本组账号发一句 hi 验证能否正常对话（每号消耗少量积分；不改选号 / 冷却状态），结果在弹窗清单里逐条展示">本组测活</button>' : '') +
       (b.items.length ? '<button class="xs" data-gbulk="checkin" data-g="' + k + '" title="逐个签到本组账号（跳过禁用 / 企业版）">本组签到</button>' +
         '<button class="xs" data-gbulk="balance" data-g="' + k + '" title="逐个刷新本组账号余额">本组余额</button>' : '') +
       '</header><div class="tbl-wrap"><table class="acc gfix">' + cols + head + '<tbody>' + rows + '</tbody></table></div></div>';
@@ -940,6 +942,120 @@ async function runGroupBulk(btn) {
   toast(label + '完成：成功 ' + ok + (fail ? '，失败 ' + fail : ''), fail ? 'err' : 'ok');
   loadOverview(true);
 }
+/* ── 本组测活：逐个账号发一句 hi，结果在弹窗的可滚动清单里逐条更新 ──────
+   与单账号行内「测活」同一接口（POST accounts/{uid}/alive），差别只在编排：
+   一次跑整组、并发 ALIVE_CONC、每行独立更新自己的状态，跑完出汇总。
+   走前端编排而不是后端批量接口：单号结果本来就一条一条回来，天然满足
+   「清单逐条推进」；一次人工诊断动作也不值得引入服务端任务态。 */
+const ALIVE_CONC = 4; // 并发上限：上游是流式对话，压太高容易把本组代理 / 上游限流打满
+const aliveState = { running: false, stop: false, rows: [], name: '' };
+
+function openAliveModal() { $('aliveVeil').classList.add('on'); }
+function closeAliveModal() { $('aliveVeil').classList.remove('on'); }
+// aliveRowHtml 一行清单的初始态：空心点 + 待测。
+function aliveRowHtml(a) {
+  const nick = a.nickname || a.uid.slice(0, 12);
+  return '<div class="alive-row">' +
+    '<span class="qdot wait"></span>' +
+    '<span class="who"><div class="nm">' + esc(nick) + '</div><div class="id">' + esc(a.uid) + '</div></span>' +
+    '<span class="st">待测</span>' +
+    '<span class="msg">—</span></div>';
+}
+// aliveFlat 压平空白并按字符截断。上游错误常带整段 HTML（401 页面）与换行，
+// 塞进单行清单既撑破行高又是注入面——压平 + 截断后统一 esc，一律当纯文本。
+function aliveFlat(s, n) {
+  const t = String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
+  return t.length > n ? t.slice(0, n) + '…' : t;
+}
+// aliveRowText 单号结果文案：成功带模型 / 耗时 / 回复预览，失败按阶段（模型目录 / 对话）给原因。
+// 与 aliveToast 同口径，但这里输出 HTML——弹窗里模型与耗时用等宽字对齐。
+// 上游回来的 error / reply 一律 esc：这些字段内容不受我们控制（错误页甚至是整段 HTML）。
+function aliveRowText(r) {
+  if (!r || !r.ok) {
+    const where = r && r.stage === 'catalog' ? '模型目录' : '对话';
+    return '失败（' + where + '）：' + (esc(aliveFlat(r && r.error, 160)) || '未知错误');
+  }
+  const bits = [];
+  if (r.model) bits.push('<span class="mono">' + esc(r.model) + '</span>');
+  if (r.latency_ms != null) bits.push('<span class="mono">' + r.latency_ms + 'ms</span>');
+  if (r.ttfb_ms) bits.push('首字 <span class="mono">' + r.ttfb_ms + 'ms</span>');
+  if (r.reply) bits.push(esc(r.reply));
+  return bits.length ? bits.join(' · ') : '通过（无回复正文）';
+}
+// aliveSetRow 改写一行：state 取 wait/run/done/err/skip，与 .qdot 五态一一对应。
+function aliveSetRow(row, state, text, msgHtml) {
+  if (!row) return;
+  row.className = 'alive-row' + (state === 'run' ? ' run' : state === 'done' ? ' done' : state === 'err' ? ' err' : '');
+  const dot = row.querySelector('.qdot');
+  if (dot) dot.className = 'qdot ' + (state || 'wait');
+  const st = row.querySelector('.st');
+  if (st) st.textContent = text;
+  const msg = row.querySelector('.msg');
+  if (msg) msg.innerHTML = msgHtml;
+}
+// aliveProgress 进度条与汇总：通过 / 失败 / 未测都算终态，口径同一。
+function aliveProgress() {
+  const rows = aliveState.rows, n = rows.length;
+  let fin = 0, ok = 0, fail = 0, skip = 0;
+  rows.forEach(r => {
+    if (r.state === 'done') { fin++; ok++; }
+    else if (r.state === 'err') { fin++; fail++; }
+    else if (r.state === 'skip') { fin++; skip++; }
+  });
+  $('aliveBar').style.width = (n ? Math.round(fin / n * 100) : 0) + '%';
+  $('aliveProgText').textContent = (aliveState.running ? '测活中 ' : '已结束 ') + fin + ' / ' + n;
+  $('aliveSum').textContent = '通过 ' + ok + (fail ? ' · 失败 ' + fail : '') + (skip ? ' · 未测 ' + skip : '');
+}
+// runGroupAlive 分组卡片「本组测活」：整组进清单 → 并发 ALIVE_CONC 逐号测 → 行级实时更新。
+// 运行中再点（含关掉弹窗后再点）只重开弹窗看进度，不重复开测；测活对象含禁用 / 冷却 / 暂停号
+// （测活是纯诊断动作，正好用来看「冷却中的号上游到底还行不行」）。
+async function runGroupAlive(key) {
+  if (aliveState.running) { openAliveModal(); return; }
+  const d = overviewData || {};
+  const bucket = groupAccountsForView(d.accounts || [], d.groups || []).find(b => b.key === key);
+  const items = bucket ? bucket.items : [];
+  if (!items.length) { toast('本组没有可测活的账号', 'err'); return; }
+  aliveState.running = true; aliveState.stop = false; aliveState.name = bucket.name;
+  aliveState.rows = items.map(a => ({ a: a, state: 'wait' }));
+  $('aliveTitle').textContent = '· ' + bucket.name + '（' + items.length + ' 个账号）';
+  $('aliveList').innerHTML = items.map(aliveRowHtml).join('');
+  $('aliveStop').disabled = false;
+  openAliveModal();
+  aliveProgress();
+
+  const nodes = Array.from($('aliveList').children);
+  let cursor = 0;
+  const worker = async () => {
+    for (;;) {
+      if (aliveState.stop) return;
+      const i = cursor++;
+      if (i >= items.length) return;
+      const row = aliveState.rows[i];
+      row.state = 'run';
+      aliveSetRow(nodes[i], 'run', '测活中…', '发送 hi 并等待回复…');
+      aliveProgress();
+      let r;
+      try { r = await api('accounts/' + encodeURIComponent(row.a.uid) + '/alive', { method: 'POST' }); }
+      catch (e) { r = { ok: false, stage: 'chat', error: e.message || String(e) }; } // 网络层失败只落到这一行，不中断整组
+      row.state = r && r.ok ? 'done' : 'err';
+      aliveSetRow(nodes[i], row.state, row.state === 'done' ? '通过' : '失败', aliveRowText(r));
+      aliveProgress();
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(ALIVE_CONC, items.length) }, worker));
+
+  // 停止后没轮到的行转「已停止」；在途的照常跑完再落终态（不强杀上游连接）。
+  aliveState.rows.forEach((row, i) => {
+    if (row.state === 'wait') { row.state = 'skip'; aliveSetRow(nodes[i], 'skip', '已停止', '未测'); }
+  });
+  aliveState.running = false;
+  $('aliveStop').disabled = true;
+  aliveProgress();
+  const ok = aliveState.rows.filter(r => r.state === 'done').length;
+  const fail = aliveState.rows.filter(r => r.state === 'err').length;
+  toast(bucket.name + ' 测活结束：通过 ' + ok + (fail ? '，失败 ' + fail : ''), fail ? 'err' : 'ok');
+  loadOverview(true); // 测活不改池状态，刷新只为让余额变化立刻可见
+}
 // taskEligible 能跑成长任务的账号：国际版 / 企业版没有成长体系（后端同样门控），禁用号不跑。
 function taskEligible(s) { return !s.disabled && !s.enterprise && s.realm !== 'global'; }
 // syncQueueConcOptions 任务中心并发下拉：上限 = 可执行账号数（自适应），记住上次选择。
@@ -977,6 +1093,8 @@ async function runGroupTasks(btn) {
 if ($('accGroups')) $('accGroups').addEventListener('click', ev => {
   const gt = ev.target.closest('button[data-gtask]');
   if (gt) { if (!gt.disabled) runGroupTasks(gt); return; }
+  const gal = ev.target.closest('button[data-galive]');
+  if (gal) { if (!gal.disabled) runGroupAlive(gal.dataset.galive); return; }
   const bulk = ev.target.closest('button[data-gbulk]');
   if (bulk) { if (!bulk.disabled) runGroupBulk(bulk); return; }
   if (ev.target.closest('button[data-a]')) { onAccClick(ev); return; }
@@ -988,6 +1106,17 @@ if ($('accGroups')) $('accGroups').addEventListener('click', ev => {
   if (card.classList.contains('fold')) st[key] = 1; else delete st[key];
   localStorage.setItem(LS_ACC_FOLD, JSON.stringify(st));
 });
+
+/* 测活弹窗的控制面：关闭只是收起视图（在途请求继续跑、已完成的行保留），
+   停止只掐「还没轮到」的号——在途那条照常跑完，否则上游连接白耗、结果也白丢。 */
+$('btnAliveClose').onclick = closeAliveModal;
+$('aliveStop').onclick = () => {
+  if (!aliveState.running) return;
+  aliveState.stop = true;
+  $('aliveStop').disabled = true;
+  toast('已停止测活：剩余账号不再测试，在途的会跑完', 'warn');
+};
+$('aliveVeil').addEventListener('click', ev => { if (ev.target === $('aliveVeil')) closeAliveModal(); });
 
 $('btnCheckinAll').onclick = async () => {
   try { await api('checkin_all', { method: 'POST' }); toast('全部签到已开始，结果见日志', 'ok'); }

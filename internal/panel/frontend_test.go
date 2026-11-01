@@ -919,3 +919,92 @@ func TestGroupsJSSyntax(t *testing.T) {
 		t.Fatalf("groups.js syntax error:\n%s", out)
 	}
 }
+
+// TestAliveListRowRendering 「本组测活」清单的行渲染：初始态与结果文案（成功 / 两阶段失败）。
+//
+// aliveRowHtml / aliveRowText 是不碰 DOM 的纯函数，切片进 node vm 直接调用即可；
+// esc 由外面注入（app.js 与 groups.js 各有一份同语义实现，这里只校验转义结果）。
+// 两个文件都要测：弹窗交互在主页与分组页各有一份，任一处文案口径漂了都该被拦下。
+func TestAliveListRowRendering(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; alive list test skipped")
+	}
+	const escJS = "const esc = s => String(s == null ? '' : s)" +
+		".replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')" +
+		".replace(/\"/g,'&quot;').replace(/'/g,'&#39;');\n"
+	const invoke = `
+const okRow = aliveRowHtml({ uid: 'wb_x1', nickname: '小鲸鱼<A>' });
+const okText = aliveRowText({ ok: true, model: 'glm-5.2', latency_ms: 823, ttfb_ms: 412, reply: 'Hi & <b>x</b>' });
+const catFail = aliveRowText({ ok: false, stage: 'catalog', error: '模型目录为空' });
+const chatFail = aliveRowText({ ok: false, stage: 'chat', error: 'HTTP 401' });
+const noReply = aliveRowText({ ok: true, model: 'm', latency_ms: 10 });
+const nilResp = aliveRowText(null);
+const xssFail = aliveRowText({ ok: false, stage: 'chat', error: '<h1>401</h1>\n<p>openresty</p>' });
+process.stdout.write([okRow, okText, catFail, chatFail, noReply, nilResp, xssFail].join('\u0001'));`
+	for _, file := range []string{"app.js", "groups.js"} {
+		t.Run(file, func(t *testing.T) {
+			src, err := os.ReadFile(file)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s := string(src)
+			start := strings.Index(s, "function aliveRowHtml")
+			end := strings.Index(s, "function aliveSetRow")
+			if start < 0 || end <= start {
+				t.Fatalf("%s: 找不到 aliveRowHtml / aliveSetRow 切片边界（函数改名了？同步更新本测试）", file)
+			}
+			f, err := os.CreateTemp(t.TempDir(), "alive-*.cjs")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.WriteString(escJS + s[start:end] + invoke); err != nil {
+				t.Fatal(err)
+			}
+			f.Close()
+			out, err := exec.Command(node, f.Name()).CombinedOutput()
+			if err != nil {
+				t.Fatalf("%s: 执行切片脚本失败: %v\n%s", file, err, out)
+			}
+			got := strings.Split(string(out), "\x01")
+			if len(got) != 7 {
+				t.Fatalf("%s: 输出字段数=%d 期望 7: %q", file, len(got), out)
+			}
+			okRow, okText, catFail, chatFail, noReply, nilResp, xssFail := got[0], got[1], got[2], got[3], got[4], got[5], got[6]
+			// 初始态：空心点是「待测」的唯一视觉信号，丢了列表就看不出谁还没跑。
+			for _, want := range []string{"qdot wait", "待测", "小鲸鱼&lt;A&gt;", "wb_x1"} {
+				if !strings.Contains(okRow, want) {
+					t.Errorf("%s: 初始行缺少 %q：%s", file, want, okRow)
+				}
+			}
+			// 成功：模型与耗时走等宽（mono），昵称 / 回复一律转义。
+			for _, want := range []string{"mono\">glm-5.2", "mono\">823ms", "首字", "412ms", "Hi &amp; &lt;b&gt;x&lt;/b&gt;"} {
+				if !strings.Contains(okText, want) {
+					t.Errorf("%s: 成功文案缺少 %q：%s", file, want, okText)
+				}
+			}
+			if strings.Contains(okText, "<b>x</b>") {
+				t.Errorf("%s: 回复正文未转义（XSS 面）：%s", file, okText)
+			}
+			// 失败：阶段要能区分「模型目录」与「对话」，否则排查时不知道卡在哪一步。
+			if catFail != "失败（模型目录）：模型目录为空" {
+				t.Errorf("%s: 目录失败文案=%q", file, catFail)
+			}
+			if chatFail != "失败（对话）：HTTP 401" {
+				t.Errorf("%s: 对话失败文案=%q", file, chatFail)
+			}
+			if !strings.Contains(noReply, "mono\">m") || strings.Contains(noReply, "首字") {
+				t.Errorf("%s: 无首字节时不该出现「首字」：%s", file, noReply)
+			}
+			if nilResp != "失败（对话）：未知错误" {
+				t.Errorf("%s: 空响应兜底文案=%q", file, nilResp)
+			}
+			// 上游错误页是整段 HTML：必须转义 + 压平，否则被 innerHTML 解析成真实元素，
+			// 行高被 <h1>/<p> 撑到 95px，清单排版全乱（也是注入面）。
+			if xssFail != "失败（对话）：&lt;h1&gt;401&lt;/h1&gt; &lt;p&gt;openresty&lt;/p&gt;" {
+				t.Errorf("%s: 错误文本未转义 / 未压平=%q", file, xssFail)
+			}
+		})
+	}
+}
+

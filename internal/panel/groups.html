@@ -127,6 +127,27 @@ input:focus,select:focus,textarea:focus { outline:none; border-color:var(--accen
 .dlg .body { padding:17px 20px; overflow:auto; }
 .dlg footer { padding:12px 20px; border-top:1px solid var(--line-soft); display:flex; gap:9px; align-items:center; }
 .dlg footer .grow { flex:1; }
+/* 本组测活弹窗：进度条 + 滚动待办清单（.qdot 五态与主页任务中心同款） */
+.qprog { display:flex; align-items:center; gap:12px; }
+.qprog .qbar { flex:1; height:4px; border-radius:3px; background:var(--surface-2); overflow:hidden; }
+.qprog .qbar i { display:block; height:100%; width:0; background:var(--accent); border-radius:3px; transition:width .35s ease; }
+.qprog .note { font-variant-numeric:tabular-nums; white-space:nowrap; color:var(--ink-3); font-size:12px; }
+.qdot { width:7px; height:7px; border-radius:50%; flex:none; }
+.qdot.done { background:var(--ok); } .qdot.run { background:var(--accent); animation:qpulse 1.2s ease-in-out infinite; }
+.qdot.wait { background:none; border:1.5px solid var(--ink-3); } .qdot.err { background:var(--bad); } .qdot.skip { background:var(--ink-3); }
+@keyframes qpulse { 50% { opacity:.35; } }
+.alive-list { max-height:348px; overflow:auto; margin:14px -20px 0; border-top:1px solid var(--line-soft); }
+.alive-row { display:grid; grid-template-columns:14px minmax(140px,190px) 92px minmax(0,1fr); gap:10px; align-items:center; padding:8px 20px; font-size:13px; border-bottom:1px solid var(--line-soft); }
+.alive-row:last-child { border-bottom:none; }
+.alive-row:hover { background:var(--surface-2); }
+.alive-row .who { min-width:0; }
+.alive-row .who .nm { font-weight:550; font-size:12.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.alive-row .who .id { font:10.5px var(--mono); color:var(--ink-3); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.alive-row .st { font-size:12.5px; color:var(--ink-3); white-space:nowrap; }
+.alive-row.run .st { color:var(--accent); } .alive-row.done .st { color:var(--ok); } .alive-row.err .st { color:var(--bad); }
+.alive-row .msg { font-size:12px; color:var(--ink-2); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.alive-row .msg .mono { font-family:var(--mono); font-variant-numeric:tabular-nums; }
+.alive-row.err .msg { color:var(--bad); }
 .fld { display:block; margin-bottom:14px; } .fld .lb { display:block; font-size:12.5px; color:var(--ink-2); margin-bottom:5px; }
 .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:0 14px; }
 .swatches { display:flex; gap:8px; }
@@ -225,6 +246,26 @@ input:focus,select:focus,textarea:focus { outline:none; border-color:var(--accen
 <div class="veil" id="moveVeil"><div class="dlg" style="width:460px"><header><h3>移动账号</h3><div class="hint" id="moveHint"></div></header><div class="body"><label class="fld"><span class="lb">目标号池</span><select id="moveTarget"></select></label><div class="hint">移动后立即按目标号池的密钥、代理与共享策略生效，账号凭证与状态保持不变。</div></div><footer><span class="grow"></span><button data-act="close" data-target="moveVeil">取消</button><button class="primary" data-act="move-do">移动</button></footer></div></div>
 
 <div class="veil" id="confirmVeil" data-lock="1"><div class="dlg" style="width:500px"><header><h3 id="confirmTitle">确认</h3></header><div class="body" id="confirmBody"></div><footer><span class="grow"></span><button data-act="close" data-target="confirmVeil">取消</button><button class="danger" id="confirmYes" data-act="confirm-yes">确认</button></footer></div></div>
+
+<!-- 本组测活：逐个账号发一句 hi，结果在可滚动的待办清单里逐条更新 -->
+<div class="veil" id="aliveVeil">
+  <div class="dlg" style="width:680px">
+    <header>
+      <h3>本组测活 <span class="hint" id="aliveTitle"></span></h3>
+      <div class="hint">逐个向本组账号发一句 hi，验证账号此刻能否正常对话（每个账号消耗少量积分；<b>不改</b>选号 / 冷却 / 成功率统计）。结果逐条更新在下方清单。</div>
+    </header>
+    <div class="body" style="overflow:hidden;padding-bottom:6px">
+      <div class="qprog"><div class="qbar"><i id="aliveBar"></i></div><span class="note" id="aliveProgText">准备中…</span></div>
+      <div class="alive-list" id="aliveList"></div>
+    </div>
+    <footer>
+      <span class="note" id="aliveSum"></span>
+      <span class="grow"></span>
+      <button class="ghost" data-act="alive-stop" id="aliveStop" disabled>停止</button>
+      <button class="primary" data-act="close" data-target="aliveVeil" id="btnAliveClose">关闭</button>
+    </footer>
+  </div>
+</div>
 
 <div class="veil" id="keyGate" data-lock="1"><div class="dlg" style="width:420px"><header><h3>需要访问密钥</h3><div class="hint">请输入 config.json 中的 api_key。</div></header><div class="body"><input type="password" id="gateKey" placeholder="api_key"><div class="state err" id="gateErr" hidden>密钥无效</div></div><footer><span class="grow"></span><button class="primary" data-act="gate-ok">进入</button></footer></div></div>
 
