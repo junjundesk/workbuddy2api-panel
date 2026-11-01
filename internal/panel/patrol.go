@@ -56,9 +56,9 @@ const (
 	patrolDefaultConcurrency  = 3 // 缺省并发；0 = 不限（= 账号数，面板可填 0）
 	// patrolProbeTimeout 单号探测总预算（余额 + 对话两次上游调用）。
 	patrolProbeTimeout = 60 * time.Second
-	// patrolKeepResults 内存里保留的最近结果条数（面板展示用）。
+	// patrolKeepResults 内存里保留的最近处理日志条数（只计移动 / 回流）。
 	patrolKeepResults = 200
-	// patrolSavedResults 落盘保留条数（重启后仍能看到上一轮结论，不必全量）。
+	// patrolSavedResults 落盘保留条数（重启后仍能看到最近的处理记录）。
 	patrolSavedResults = 100
 )
 
@@ -111,10 +111,9 @@ type patrolResult struct {
 	Detail       string `json:"detail,omitempty"`
 	FromGroup    string `json:"from_group,omitempty"` // 巡检前分组（空 = 公共池）
 	Group        string `json:"group,omitempty"`      // 巡检后分组
-	Moved        bool   `json:"moved,omitempty"`
-	// Restored 无积分池**回流**：本轮查到余额已恢复（剩余 > 0），账号从「无积分」
-	// 移回了公共池。与 Moved 的分工：Moved 是「搬进隔离组」，Restored 是「搬出隔离组」，
-	// 面板据此把标签显示成「已回流」而不是「已移动」。
+	Moved        bool   `json:"moved,omitempty"`      // 已成功改变分组（含回流），不是待执行建议
+	// Restored 无积分池回流：余额恢复后已移回公共池，同时 Moved=true。
+	// 面板据此将处理日志标成「回流」，其余成功归组标成「移动」。
 	Restored bool      `json:"restored,omitempty"`
 	Error    string    `json:"error,omitempty"`
 	At       time.Time `json:"at"`
@@ -135,7 +134,7 @@ type patrolRunner struct {
 
 	mu       sync.Mutex
 	settings patrolSettings
-	results  []patrolResult
+	results  []patrolResult // 仅保存已执行的移动 / 回流，普通探测不占日志额度
 	lastRun  time.Time
 	running  bool
 	done     int
@@ -245,8 +244,21 @@ func (r *patrolRunner) load() {
 	}
 	r.settings = f.Settings
 	r.lastRun = f.LastRun
-	if len(f.Results) > 0 {
-		r.results = f.Results
+	// 兼容旧文件里的全量检查结论：先过滤，再按处理日志条数截断。
+	for _, res := range f.Results {
+		r.appendHandledLocked(res)
+	}
+}
+
+// appendHandledLocked 只记录真正执行成功的操作。持 r.mu 调用（初始化加载除外）。
+// 不按 Verdict 过滤：回流通常是 ok，探测出封号 / 无积分也不代表已成功移动。
+func (r *patrolRunner) appendHandledLocked(res patrolResult) {
+	if !res.Moved && !res.Restored {
+		return
+	}
+	r.results = append(r.results, res)
+	if len(r.results) > patrolKeepResults {
+		r.results = r.results[len(r.results)-patrolKeepResults:]
 	}
 }
 
@@ -564,12 +576,15 @@ func (r *patrolRunner) execute(ctx context.Context, uids []string, s patrolSetti
 
 			r.mu.Lock()
 			r.done++
+			// 处理完即加入日志，轮询无需等整轮结束；时间记录实际完成时刻。
+			res.At = time.Now()
+			r.appendHandledLocked(res)
 			r.mu.Unlock()
 		}(i, a)
 	}
 	wg.Wait()
 
-	// 汇总：只记一行，明细在面板巡检弹窗里。
+	// 全量检查结论仅用于运行日志汇总，面板列表只显示已处理的操作。
 	var banned, noCredit, ok, failed, moved, restored int
 	for _, res := range results {
 		switch res.Verdict {
@@ -594,10 +609,6 @@ func (r *patrolRunner) execute(ctx context.Context, uids []string, s patrolSetti
 	r.running = false
 	r.cancel = nil
 	r.lastRun = time.Now()
-	r.results = append(r.results, results...)
-	if len(r.results) > patrolKeepResults {
-		r.results = r.results[len(r.results)-patrolKeepResults:]
-	}
 	r.saveLocked()
 	r.mu.Unlock()
 
@@ -1089,7 +1100,7 @@ func combinePatrol(base patrolResult, balance, chat *patrolResult) patrolResult 
 // HTTP 接口
 // ---------------------------------------------------------------------------
 
-// patrolView 面板 /panel/api/patrol 响应：设置 + 运行态 + 最近结果。
+// patrolView 面板 /panel/api/patrol 响应：设置 + 运行态 + 最近处理日志。
 type patrolView struct {
 	Settings patrolSettings `json:"settings"`
 	Running  bool           `json:"running"`
@@ -1130,7 +1141,7 @@ func (p *Panel) patrolState(w http.ResponseWriter, r *http.Request) {
 	results := make([]patrolResult, len(rp.results))
 	copy(results, rp.results)
 	rp.mu.Unlock()
-	// 最近一轮排前面：面板默认按时间倒序看结论。
+	// 最新处理排前面：按操作完成后的入列顺序倒序展示。
 	for i, j := 0, len(results)-1; i < j; i, j = i+1, j-1 {
 		results[i], results[j] = results[j], results[i]
 	}

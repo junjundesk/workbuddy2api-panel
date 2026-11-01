@@ -421,16 +421,14 @@ async function accBulkRemove() {
 }
 
 /* ── 巡检（封号 11140 / 积分 0 自动归组） ─────────────────────────── */
-function patrolVerdictLabel(v) {
-  return { ok: '正常', banned: '封号', no_credit: '无积分', rate_limited: '模型级限流' }[v] || '探测失败';
-}
-function patrolVerdictCls(v) {
-  return v === 'banned' ? 'bad' : (v === 'no_credit' ? 'warn' : (v === 'ok' ? 'ok' : ''));
-}
-function patrolGroupName(id) {
-  if (!id) return '公共池';
-  const g = ((overviewData && overviewData.groups) || []).find(x => x.id === id);
-  return g ? g.name : '其他分组';
+// 只把真正执行成功的移动 / 回流作为处理日志，兼容旧服务端返回的全量检查记录。
+function patrolActionText(r) {
+  if (!r || (!r.moved && !r.restored)) return '';
+  const account = r.nickname && r.uid ? r.nickname + '（' + r.uid + '）' : (r.nickname || r.uid || '未命名账号');
+  if (r.restored) return '余额:[回流] ' + account + ' 积分已恢复，移回公共池';
+  if (r.verdict === 'banned') return '封禁:[移动] ' + account + ' 移至封号池';
+  if (r.verdict === 'no_credit') return '余额:[移动] ' + account + ' 移至无积分池';
+  return '';
 }
 function patrolIntervalText(st) {
   const v = Number(st && st.interval_value) || 0;
@@ -439,27 +437,15 @@ function patrolIntervalText(st) {
 function renderPatrolReport(d, fill) {
   const tb = $('patrolBody');
   if (!tb) return;
-  const rows = d.results || [];
+  const rows = (d.results || []).map(r => ({ result: r, text: patrolActionText(r) })).filter(r => r.text);
   if (!rows.length) {
-    tb.innerHTML = '<tr><td colspan="6"><div class="empty">还没有巡检记录，点「立即巡检」开始</div></td></tr>';
+    tb.innerHTML = '<tr><td colspan="2"><div class="empty">暂无处理日志，仅显示已执行的移动或回流</div></td></tr>';
   } else {
-    tb.innerHTML = rows.map(r => {
-      const unlimited = r.credits_total === -1;
-      const cred = r.credits == null ? '—' : (unlimited ? '不限'
-        : (r.credits_total > 0 ? r.credits + '/' + r.credits_total : String(r.credits)));
-      const code = r.code ? String(r.code) : (r.http_status ? 'HTTP ' + r.http_status : '—');
-      const short = String(r.uid || '');
-      // 回流（积分恢复 → 搬回公共池）与「已移动」（搬进隔离组）分成两个标签，
-      // 否则「正常 + 已移动 + 公共池」这行看起来像自相矛盾。
-      const moved = r.restored ? ' <span class="tag ok">已回流</span>'
-        : (r.moved ? ' <span class="tag ok">已移动</span>' : '');
-      return '<tr><td><div>' + esc(r.nickname || '未命名') + '</div><div class="pid">' +
-          esc(short.length > 16 ? short.slice(0, 16) + '…' : short) + '</div></td>' +
-        '<td><span class="tag ' + patrolVerdictCls(r.verdict) + '">' + esc(patrolVerdictLabel(r.verdict)) + '</span></td>' +
-        '<td class="num">' + esc(code) + '</td>' +
-        '<td class="num">' + esc(cred) + '</td>' +
-        '<td>' + esc(patrolGroupName(r.group)) + moved + '</td>' +
-        '<td style="color:var(--ink-3)">' + esc(r.detail || r.error || '') + '</td></tr>';
+    tb.innerHTML = rows.map(({ result: r, text }) => {
+      const at = parseAPITime(r.at);
+      const time = at ? fmtLocalDateTime(at) + ':' + String(new Date(at).getSeconds()).padStart(2, '0') : '—';
+      return '<tr><td class="patrol-time">' + esc(time) + '</td>' +
+        '<td class="patrol-action">' + esc(text) + '</td></tr>';
     }).join('');
   }
   const note = $('patrolNote');
@@ -467,7 +453,8 @@ function renderPatrolReport(d, fill) {
     const st = d.settings || {};
     note.textContent = (d.running
       ? '巡检中 ' + (d.done || 0) + '/' + (d.total || 0)
-      : (d.last_run ? '上次巡检 ' + ago(d.last_run) : '尚未巡检') + ' · ' + (rows.length ? rows.length + ' 条记录' : '无记录')) +
+      : (d.last_run ? '上次巡检 ' + ago(d.last_run) : '尚未巡检')) +
+      ' · 最近 ' + rows.length + ' 条处理日志' +
       (d.skipped_banned ? ' · 跳过封号池 ' + d.skipped_banned + ' 个' : '') +
       (st.enabled ? ' · 自动每 ' + patrolIntervalText(st) : ' · 自动巡检已关闭') +
       (st.check_ban ? '' : ' · 封号检测已关') + (st.check_credit ? '' : ' · 积分检测已关');
@@ -500,7 +487,7 @@ async function loadPatrol(fill) {
     if (patrolWasRunning && !d.running) {
       patrolWasRunning = false;
       loadOverview(true);
-      toast('巡检完成，已按结论归组', 'ok');
+      toast('巡检完成，已执行的操作见处理日志', 'ok');
     }
     patrolWasRunning = !!d.running;
   } catch (e) {
@@ -524,7 +511,7 @@ async function runPatrol() {
   try {
     await api('patrol/run', { method: 'POST', body: JSON.stringify({ dry_run: dry }) });
     patrolWasRunning = true;
-    toast('巡检已开始，结果见下表', 'ok');
+    toast(dry ? '试运行已开始，不移动账号、不新增处理日志' : '巡检已开始，已执行的操作将显示在处理日志中', 'ok');
     loadPatrol(false);
   } catch (e) {
     if (btn) { btn.disabled = false; btn.textContent = '立即巡检'; }

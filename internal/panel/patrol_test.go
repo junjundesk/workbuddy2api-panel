@@ -232,6 +232,9 @@ func TestPatrolRestoresRecoveredNoCredit(t *testing.T) {
 	}
 	var rich map[string]any
 	rows, _ := out["results"].([]any)
+	if len(rows) != 1 {
+		t.Fatalf("只应记录 u-rich 的回流，不应列出未处理的 u-poor：%s", raw)
+	}
 	for _, it := range rows {
 		if m, _ := it.(map[string]any); m["uid"] == "u-rich" {
 			rich = m
@@ -325,15 +328,16 @@ func TestPatrolRateLimited11140NotBanned(t *testing.T) {
 	p.patrol.mu.Lock()
 	results := append([]patrolResult(nil), p.patrol.results...)
 	p.patrol.mu.Unlock()
-	if len(results) != 1 {
-		t.Fatalf("results=%d want 1", len(results))
+	if len(results) != 0 {
+		t.Fatalf("限流未发生移动，不应产生处理日志：%+v", results)
 	}
-	if results[0].Verdict != patrolVerdictRateLimited {
-		t.Errorf("verdict=%q want %q（detail=%s）", results[0].Verdict, patrolVerdictRateLimited, results[0].Detail)
+	res := p.patrolProbe(context.Background(), p.cfg.Pool.AuthByUID("u-rate"), p.patrol.snapshotSettings())
+	if res.Verdict != patrolVerdictRateLimited {
+		t.Errorf("verdict=%q want %q（detail=%s）", res.Verdict, patrolVerdictRateLimited, res.Detail)
 	}
 }
 
-// TestPatrolDryRunDoesNotMove：试运行只出结论，不改分组、不建组。
+// TestPatrolDryRunDoesNotMove：试运行不改分组、不建组，也不新增处理日志。
 func TestPatrolDryRunDoesNotMove(t *testing.T) {
 	fake := newPatrolUpstream()
 	fake.banned["tok-ban"] = `{"code":11140,"msg":"request illegal"}`
@@ -352,11 +356,11 @@ func TestPatrolDryRunDoesNotMove(t *testing.T) {
 	}
 	p.patrol.mu.Lock()
 	defer p.patrol.mu.Unlock()
-	if len(p.patrol.results) != 1 || p.patrol.results[0].Verdict != patrolVerdictBanned {
-		t.Fatalf("results=%+v", p.patrol.results)
+	if len(p.patrol.results) != 0 {
+		t.Fatalf("试运行不应产生处理日志：%+v", p.patrol.results)
 	}
-	if p.patrol.results[0].Moved {
-		t.Error("试运行不该标记 moved")
+	if p.patrol.done != 1 || p.patrol.total != 1 {
+		t.Errorf("试运行仍应完成检查：done=%d total=%d", p.patrol.done, p.patrol.total)
 	}
 }
 
@@ -406,11 +410,8 @@ func TestPatrolAlreadyInGroupNoDoubleMove(t *testing.T) {
 
 	p.patrol.mu.Lock()
 	defer p.patrol.mu.Unlock()
-	if len(p.patrol.results) != 1 {
-		t.Fatalf("results=%d", len(p.patrol.results))
-	}
-	if p.patrol.results[0].Moved {
-		t.Error("已在目标分组时不应标记 moved")
+	if len(p.patrol.results) != 0 {
+		t.Fatalf("已在目标分组时不应产生处理日志：%+v", p.patrol.results)
 	}
 	if len(gs.Groups()) != 1 {
 		t.Errorf("不该建第二个同名分组，groups=%d", len(gs.Groups()))
@@ -739,9 +740,13 @@ func TestPatrolSkipsBannedGroup(t *testing.T) {
 	p.patrol.mu.Lock()
 	results := append([]patrolResult(nil), p.patrol.results...)
 	skipped := p.patrol.skippedBanned
+	done, total := p.patrol.done, p.patrol.total
 	p.patrol.mu.Unlock()
-	if len(results) != 1 || results[0].UID != "u-ok" {
-		t.Fatalf("results=%+v want 只巡检 u-ok", results)
+	if len(results) != 0 {
+		t.Fatalf("正常账号不应产生处理日志：%+v", results)
+	}
+	if done != 1 || total != 1 {
+		t.Errorf("只应巡检 u-ok：done=%d total=%d", done, total)
 	}
 	if skipped != 1 {
 		t.Errorf("skippedBanned=%d want 1", skipped)
@@ -833,10 +838,21 @@ func TestPatrolConcurrencyZeroUnlimited(t *testing.T) {
 	}
 	waitPatrol(t, p)
 	p.patrol.mu.Lock()
-	n := len(p.patrol.results)
+	results := append([]patrolResult(nil), p.patrol.results...)
+	done, total := p.patrol.done, p.patrol.total
 	p.patrol.mu.Unlock()
-	if n != 3 {
-		t.Fatalf("results=%d want 3（并发不限时每个账号都要探到）", n)
+	if done != 3 || total != 3 {
+		t.Fatalf("并发不限时每个账号都要探到：done=%d total=%d", done, total)
+	}
+	if len(results) != 1 || results[0].UID != "u2" || !results[0].Moved {
+		t.Fatalf("只应记录 u2 的移动：%+v", results)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	for _, token := range []string{"t1", "t2", "t3"} {
+		if got := fake.bill[token]; got != 1 {
+			t.Errorf("%s 余额查询次数=%d want 1", token, got)
+		}
 	}
 	if got := p.patrol.snapshotSettings().Concurrency; got != 0 {
 		t.Errorf("concurrency=%d want 0（不限）", got)
@@ -887,10 +903,15 @@ func TestPatrolAutoTickerStopsWhenDisabled(t *testing.T) {
 	time.Sleep(150 * time.Millisecond)
 
 	p.patrol.mu.Lock()
-	runs := len(p.patrol.results)
+	lastRun := p.patrol.lastRun
 	p.patrol.mu.Unlock()
-	if runs != 0 {
-		t.Errorf("自动巡检关闭时不该跑轮次，results=%d", runs)
+	if !lastRun.IsZero() {
+		t.Errorf("自动巡检关闭时不该跑轮次，lastRun=%v", lastRun)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if got := fake.bill["t1"]; got != 0 {
+		t.Errorf("自动巡检关闭时不应调用余额接口，hits=%d", got)
 	}
 }
 
