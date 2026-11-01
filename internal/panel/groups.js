@@ -187,7 +187,7 @@ function taskEligible(a) { return !a.disabled && !a.enterprise && a.realm !== 'g
 function groupBulkBtns(list) {
   if (!list.length) return '';
   let h = '';
-  if (list.some(taskEligible)) h += '<button class="xs primary" data-act="group-tasks" title="扫描本组账号的成长任务待办并排队执行（并发 = 本组账号数），进度在任务中心查看">任务执行</button>';
+  if (list.some(taskEligible)) h += '<button class="xs primary" data-act="group-tasks" title="扫描本组账号的成长任务待办并排队执行（并发 = 本组账号数），进度在本页弹窗里跟">任务执行</button>';
   // 本组测活只出现在分组（独立号池）：公共池是混合来源、测活对象不明确，且它是默认池不宜一键打满。
   h += '<button class="xs" data-act="group-alive" title="逐个向本组账号发一句 hi 验证能否正常对话（每号消耗少量积分；不改选号 / 冷却状态），结果在弹窗清单里逐条展示">本组测活</button>';
   h += '<button class="xs" data-act="group-bulk" data-what="checkin" title="逐个签到本组账号（跳过禁用 / 企业版）">本组签到</button>';
@@ -763,6 +763,145 @@ $('taskBody').addEventListener('click', async ev => {
   finally { loadTasks(); }
 });
 
+
+/* ── 账号实时模型列表：与主页 app.js 同一套实现 ─────────────────────────
+   与主页「模型与档位」页的区别：那一页是「该域首个可用账号」的目录（网关缓存
+   口径），这里回答「这个账号自己从最上游能看到哪些模型」——不同套餐 / 域 / 灰度
+   可见模型可以不同。每次打开 / 重新拉取都真实打上游，并与同账号上次结果对比。
+   原先这个按钮是 window.open('/panel/?open=models&uid=…')：和「任务」一样把运维
+   甩去主页，现在同页弹窗。 */
+let accModelUID = null;
+function stripRealm(id) { return String(id || '').replace(/^(cn|global):/, ''); }
+// rateCell 积分倍率单元格：活动价优先（原价加删除线 + 活动标签），无活动价原样显示。
+function rateCell(m) {
+  const tip = m.promo_note ? ' title="' + esc(m.promo_note) + '"' : '';
+  if (m.promo_factor != null && m.promo_credits) {
+    const base = m.credits ? ' <s style="color:var(--ink-3);font-size:11.5px">' + esc(m.credits) + '</s>' : '';
+    const label = m.promo_label ? ' <span class="tag ok">' + esc(m.promo_label) + '</span>' : '';
+    return '<span' + tip + ' style="cursor:help"><b>' + esc(m.promo_credits) + '</b>' + label + base + '</span>';
+  }
+  if (m.promo_label) {
+    return '<span' + tip + ' style="cursor:help">' + (m.credits ? esc(m.credits) : '—') +
+      ' <span class="tag warn">' + esc(m.promo_label) + '</span></span>';
+  }
+  return m.credits ? esc(m.credits) : '—';
+}
+function openAccountModels(uid) {
+  accModelUID = uid;
+  $('accModelWho').textContent = uid.slice(0, 16);
+  openVeil('accModelVeil');
+  loadAccountModels();
+}
+function closeAccountModels() {
+  closeVeil('accModelVeil');
+  accModelUID = null;
+}
+$('btnCloseAccModel').onclick = closeAccountModels;
+$('btnAccModelReload').onclick = loadAccountModels;
+
+async function loadAccountModels() {
+  if (!accModelUID) return;
+  const st = $('accModelState'), tb = $('accModelBody'), tbl = $('accModelTable');
+  const btn = $('btnAccModelReload');
+  st.hidden = false; st.className = 'state';
+  st.innerHTML = '<span class="dots">直连上游拉取中</span>';
+  tbl.hidden = true;
+  btn.disabled = true;
+  try {
+    const d = await api('accounts/' + encodeURIComponent(accModelUID) + '/models');
+    const list = d.models || [];
+    const added = new Set((d.added || []).map(stripRealm));
+    const removed = (d.removed || []).map(stripRealm);
+    if (!list.length) {
+      st.innerHTML = '<div class="empty">该账号上游未返回模型</div>';
+      return;
+    }
+    st.hidden = true; tbl.hidden = false;
+    tb.innerHTML = list.map(m => {
+      const eff = (m.supported_efforts || []).slice();
+      const effs = eff.length ? eff.map(e => '<span class="tag warn">' + esc(e) + '</span>').join(' ')
+        : '<span style="color:var(--ink-3);font-size:12.5px">' + (m.supports_reasoning ? '固定档 · 默认 ' + esc(m.default_effort || '?') : '不支持思考') + '</span>';
+      const caps = [];
+      if (m.is_default) caps.push('<span class="tag ok">默认</span>');
+      if (m.supports_tool_call) caps.push('<span class="tag warn">工具</span>');
+      if (m.supports_images) caps.push('<span class="tag warn">视觉</span>');
+      const capHtml = caps.length ? '<div class="id" style="margin-top:2px">' + caps.join(' ') + '</div>' : '';
+      const tip = m.description ? ' title="' + esc(m.description) + '"' : '';
+      const chg = added.has(stripRealm(m.id)) ? '<span class="tag ok">新增</span>' : '<span style="color:var(--ink-3)">—</span>';
+      return '<tr><td class="mark" aria-hidden="true"><i></i></td><td class="who"' + tip + '><div class="nm">' + esc(m.id) + '</div><div class="id">' + esc(m.name || '') + '</div>' + capHtml + '</td>' +
+        '<td class="num">' + rateCell(m) + '</td>' +
+        '<td>' + (m.default_effort ? '<span class="tag ok">' + esc(m.default_effort) + '</span>' : '<span style="color:var(--ink-3)">—</span>') + '</td>' +
+        '<td class="efs" style="white-space:normal">' + effs + '</td>' +
+        '<td class="num">' + (m.context_length ? Math.round(m.context_length / 1000) + 'K' : '—') + '</td>' +
+        '<td>' + chg + '</td></tr>';
+    }).join('');
+    const parts = [list.length + ' 个模型', '域 ' + (d.realm || 'cn')];
+    if (d.elapsed_ms != null) parts.push('耗时 ' + d.elapsed_ms + 'ms');
+    parts.push(d.prev_at ? '对比上次 ' + new Date(d.prev_at).toLocaleTimeString() : '首次拉取（已建基线）');
+    if (removed.length) parts.push('本次不再返回：' + removed.join('、'));
+    $('accModelMeta').textContent = parts.join(' · ');
+  } catch (e) {
+    st.hidden = false; st.className = 'state';
+    st.innerHTML = '<div class="empty">' + esc(e.message) + '</div>';
+  } finally { btn.disabled = false; }
+}
+
+/* ── 本组任务执行：队列进度在本页弹窗里跟 ───────────────────────────────
+   原先启动队列后 window.open('/panel/#taskscenter')：一次「本组作业」把运维从当前
+   分组带到主页任务中心，回来还得重新选分组。现在启动后直接在本页开进度弹窗，每 2s
+   拉一次 GET tasks/queue（与任务中心同一个接口），跑完自动停轮询。
+   关弹窗只停轮询、不停队列——服务端队列本来就和页面无生命周期绑定。 */
+let queueTimer = null;
+// 队列五态 → [圆点类, 文案]，与任务中心 / 本组测活同一套视觉语言。
+const QUEUE_STATE = {
+  pending: ['wait', '待执行'],
+  running: ['run', '执行中'],
+  done: ['done', '完成'],
+  skipped: ['skip', '跳过'],
+  error: ['err', '失败'],
+};
+function openQueueModal(label) {
+  $('queueTitle').textContent = label ? '· ' + label : '';
+  openVeil('queueVeil');
+  loadQueue();
+  if (!queueTimer) queueTimer = setInterval(loadQueue, 2000);
+}
+function stopQueuePoll() {
+  if (queueTimer) { clearInterval(queueTimer); queueTimer = null; }
+}
+function closeQueueModal() { closeVeil('queueVeil'); stopQueuePoll(); }
+$('btnQueueClose').onclick = closeQueueModal;
+// 任务中心仍是新标签页，但改成「用户主动点」——不再作为队列启动的副作用。
+$('btnQueueCenter').onclick = () => window.open('/panel/#taskscenter', '_blank');
+
+async function loadQueue() {
+  let q;
+  try { q = await api('tasks/queue'); }
+  catch (e) { stopQueuePoll(); $('queueProgText').textContent = '查询失败：' + e.message; return; }
+  const items = q.items || [];
+  const total = items.length;
+  const n = s => items.filter(i => i.status === s).length;
+  const done = n('done'), skip = n('skipped'), err = n('error'), run = n('running');
+  const finished = done + skip + err;
+  const bar = $('queueBar'), txt = $('queueProgText'), list = $('queueList'), sum = $('queueSum');
+  bar.style.width = (total ? Math.round(finished * 100 / total) : 0) + '%';
+  txt.textContent = total
+    ? finished + ' / ' + total + ' 已结束' + (run ? ' · ' + run + ' 执行中' : '')
+    : '准备中…';
+  list.innerHTML = total ? items.map(it => {
+    const st = QUEUE_STATE[it.status] || ['wait', it.status || '—'];
+    const who = it.nickname || (it.uid || '').slice(0, 8);
+    return '<div class="alive-row qrow"><span class="qdot ' + st[0] + '"></span>' +
+      '<span title="' + esc(it.uid || '') + '">' + esc(who) + '</span>' +
+      '<span class="note" title="' + esc(it.code || '') + '">' + esc(it.code || '—') + '</span>' +
+      '<span class="note">' + esc(st[1] + (it.message ? ' · ' + it.message : '')) + '</span></div>';
+  }).join('') : '<div class="hint" style="padding:14px 20px">队列为空</div>';
+  sum.textContent = q.running ? '队列运行中…'
+    : (skip || err ? '已结束：完成 ' + done + '，跳过 ' + skip + (err ? '，失败 ' + err : '') : '已结束：完成 ' + done + ' 项');
+  // 队列跑完（且没有待执行的）就停轮询，避免弹窗开着空转。
+  if (!q.running && finished >= total) stopQueuePoll();
+}
+
 function openConfirm(title, body, label, fn) { $('confirmTitle').textContent = title; $('confirmBody').innerHTML = body; $('confirmYes').textContent = label; state.confirm = fn; openVeil('confirmVeil'); }
 
 document.addEventListener('click', async e => {
@@ -940,10 +1079,10 @@ document.addEventListener('click', async e => {
     }
     if (act === 'acc') {
       const u = el.dataset.uid, a = el.dataset.a, p = 'accounts/' + encodeURIComponent(u) + '/';
-      // 「任务」在本页弹窗（与主页同一个 openTasks）：深链回主页会把运维从当前分组踢走。
+      // 「任务」「模型」都在本页弹窗（与主页同一套实现）：深链回主页会把运维从
+      // 当前分组踢走，回来还得重新点一遍分组。账号行的按钮一律不再跳页。
       if (a === 'tasks') { openTasks(u); return; }
-      // 「模型」仍是深链：那是一整套模型表弹窗，不在本次改动范围内。
-      if (a === 'models') { window.open('/panel/?open=' + a + '&uid=' + encodeURIComponent(u) + '#accounts', '_blank'); return; }
+      if (a === 'models') { openAccountModels(u); return; }
       if (a === 'disable' && !confirm('禁用后该账号不再参与选号（保号任务默认也跳过），需手动解冻才能恢复。若只是想临时让位、仍要保号，请改用「暂停选号」。确认禁用？')) return;
       el.disabled = true;
       try {
@@ -989,16 +1128,14 @@ document.addEventListener('click', async e => {
       if (!items.length) { toast('本组没有可执行成长任务的账号', 'err'); return; }
       const conc = items.length; // 并发 = 本组可执行账号数，账号内串行
       if (!confirm('扫描「' + g.name + '」' + items.length + ' 个账号的待办并排队执行（账号并发 ' + conc + '，账号内串行）。\n含真实对话的任务耗时较长，确认继续？')) return;
-      // 先同步开空白标签页，避免 await 之后再 window.open 被浏览器当弹窗拦截。
-      const tab = window.open('about:blank', '_blank');
       el.disabled = true;
       try {
         const r = await api('tasks/run_queue', { method: 'POST', body: JSON.stringify({ concurrency: conc, uids: items.map(a => a.uid), label: g.name }) });
-        if (!r.started) { if (tab) tab.close(); toast(r.message || '本组没有待办任务', 'ok'); return; }
-        toast(g.name + '：队列已启动 ' + r.total + ' 项（并发 ' + (r.conc || conc) + '），进度见任务中心', 'ok');
-        if (tab) tab.location.href = '/panel/#taskscenter'; else window.open('/panel/#taskscenter', '_blank');
-      } catch (e2) { if (tab) tab.close(); throw e2; }
-      finally { el.disabled = false; }
+        if (!r.started) { toast(r.message || '本组没有待办任务', 'ok'); return; }
+        toast(g.name + '：队列已启动 ' + r.total + ' 项（并发 ' + (r.conc || conc) + '）', 'ok');
+        // 少了「先开空白标签页防拦截」那一步：现在根本不开新标签，进度在本页弹窗里跟。
+        openQueueModal(g.name);
+      } finally { el.disabled = false; }
       return;
     }
     if (act === 'move-account') { openMoveModal([el.dataset.uid]); return; }

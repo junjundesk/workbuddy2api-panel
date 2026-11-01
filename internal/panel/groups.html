@@ -139,6 +139,10 @@ input:focus,select:focus,textarea:focus { outline:none; border-color:var(--accen
 .alive-list { max-height:348px; overflow:auto; margin:14px -20px 0; border-top:1px solid var(--line-soft); }
 .alive-row { display:grid; grid-template-columns:14px minmax(140px,190px) 92px minmax(0,1fr); gap:10px; align-items:center; padding:8px 20px; font-size:13px; border-bottom:1px solid var(--line-soft); }
 .alive-row:last-child { border-bottom:none; }
+/* 任务队列行：任务码列比测活宽一点（growth 码最长 Hp_Appearance / Sequential_Tasks_1），
+   码与说明各自单行截断——溢出会挤掉说明列，长码看得见前几位也够定位。 */
+.qrow { grid-template-columns:14px minmax(120px,170px) minmax(112px,150px) minmax(0,1fr); }
+.qrow .note { color:var(--ink-3); font-size:12px; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .alive-row:hover { background:var(--surface-2); }
 .alive-row .who { min-width:0; }
 .alive-row .who .nm { font-weight:550; font-size:12.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -289,6 +293,50 @@ input:focus,select:focus,textarea:focus { outline:none; border-color:var(--accen
       <button id="btnTaskAutoAll" class="primary">一键完成可自动任务</button>
       <button id="btnTaskReload">重新查询</button>
       <button id="btnCloseTask">关闭</button>
+    </footer>
+  </div>
+</div>
+
+<!-- 账号实时模型列表：与主页同一套交互（该账号直连上游拉取，不读网关缓存） -->
+<div class="veil" id="accModelVeil">
+  <div class="dlg" style="width:900px">
+    <header>
+      <h3>账号模型列表 <span class="hint" id="accModelWho"></span></h3>
+      <div class="hint" id="accModelMeta">用该账号直连上游实时拉取，不读网关缓存；「变化」列对比同账号上一次拉取结果（首次拉取只建基线）。</div>
+    </header>
+    <div class="body">
+      <div class="state" id="accModelState"><span class="dots">拉取中</span></div>
+      <div class="acc-wrap">
+        <table class="acc" id="accModelTable" hidden>
+          <thead><tr><th class="mark" aria-hidden="true"></th><th>模型</th><th>积分倍率</th><th>默认档</th><th>思考档位</th><th>上下文</th><th>变化</th></tr></thead>
+          <tbody id="accModelBody"></tbody>
+        </table>
+      </div>
+    </div>
+    <footer>
+      <span class="grow"></span>
+      <button id="btnAccModelReload">重新拉取</button>
+      <button id="btnCloseAccModel" class="primary">关闭</button>
+    </footer>
+  </div>
+</div>
+
+<!-- 本组任务执行：队列进度在本页弹窗里跟，不必跳到任务中心（关掉弹窗不会中断队列） -->
+<div class="veil" id="queueVeil">
+  <div class="dlg" style="width:720px">
+    <header>
+      <h3>任务执行进度 <span class="hint" id="queueTitle"></span></h3>
+      <div class="hint">账号并发执行、账号内串行。关闭本弹窗<strong>不会</strong>中断队列，后台继续跑。</div>
+    </header>
+    <div class="body" style="overflow:hidden;padding-bottom:6px">
+      <div class="qprog"><div class="qbar"><i id="queueBar"></i></div><span class="note" id="queueProgText">准备中…</span></div>
+      <div class="alive-list" id="queueList"></div>
+    </div>
+    <footer>
+      <span class="note" id="queueSum"></span>
+      <span class="grow"></span>
+      <button id="btnQueueCenter" class="ghost" title="在任务中心看开学季 / 券码等完整视图（新标签页，主动打开）">任务中心</button>
+      <button id="btnQueueClose" class="primary">关闭</button>
     </footer>
   </div>
 </div>
