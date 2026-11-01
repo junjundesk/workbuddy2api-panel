@@ -781,6 +781,10 @@ async function loadOverview(quiet) {
     $('sDisabled').textContent = d.disabled;
     // 暂停选号单列（issue #125）：它只关选号、照常签到保活，与禁用是两种状态。
     if ($('sPaused')) $('sPaused').textContent = d.paused == null ? '-' : d.paused;
+    // 无积分 / 封号两张卡：口径由后端算（overview 的 no_credit_total / banned_total），
+    // 前端不做二次判定——「在隔离分组里」这件事只有后端看得到分组归属。
+    if ($('sNoCredit')) $('sNoCredit').textContent = d.no_credit_total == null ? '-' : d.no_credit_total;
+    if ($('sBanned')) $('sBanned').textContent = d.banned_total == null ? '-' : d.banned_total;
     // 封号号（上游 11140）的余额既不可用也不该算进池总资产：统计只算未封号账号。
     const allAcc = d.accounts || [];
     const counted = allAcc.filter(s => !s.banned);

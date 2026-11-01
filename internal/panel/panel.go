@@ -281,7 +281,10 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 		sticky = p.cfg.StickyCount()
 	}
 	accounts := p.cfg.Pool.List()
+	// 标记顺序有意义：先封号后无积分——markNoCreditAccounts 会跳过已标封号的号，
+	// 避免同一个号被算进两个顶部统计卡（两个数字并列时重叠等于误导）。
 	p.markBannedAccounts(accounts)
+	p.markNoCreditAccounts(accounts)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"version":         p.cfg.Version,
 		"uptime_sec":      int(time.Since(p.started).Seconds()),
@@ -296,6 +299,9 @@ func (p *Panel) overview(w http.ResponseWriter, r *http.Request) {
 		"in_flight_full":  inFlightFull,
 		"accounts":        accounts,
 		"banned_total":    countBanned(accounts),
+		// no_credit_total 无积分账号数（积分 0 且不在封号池）：面板顶部「无积分」「封号」
+		// 两张统计卡各取一个数字，运维不用滚到列表里去数。
+		"no_credit_total": countNoCredit(accounts),
 		// model_locks 模型级限流全清单（哪些模型不能用、锁了几个号、还要锁多久）：
 		// 与 accounts 的账号池视图互补，前端「模型锁池」表直接渲染。无锁时为 null。
 		"model_locks": p.cfg.Pool.ModelLockView(),

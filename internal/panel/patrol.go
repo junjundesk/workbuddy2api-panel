@@ -463,18 +463,25 @@ func (r *patrolRunner) candidates(uids []string, skipDisabled bool) (accounts []
 	return out, skippedBanned
 }
 
-// bannedGroupID 返回「封号池」分组 id（不存在返回空串）。只读，不创建分组。
-func (p *Panel) bannedGroupID() string {
+// patrolGroupID 按分组名取 id（不存在返回空串）。只读，不创建分组——建组只在真正
+// 要把号搬进去时发生，查询路径（overview / 巡检候选集）绝不能顺手造出一个空组。
+func (p *Panel) patrolGroupID(name string) string {
 	if p.cfg.Groups == nil {
 		return ""
 	}
 	for _, g := range p.cfg.Groups.Groups() {
-		if g.Name == patrolGroupBannedName {
+		if g.Name == name {
 			return g.ID
 		}
 	}
 	return ""
 }
+
+// bannedGroupID 返回「封号池」分组 id（不存在返回空串）。
+func (p *Panel) bannedGroupID() string { return p.patrolGroupID(patrolGroupBannedName) }
+
+// noCreditGroupID 返回「无积分」分组 id（不存在返回空串）。
+func (p *Panel) noCreditGroupID() string { return p.patrolGroupID(patrolGroupNoCreditName) }
 
 // execute 并发探测 + 按结论归组。同一时刻只有一个 execute（由 start 的单飞保证）。
 func (r *patrolRunner) execute(ctx context.Context, uids []string, s patrolSettings) {
@@ -695,6 +702,41 @@ func countBanned(list []pool.Status) int {
 	n := 0
 	for i := range list {
 		if list[i].Banned {
+			n++
+		}
+	}
+	return n
+}
+
+// markNoCreditAccounts 给账号列表打「无积分」标记（积分剩余 0），供面板顶部统计卡
+// 单列一个数字（封号数量旁边）。判据两条，任一命中即算，与 markBannedAccounts 同构：
+//   - 账号在「无积分」分组里：巡检归组的权威位置，积分补回来后人工移出即不再计；
+//   - 最后一次余额快照 credits ≤ 0 且总额已知（credits_total > 0）：余额刷新 / 巡检
+//     都会写快照，没刷过余额的新号（total = 0 = 未知）不会被误判成无积分；
+//     企业版不限量的 total = -1 也排除——与 patrolBalanceProbe 的口径完全一致。
+//
+// 封号号不再重复标无积分：封号是终态，两个数字并列展示时重叠只会让人以为有两类问题。
+func (p *Panel) markNoCreditAccounts(list []pool.Status) {
+	ncID := p.noCreditGroupID()
+	for i := range list {
+		if list[i].Banned {
+			continue
+		}
+		if ncID != "" && list[i].Group == ncID {
+			list[i].NoCredit = true
+			continue
+		}
+		if list[i].CreditsTotal > 0 && list[i].Credits <= 0 {
+			list[i].NoCredit = true
+		}
+	}
+}
+
+// countNoCredit 统计无积分账号数（overview 的 no_credit_total）。
+func countNoCredit(list []pool.Status) int {
+	n := 0
+	for i := range list {
+		if list[i].NoCredit {
 			n++
 		}
 	}

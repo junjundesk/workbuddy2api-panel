@@ -533,6 +533,64 @@ func TestOverviewMarksBannedAccounts(t *testing.T) {
 	}
 }
 
+// TestOverviewMarksNoCreditAccounts 无积分账号在 overview 里带 no_credit 标记并计入
+// no_credit_total：两条判据各自命中，余额未知 / 企业版不限量 / 已封号三种不算。
+//
+// 这组断言等于把「顶部统计卡的两个数字」钉死：封号 1、无积分 2，且互不重叠。
+func TestOverviewMarksNoCreditAccounts(t *testing.T) {
+	fake := newPatrolUpstream()
+	p, pl, gs := newPatrolPanel(t, fake,
+		acc("u-group", "t1"), acc("u-zero", "t2"), acc("u-unknown", "t3"),
+		acc("u-ent", "t4"), acc("u-ban", "t5"))
+
+	nc, _, err := gs.Create(patrolGroupNoCreditName, "", false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := gs.AddMember(nc.ID, "u-group"); err != nil {
+		t.Fatal(err)
+	}
+	pl.SetGroup("u-group", nc.ID)
+	pl.SetCredits("u-zero", 0, 100)  // 余额快照 0 且总额已知 → 无积分
+	pl.SetCredits("u-unknown", 0, 0) // 从未刷过余额（total=0 = 未知）→ 不算
+	pl.SetCredits("u-ent", 0, -1)    // 企业版不限量哨兵 → 不算
+	pl.SetCredits("u-ban", 0, 100)   // 已封号：只计封号，不再计无积分
+
+	bg, _, err := gs.Create(patrolGroupBannedName, "", false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := gs.AddMember(bg.ID, "u-ban"); err != nil {
+		t.Fatal(err)
+	}
+	pl.SetGroup("u-ban", bg.ID)
+
+	code, out, raw := call(t, p, "GET", "/panel/api/overview", "")
+	if code != http.StatusOK {
+		t.Fatalf("code=%d raw=%s", code, raw)
+	}
+	flags := map[string]bool{}
+	accounts, _ := out["accounts"].([]any)
+	for _, it := range accounts {
+		m, _ := it.(map[string]any)
+		uid, _ := m["uid"].(string)
+		flags[uid], _ = m["no_credit"].(bool)
+	}
+	for uid, want := range map[string]bool{
+		"u-group": true, "u-zero": true, "u-unknown": false, "u-ent": false, "u-ban": false,
+	} {
+		if flags[uid] != want {
+			t.Errorf("%s no_credit=%v want %v", uid, flags[uid], want)
+		}
+	}
+	if got, _ := out["no_credit_total"].(float64); got != 2 {
+		t.Errorf("no_credit_total=%v want 2", out["no_credit_total"])
+	}
+	if got, _ := out["banned_total"].(float64); got != 1 {
+		t.Errorf("banned_total=%v want 1", out["banned_total"])
+	}
+}
+
 // TestPatrolSkipsBannedGroup 已在「封号池」里的账号不再巡检（封号是终态，再探一次
 // 只是白烧一次对话），并透出 skipped_banned 供面板提示。
 func TestPatrolSkipsBannedGroup(t *testing.T) {

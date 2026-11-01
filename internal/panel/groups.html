@@ -267,6 +267,32 @@ input:focus,select:focus,textarea:focus { outline:none; border-color:var(--accen
   </div>
 </div>
 
+<!-- 积分任务：与主页同一套交互（接受 / 领取 / 一键完成），在本页弹窗而不是深链回主页 -->
+<div class="veil" id="taskVeil">
+  <div class="dlg" style="width:940px">
+    <header>
+      <h3>积分任务 <span class="hint" id="taskWho"></span></h3>
+      <div class="hint">查询上游任务进度；「接受」为报名（幂等），「领取」在进度达标后可用。所有操作走网关，无需外部脚本。</div>
+    </header>
+    <div class="body">
+      <div class="state" id="taskState"><span class="dots">加载中</span></div>
+      <div class="acc-wrap">
+        <table class="acc" id="taskTable" hidden>
+          <thead><tr><th class="mark" aria-hidden="true"></th><th>任务</th><th>进度</th><th>奖励</th><th>状态</th><th class="c-acts"></th></tr></thead>
+          <tbody id="taskBody"></tbody>
+        </table>
+      </div>
+    </div>
+    <footer>
+      <span class="grow"></span>
+      <button id="btnTaskAcceptAll">全部接受</button>
+      <button id="btnTaskAutoAll" class="primary">一键完成可自动任务</button>
+      <button id="btnTaskReload">重新查询</button>
+      <button id="btnCloseTask">关闭</button>
+    </footer>
+  </div>
+</div>
+
 <div class="veil" id="keyGate" data-lock="1"><div class="dlg" style="width:420px"><header><h3>需要访问密钥</h3><div class="hint">请输入 config.json 中的 api_key。</div></header><div class="body"><input type="password" id="gateKey" placeholder="api_key"><div class="state err" id="gateErr" hidden>密钥无效</div></div><footer><span class="grow"></span><button class="primary" data-act="gate-ok">进入</button></footer></div></div>
 
 <script src="/panel/groups.js"></script>
