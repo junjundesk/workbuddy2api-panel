@@ -449,7 +449,10 @@ function renderPatrolReport(d, fill) {
         : (r.credits_total > 0 ? r.credits + '/' + r.credits_total : String(r.credits)));
       const code = r.code ? String(r.code) : (r.http_status ? 'HTTP ' + r.http_status : '—');
       const short = String(r.uid || '');
-      const moved = r.moved ? ' <span class="tag ok">已移动</span>' : '';
+      // 回流（积分恢复 → 搬回公共池）与「已移动」（搬进隔离组）分成两个标签，
+      // 否则「正常 + 已移动 + 公共池」这行看起来像自相矛盾。
+      const moved = r.restored ? ' <span class="tag ok">已回流</span>'
+        : (r.moved ? ' <span class="tag ok">已移动</span>' : '');
       return '<tr><td><div>' + esc(r.nickname || '未命名') + '</div><div class="pid">' +
           esc(short.length > 16 ? short.slice(0, 16) + '…' : short) + '</div></td>' +
         '<td><span class="tag ' + patrolVerdictCls(r.verdict) + '">' + esc(patrolVerdictLabel(r.verdict)) + '</span></td>' +

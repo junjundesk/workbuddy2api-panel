@@ -99,21 +99,25 @@ type patrolSettings struct {
 
 // patrolResult 单账号巡检结论（面板列表 / 落盘共用）。
 type patrolResult struct {
-	UID          string    `json:"uid"`
-	Nickname     string    `json:"nickname,omitempty"`
-	Realm        string    `json:"realm,omitempty"`
-	Verdict      string    `json:"verdict"`
-	Code         int       `json:"code,omitempty"` // 上游业务码（11140 等）
-	HTTPStatus   int       `json:"http_status,omitempty"`
-	Credits      *int64    `json:"credits,omitempty"`
-	CreditsTotal *int64    `json:"credits_total,omitempty"`
-	Model        string    `json:"model,omitempty"`
-	Detail       string    `json:"detail,omitempty"`
-	FromGroup    string    `json:"from_group,omitempty"` // 巡检前分组（空 = 公共池）
-	Group        string    `json:"group,omitempty"`      // 巡检后分组
-	Moved        bool      `json:"moved,omitempty"`
-	Error        string    `json:"error,omitempty"`
-	At           time.Time `json:"at"`
+	UID          string `json:"uid"`
+	Nickname     string `json:"nickname,omitempty"`
+	Realm        string `json:"realm,omitempty"`
+	Verdict      string `json:"verdict"`
+	Code         int    `json:"code,omitempty"` // 上游业务码（11140 等）
+	HTTPStatus   int    `json:"http_status,omitempty"`
+	Credits      *int64 `json:"credits,omitempty"`
+	CreditsTotal *int64 `json:"credits_total,omitempty"`
+	Model        string `json:"model,omitempty"`
+	Detail       string `json:"detail,omitempty"`
+	FromGroup    string `json:"from_group,omitempty"` // 巡检前分组（空 = 公共池）
+	Group        string `json:"group,omitempty"`      // 巡检后分组
+	Moved        bool   `json:"moved,omitempty"`
+	// Restored 无积分池**回流**：本轮查到余额已恢复（剩余 > 0），账号从「无积分」
+	// 移回了公共池。与 Moved 的分工：Moved 是「搬进隔离组」，Restored 是「搬出隔离组」，
+	// 面板据此把标签显示成「已回流」而不是「已移动」。
+	Restored bool      `json:"restored,omitempty"`
+	Error    string    `json:"error,omitempty"`
+	At       time.Time `json:"at"`
 }
 
 // patrolFile patrol.json 的落盘形状。
@@ -533,11 +537,11 @@ func (r *patrolRunner) execute(ctx context.Context, uids []string, s patrolSetti
 				return
 			}
 			res := r.p.patrolProbe(ctx, a, s)
-			res.FromGroup = a.Group()
+			res.FromGroup = r.p.patrolGroupOf(a)
 			res.Group = res.FromGroup
 			if !s.DryRun {
 				if gid, target := r.p.patrolTargetGroup(res.Verdict); gid != "" {
-					if cur := r.p.cfg.Groups.GroupOf(a.UID); cur != gid {
+					if cur := r.p.patrolGroupOf(a); cur != gid {
 						if err := r.p.patrolMove(a.UID, gid); err != nil {
 							res.Error = "移动分组失败：" + err.Error()
 							log.Printf("panel: 巡检 %s 归组失败: %v", logfmt.Label(a.UID, a.Nickname), err)
@@ -550,6 +554,10 @@ func (r *patrolRunner) execute(ctx context.Context, uids []string, s patrolSetti
 					} else {
 						res.Group = gid
 					}
+				} else if r.p.patrolRestoreRecovered(&res, s) {
+					// 无积分池回流：本轮余额已恢复，搬回公共池（见 patrolRestoreRecovered）。
+					log.Printf("panel: 巡检 %s 积分已恢复（剩余 %d），已从「%s」移回公共池",
+						logfmt.Label(a.UID, a.Nickname), *res.Credits, patrolGroupNoCreditName)
 				}
 			}
 			results[i] = res
@@ -562,7 +570,7 @@ func (r *patrolRunner) execute(ctx context.Context, uids []string, s patrolSetti
 	wg.Wait()
 
 	// 汇总：只记一行，明细在面板巡检弹窗里。
-	var banned, noCredit, ok, failed, moved int
+	var banned, noCredit, ok, failed, moved, restored int
 	for _, res := range results {
 		switch res.Verdict {
 		case patrolVerdictBanned:
@@ -577,6 +585,9 @@ func (r *patrolRunner) execute(ctx context.Context, uids []string, s patrolSetti
 		if res.Moved {
 			moved++
 		}
+		if res.Restored {
+			restored++
+		}
 	}
 
 	r.mu.Lock()
@@ -590,8 +601,12 @@ func (r *patrolRunner) execute(ctx context.Context, uids []string, s patrolSetti
 	r.saveLocked()
 	r.mu.Unlock()
 
-	log.Printf("panel: 巡检完成（%s）：封号 %d / 无积分 %d / 正常 %d / 探测失败 %d，移动 %d 个账号",
-		time.Since(started).Round(time.Second), banned, noCredit, ok, failed, moved)
+	restoreText := ""
+	if restored > 0 {
+		restoreText = fmt.Sprintf("（其中 %d 个积分已恢复、移回公共池）", restored)
+	}
+	log.Printf("panel: 巡检完成（%s）：封号 %d / 无积分 %d / 正常 %d / 探测失败 %d，移动 %d 个账号%s",
+		time.Since(started).Round(time.Second), banned, noCredit, ok, failed, moved, restoreText)
 }
 
 // patrolChecksText 日志/面板用的检测项描述。
@@ -675,6 +690,66 @@ func (p *Panel) patrolMove(uid, gid string) error {
 	}
 	p.cfg.Pool.SetGroup(uid, gid)
 	return nil
+}
+
+// patrolGroupOf 账号当前分组（空 = 公共池）。groups.json 是归属的权威来源，pool 上的
+// 分组只是它的镜像；Groups 不可用（测试构造 / 未初始化）时回落 auth 上的运行期分组。
+func (p *Panel) patrolGroupOf(a *auth.Auth) string {
+	if a == nil {
+		return ""
+	}
+	if p.cfg.Groups == nil {
+		return a.Group()
+	}
+	return p.cfg.Groups.GroupOf(a.UID)
+}
+
+// patrolRestoreNoCredit 把账号从「无积分」分组移回公共池：先摘成员（groups.json），
+// 再把池内归属清空——两步都做，避免 groups.json 与 pool 镜像不一致。
+func (p *Panel) patrolRestoreNoCredit(uid, curGroup string) error {
+	if p.cfg.Groups == nil {
+		return errors.New("groups not available")
+	}
+	if curGroup != "" {
+		if err := p.cfg.Groups.RemoveMember(curGroup, uid); err != nil {
+			return err
+		}
+	}
+	p.cfg.Pool.SetGroup(uid, "")
+	return nil
+}
+
+// patrolRestoreRecovered 无积分池回流：勾了「积分检测」时，本轮查到**余额已恢复**
+// （剩余 > 0）且账号当前在「无积分」分组里，就搬回公共池，不必人工一个个搬回来。
+//
+// 三个判据缺一不可，宁可不搬也不误搬：
+//   - 积分检测开着（CheckCredit）：这是用户显式选择的检测项，关掉就该什么都不动；
+//   - 当前分组确实是「无积分」：只处理这个隔离池，别的分组（含自定义分组）一概不碰；
+//   - 本轮余额查到且 > 0：查询失败时 Credits 为 nil（余额未知），一律不搬——把没钱的
+//     号扔回公共池等于让它去跑必然失败的请求。
+//
+// 返回是否真的移动成功（失败时把原因写进 res.Error，供面板展示）。
+func (p *Panel) patrolRestoreRecovered(res *patrolResult, s patrolSettings) bool {
+	if res == nil || !s.CheckCredit || p.cfg.Groups == nil || p.cfg.Pool == nil {
+		return false
+	}
+	ncID := p.noCreditGroupID()
+	if ncID == "" || res.FromGroup != ncID {
+		return false
+	}
+	if res.Credits == nil || *res.Credits <= 0 {
+		return false
+	}
+	if err := p.patrolRestoreNoCredit(res.UID, ncID); err != nil {
+		res.Error = "移回公共池失败：" + err.Error()
+		log.Printf("panel: 巡检 %s 移回公共池失败: %v", logfmt.Label(res.UID, res.Nickname), err)
+		return false
+	}
+	res.Group = ""
+	res.Moved = true
+	res.Restored = true
+	res.Detail = fmt.Sprintf("积分已恢复（剩余 %d）→ 移回公共池", *res.Credits)
+	return true
 }
 
 // markBannedAccounts 给账号列表打「封号」标记（11140），供面板把封号号的积分

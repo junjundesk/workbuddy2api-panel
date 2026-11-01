@@ -191,6 +191,123 @@ func TestPatrolMovesBannedAndNoCredit(t *testing.T) {
 	}
 }
 
+// TestPatrolRestoresRecoveredNoCredit 无积分池**回流**：勾着积分检测时，本轮查到余额
+// 已恢复（剩余 > 0）的号自动移回公共池；余额仍是 0 的留在池里。
+//
+// 这是「无积分」隔离组的出口：没有它，号只能靠人工一个个搬回来。
+func TestPatrolRestoresRecoveredNoCredit(t *testing.T) {
+	fake := newPatrolUpstream()
+	fake.zero["tok-poor"] = true // 假上游：该 token 余额恒 0
+
+	p, pl, gs := newPatrolPanel(t, fake, acc("u-rich", "tok-rich"), acc("u-poor", "tok-poor"))
+	nc, _, err := gs.Create(patrolGroupNoCreditName, patrolGroupNoCreditColor, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, uid := range []string{"u-rich", "u-poor"} {
+		if err := gs.AddMember(nc.ID, uid); err != nil {
+			t.Fatal(err)
+		}
+		pl.SetGroup(uid, nc.ID)
+	}
+
+	if err := p.patrol.start(nil, boolPtr(false)); err != nil {
+		t.Fatal(err)
+	}
+	waitPatrol(t, p)
+
+	if got := gs.GroupOf("u-rich"); got != "" {
+		t.Errorf("余额已恢复的 u-rich 应移回公共池，groups 仍为 %q", got)
+	}
+	if got := pl.GroupOf("u-rich"); got != "" {
+		t.Errorf("余额已恢复的 u-rich 池内归属应为公共池，实得 %q", got)
+	}
+	if got := gs.GroupOf("u-poor"); got != nc.ID {
+		t.Errorf("余额仍为 0 的 u-poor 应留在无积分池，实得 %q", got)
+	}
+
+	code, out, raw := call(t, p, "GET", "/panel/api/patrol", "")
+	if code != http.StatusOK {
+		t.Fatalf("code=%d raw=%s", code, raw)
+	}
+	var rich map[string]any
+	rows, _ := out["results"].([]any)
+	for _, it := range rows {
+		if m, _ := it.(map[string]any); m["uid"] == "u-rich" {
+			rich = m
+		}
+	}
+	if rich == nil {
+		t.Fatal("巡检结果里没有 u-rich")
+	}
+	if rich["restored"] != true {
+		t.Errorf("restored=%v want true", rich["restored"])
+	}
+	if rich["moved"] != true {
+		t.Errorf("moved=%v want true", rich["moved"])
+	}
+	if g, _ := rich["group"].(string); g != "" {
+		t.Errorf("group=%v want 公共池（空串）", rich["group"])
+	}
+	if d, _ := rich["detail"].(string); !strings.Contains(d, "移回公共池") {
+		t.Errorf("detail=%q 应写明已移回公共池", d)
+	}
+}
+
+// TestPatrolRestoreRespectsSwitches 回流受开关约束：关掉「积分检测」不搬（哪怕余额接口
+// 顺带查到了余额），试运行只报告不搬；两项都放开才真的搬回公共池。
+func TestPatrolRestoreRespectsSwitches(t *testing.T) {
+	fake := newPatrolUpstream()
+	p, pl, gs := newPatrolPanel(t, fake, acc("u-rich", "tok-rich"))
+	nc, _, err := gs.Create(patrolGroupNoCreditName, patrolGroupNoCreditColor, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := gs.AddMember(nc.ID, "u-rich"); err != nil {
+		t.Fatal(err)
+	}
+	pl.SetGroup("u-rich", nc.ID)
+
+	// 第二参是 dryRun 覆盖（nil = 用设置里的值）：本用例正是要验证设置生效，
+	// 传 boolPtr(false) 会把它按住。
+	run := func() {
+		t.Helper()
+		if err := p.patrol.start(nil, nil); err != nil {
+			t.Fatal(err)
+		}
+		waitPatrol(t, p)
+	}
+
+	// 1) 关掉积分检测：余额接口仍会被封号检测调用（Credits 有值），但不该搬。
+	s := p.patrol.snapshotSettings()
+	s.CheckCredit = false
+	p.patrol.updateSettings(s)
+	run()
+	if got := gs.GroupOf("u-rich"); got != nc.ID {
+		t.Errorf("关闭积分检测时不该回流，group=%q", got)
+	}
+
+	// 2) 打开积分检测 + 试运行：只报告不改分组。
+	s.CheckCredit = true
+	s.DryRun = true
+	p.patrol.updateSettings(s)
+	run()
+	if got := gs.GroupOf("u-rich"); got != nc.ID {
+		t.Errorf("试运行不该回流，group=%q", got)
+	}
+
+	// 3) 关掉试运行：真的搬回公共池。
+	s.DryRun = false
+	p.patrol.updateSettings(s)
+	run()
+	if got := gs.GroupOf("u-rich"); got != "" {
+		t.Errorf("应回流到公共池，group=%q", got)
+	}
+	if got := pl.GroupOf("u-rich"); got != "" {
+		t.Errorf("池内归属应同步清空，实得 %q", got)
+	}
+}
+
 // TestPatrolRateLimited11140NotBanned：11140 的模型级限流变体不是封号，不能进封号池。
 func TestPatrolRateLimited11140NotBanned(t *testing.T) {
 	fake := newPatrolUpstream()
