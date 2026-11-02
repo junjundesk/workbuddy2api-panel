@@ -55,6 +55,11 @@ type Config struct {
 	// 异步化（不要在这里做文件 IO）。
 	OnAccountBanned func(uid string)
 
+	// OnAccountDead 账号凭证失效（12153 session dead）时的回调（可选）。
+	// 面板据此把账号实时移入「失效池」分组。同 OnAccountBanned：回调在请求路径
+	// 上调用，实现方须自行异步化（不要在这里做文件 IO）。
+	OnAccountDead func(uid string)
+
 	// Panel 管理面板 handler（可选；nil = 不挂载）。挂载在 /panel/ 前缀下，
 	// 面板自带 Bearer 鉴权（同一 api_key）与内嵌静态资源，主路由只做转发。
 	Panel http.Handler
@@ -1697,6 +1702,10 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		h.cfg.Pool.CooldownSoftRate(uid, jitterDur(wafCooldownBase), time.Time{}, "waf 403 block")
 	case upstream.ErrSessionDead:
 		h.cfg.Pool.Disable(uid, "12153 session dead")
+		// 面板实时归组（失效池）：与封号（11140）同一套范式，不等下一轮巡检。
+		if h.cfg.OnAccountDead != nil {
+			h.cfg.OnAccountDead(uid)
+		}
 	case upstream.ErrNotFound:
 		// 404 短冷却（软冷却），防雪崩。固定 notFoundCooldown，不随 soft_rate 退避：
 		// 偶发路径缺失不是限流信号，不该按限流惩罚升级。

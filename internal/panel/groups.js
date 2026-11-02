@@ -13,6 +13,21 @@ function closeVeil(id) { $(id).classList.remove('on'); }
 function copyText(t) { if (!t) return; const ta = document.createElement('textarea'); ta.value = t; ta.style.position = 'fixed'; ta.style.opacity = '0'; document.body.appendChild(ta); ta.select(); try { document.execCommand('copy'); toast('已复制', 'ok'); } catch (e) { toast('复制失败', 'err'); } ta.remove(); }
 function groupOf(id) { return state.groups.find(g => g.id === id); }
 function selectedGroup() { return groupOf(state.selected); }
+/* hash 深链：#g=<分组 id>。主页分组卡片的「分组页」按钮就靠它直接落到该组，
+   否则用户还得在侧栏里自己再找一遍。切分组时用 replaceState 回写 hash，
+   保持可收藏 / 可分享，也不会在浏览器历史里堆一串分组切换记录。 */
+let hashDone = false;
+function hashTarget() {
+  const m = /^#g=(.+)$/.exec(location.hash || '');
+  if (!m) return '';
+  // 手改 / 截断的 hash（#g=%zz）会让 decodeURIComponent 抛 URIError，被 load() 的
+  // try 接住后整页显示「加载失败」——这里吞掉，落回公共池即可。
+  try { return decodeURIComponent(m[1]); } catch (e) { return ''; }
+}
+function syncHash() {
+  const want = state.selected === 'public' ? '#public' : '#g=' + encodeURIComponent(state.selected);
+  if (location.hash !== want) { try { history.replaceState(null, '', want); } catch (e) {} }
+}
 function publicAccounts() { const shared = new Set(state.groups.filter(g => g.shared_pool).map(g => g.id)); return state.accounts.filter(a => !a.group || shared.has(a.group)); }
 function groupAccounts(id) { return state.accounts.filter(a => a.group === id); }
 
@@ -25,7 +40,13 @@ async function api(path, opts) {
   const r = await fetch('/panel/api/' + path, Object.assign({}, opts, { headers: h }));
   if (r.status === 401) { openVeil('keyGate'); throw new Error('密钥无效'); }
   const d = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(d.error || ('HTTP ' + r.status));
+  if (!r.ok) {
+    // 失效账号的余额接口回 502，但响应体里带 dead / moved_to；挂到错误对象上，
+    // 调用方才能提示「已移入失效池」而不是干巴巴一句 502。
+    const err = new Error(d.error || ('HTTP ' + r.status));
+    err.status = r.status; err.body = d;
+    throw err;
+  }
   return d;
 }
 async function load() {
@@ -37,6 +58,10 @@ async function load() {
     const live = new Set(state.accounts.map(a => a.uid));
     Array.from(state.sel).forEach(u => { if (!live.has(u)) state.sel.delete(u); });
     if (state.selected !== 'public' && !groupOf(state.selected)) state.selected = 'public';
+    // 首次加载按 hash 落组（分组不存在就留在公共池，不报错——深链可能来自已删分组）。
+    // 之后每次 load 只把 hash 校准到当前选中，避免刷新 / 轮询把用户弹回别的组。
+    if (!hashDone) { hashDone = true; const want = hashTarget(); if (want && groupOf(want)) state.selected = want; }
+    syncHash();
     $('navState').textContent = '服务正常';
     renderAll();
     return true;
@@ -135,6 +160,7 @@ function promptCard(g) {
 // 测活结果：成功带上模型 / 耗时 / 回复片段；失败按阶段（模型目录 / 对话）给出原因。
 // 服务端对上游失败仍回 200 + ok:false（与代理测试同口径），因此这里按 r.ok 选 toast 颜色。
 function aliveToast(r) {
+  if (r && r.dead) return '测活失败：账号已失效（401），已移入「' + (r.moved_to || '失效池') + '」';
   if (!r || !r.ok) {
     const where = r && r.stage === 'catalog' ? '模型目录' : '对话';
     return '测活失败（' + where + '）：' + ((r && r.error) || '未知错误');
@@ -221,6 +247,7 @@ function aliveFlat(s, n) {
 // 与 aliveToast 同口径，但这里输出 HTML——弹窗里模型与耗时用等宽字对齐。
 // 上游回来的 error / reply 一律 esc：这些字段内容不受我们控制（错误页甚至是整段 HTML）。
 function aliveRowText(r) {
+  if (r && r.dead) return '账号已失效（401）· 已移入「' + esc(r.moved_to || '失效池') + '」';
   if (!r || !r.ok) {
     const where = r && r.stage === 'catalog' ? '模型目录' : '对话';
     return '失败（' + where + '）：' + (esc(aliveFlat(r && r.error, 160)) || '未知错误');
@@ -262,6 +289,134 @@ function stopAlive() {
   $('aliveStop').disabled = true;
   toast('已停止测活：剩余账号不再测试，在途的会跑完', 'warn');
 }
+/* ── 批量签到 / 余额：与主页「全部签到」同一套弹窗交互 ─────────────────────
+   主页点「全部签到」弹的是逐号清单，分组页这边若还停在按钮上的数字进度，两页就对不上；
+   更实际的原因是 401 失效归组只写在响应体里（dead / moved_to），只有逐号渲染
+   才看得见「已移入失效池」，一次性的汇总 toast 会把它吞掉。 */
+const BATCH_CONC = 4;
+const batchState = { running: false, stop: false, rows: [], kind: '', name: '' };
+
+// batchRowHtml 一行清单的初始态：空心点 + 待执行；skip 的行直接给跳过原因。
+function batchRowHtml(a, hint) {
+  const nick = a.nickname || a.uid.slice(0, 12);
+  return '<div class="alive-row">' +
+    '<span class="qdot wait"></span>' +
+    '<span class="who"><div class="nm">' + esc(nick) + '</div><div class="id">' + esc(a.uid) + '</div></span>' +
+    '<span class="st">' + esc(hint || '待执行') + '</span>' +
+    '<span class="msg">—</span></div>';
+}
+// batchCredHtml 余额片段：剩余 / 总额；企业版总额是 -1（不限量），只显示剩余。
+function batchCredHtml(r) {
+  if (r.credits == null) return r.balance_error ? esc(aliveFlat(r.balance_error, 160)) : '无余额数据';
+  const total = r.credits_total > 0 ? '<span class="mono"> / ' + r.credits_total + '</span>'
+    : (r.credits_total === -1 ? ' <span class="mono">/ 不限</span>' : '');
+  let s = '余额 <span class="mono">' + r.credits + '</span>' + total;
+  if (r.balance_error) s += ' · 余额查询失败：' + esc(aliveFlat(r.balance_error, 120));
+  return s;
+}
+// batchRowResult 把单号返回翻译成「状态点 + 状态词 + 说明」。dead / moved_to 是
+// 后端 401 失效归组的契约字段：没有 moved_to 就只说「已失效」，不谎称已移组。
+function batchRowResult(kind, r) {
+  if (!r) return { state: 'err', st: '失败', msg: '没有返回结果' };
+  if (r.dead) {
+    const to = r.moved_to ? '「' + esc(r.moved_to) + '」' : '失效分组';
+    return { state: 'err', st: '已失效', msg: '账号已失效（401）· 已移入' + to };
+  }
+  if (!r.ok) {
+    const why = r.error || r.message || r.balance_error;
+    return { state: 'err', st: '失败', msg: esc(aliveFlat(why, 160)) || '未知错误' };
+  }
+  if (kind === 'balance') return { state: 'done', st: '已刷新', msg: batchCredHtml(r) };
+  // 签到：企业版无签到体系（端点只刷额度）；checkin_done=false 且有 message 才是真失败。
+  if (r.enterprise) return { state: 'done', st: '企业版', msg: '无签到体系，仅刷新额度 · ' + batchCredHtml(r) };
+  if (r.checkin_done) return { state: 'done', st: '已签', msg: '今日已签 · ' + batchCredHtml(r) };
+  const why = r.checkin_message ? esc(aliveFlat(r.checkin_message, 140)) : '未签到';
+  return { state: 'err', st: '未签', msg: '签到失败：' + why + ' · ' + batchCredHtml(r) };
+}
+// batchProgress 进度与汇总：done / err / skip 都算终态，口径与测活一致。
+function batchProgress() {
+  const rows = batchState.rows, n = rows.length;
+  let fin = 0, ok = 0, fail = 0, skip = 0, dead = 0;
+  rows.forEach(r => {
+    if (r.state === 'done') { fin++; ok++; }
+    else if (r.state === 'err') { fin++; fail++; if (r.dead) dead++; }
+    else if (r.state === 'skip') { fin++; skip++; }
+  });
+  $('batchBar').style.width = (n ? Math.round(fin / n * 100) : 0) + '%';
+  const verb = batchState.kind === 'balance' ? '刷新' : '签到';
+  $('batchProgText').textContent = (batchState.running ? verb + '中 ' : '已结束 ') + fin + ' / ' + n;
+  $('batchSum').textContent = '成功 ' + ok + ' · 失败 ' + fail + (dead ? '（其中失效 ' + dead + '）' : '') + (skip ? ' · 跳过 ' + skip : '');
+}
+// runAccountBatch 批量入口：items = [{ a: 账号, skip: '跳过原因' }]。
+// 运行中再触发（含关掉弹窗后再点）只重开弹窗看进度，不重复开跑。
+async function runAccountBatch(opts) {
+  if (batchState.running) { openVeil('batchVeil'); return; }
+  const items = opts.items || [];
+  if (!items.length) { toast('没有可执行的账号', 'err'); return; }
+  batchState.running = true; batchState.stop = false;
+  batchState.kind = opts.kind; batchState.name = opts.name || '';
+  batchState.rows = items.map(it => ({ a: it.a, skip: it.skip || '', state: it.skip ? 'skip' : 'wait', dead: false }));
+  $('batchTitle').textContent = opts.title || '批量执行';
+  $('batchScope').textContent = opts.scope || '';
+  $('batchDesc').textContent = opts.desc || '';
+  $('batchList').innerHTML = items.map(it => batchRowHtml(it.a, it.skip || '待执行')).join('');
+  $('batchStop').disabled = false;
+  openVeil('batchVeil');
+
+  const nodes = Array.from($('batchList').children);
+  // 跳过行先落终态，进度条从第一秒就反映「这批里有多少根本不跑」。
+  batchState.rows.forEach((row, i) => {
+    if (row.state === 'skip') aliveSetRow(nodes[i], 'skip', '跳过', esc(row.skip));
+  });
+  batchProgress();
+
+  const path = batchState.kind === 'balance' ? 'balance' : 'checkin';
+  let cursor = 0;
+  const worker = async () => {
+    for (;;) {
+      if (batchState.stop) return;
+      const i = cursor++;
+      if (i >= items.length) return;
+      const row = batchState.rows[i];
+      if (row.state === 'skip') continue;
+      row.state = 'run';
+      aliveSetRow(nodes[i], 'run', path === 'balance' ? '刷新中…' : '签到中…', '请求上游…');
+      batchProgress();
+      let r;
+      try { r = await api('accounts/' + encodeURIComponent(row.a.uid) + '/' + path, { method: 'POST' }); }
+      // 单号失败只落到这一行，不中断整批；错误响应里的 dead / moved_to 一并带出来。
+      catch (e) { r = Object.assign({ ok: false, error: e.message || String(e) }, (e && e.body) || {}); }
+      const out = batchRowResult(path, r);
+      row.state = out.state; row.dead = !!(r && r.dead);
+      aliveSetRow(nodes[i], out.state, out.st, out.msg);
+      batchProgress();
+    }
+  };
+  try {
+    await Promise.all(Array.from({ length: Math.min(BATCH_CONC, items.length) }, worker));
+  } finally {
+    // 收尾必须走 finally：异常时若 running 卡在 true，之后点「本组签到」只会重开弹窗。
+    batchState.rows.forEach((row, i) => {
+      if (row.state === 'wait') { row.state = 'skip'; aliveSetRow(nodes[i], 'skip', '已停止', '未执行'); }
+    });
+    batchState.running = false;
+    $('batchStop').disabled = true;
+    batchProgress();
+  }
+  const ok = batchState.rows.filter(r => r.state === 'done').length;
+  const fail = batchState.rows.filter(r => r.state === 'err').length;
+  const dead = batchState.rows.filter(r => r.dead).length;
+  const skipN = batchState.rows.filter(r => r.state === 'skip').length;
+  toast((opts.title || '批量执行') + ' 完成：成功 ' + ok + (fail ? '，失败 ' + fail : '') + (dead ? '，' + dead + ' 个账号已失效并移入失效池' : '') + (skipN ? '，跳过 ' + skipN : ''), fail ? 'err' : 'ok');
+  await load(); // 签到 / 余额都会改池内积分与签到态，必须刷新
+}
+function stopBatch() {
+  if (!batchState.running) return;
+  batchState.stop = true;
+  $('batchStop').disabled = true;
+  toast('已停止：剩余账号不再执行，在途的会跑完', 'warn');
+}
+
 // runGroupAlive 分组详情「本组测活」：整组进清单 → 并发 ALIVE_CONC 逐号测 → 行级实时更新。
 // 运行中再点（含关掉弹窗后再点）只重开弹窗看进度，不重复开测；测活对象含禁用 / 冷却 / 暂停号
 // （测活是纯诊断动作，正好用来看「冷却中的号上游到底还行不行」）。
@@ -908,7 +1063,7 @@ document.addEventListener('click', async e => {
   const el = e.target.closest('[data-act]'); if (!el) return;
   const act = el.dataset.act;
   try {
-    if (act === 'select') { state.selected = el.dataset.id; state.sel.clear(); renderAll(); return; }
+    if (act === 'select') { state.selected = el.dataset.id; state.sel.clear(); renderAll(); syncHash(); return; }
     if (act === 'sel-one') { if (el.checked) state.sel.add(el.dataset.uid); else state.sel.delete(el.dataset.uid); updateSelUI(); return; }
     if (act === 'sel-all') { const on = el.checked; visibleAccounts().forEach(a => { if (on) state.sel.add(a.uid); else state.sel.delete(a.uid); }); document.querySelectorAll('[data-act="sel-one"]').forEach(c => { c.checked = on; }); updateSelUI(); return; }
     if (act === 'sel-pool') {
@@ -1086,8 +1241,17 @@ document.addEventListener('click', async e => {
       if (a === 'disable' && !confirm('禁用后该账号不再参与选号（保号任务默认也跳过），需手动解冻才能恢复。若只是想临时让位、仍要保号，请改用「暂停选号」。确认禁用？')) return;
       el.disabled = true;
       try {
-        if (a === 'checkin') { const r = await api(p + 'checkin', { method: 'POST' }); toast('签到完成' + (r.credits != null ? '，积分 ' + r.credits + (r.credits_total > 0 ? '/' + r.credits_total : '') : '') + (r.checkin_message ? '（' + r.checkin_message + '）' : ''), 'ok'); }
-        else if (a === 'balance') { const r = await api(p + 'balance', { method: 'POST' }); toast('余额已更新：' + r.credits + (r.credits_total > 0 ? ' / ' + r.credits_total : ''), 'ok'); }
+        // 200 也可能带 dead：签到拿到了结果、但随后的余额查询撞 401，账号已被移组。
+        if (a === 'checkin') {
+          const r = await api(p + 'checkin', { method: 'POST' });
+          if (r.dead) toast('账号已失效（401），已移入「' + (r.moved_to || '失效池') + '」', 'err');
+          else toast('签到完成' + (r.credits != null ? '，积分 ' + r.credits + (r.credits_total > 0 ? '/' + r.credits_total : '') : '') + (r.checkin_message ? '（' + r.checkin_message + '）' : ''), 'ok');
+        }
+        else if (a === 'balance') {
+          const r = await api(p + 'balance', { method: 'POST' });
+          if (r.dead) toast('账号已失效（401），已移入「' + (r.moved_to || '失效池') + '」', 'err');
+          else toast('余额已更新：' + r.credits + (r.credits_total > 0 ? ' / ' + r.credits_total : ''), 'ok');
+        }
         else if (a === 'alive') {
           // 测活可能在途数秒：按钮显示进行中文案，结果（含上游失败）走 toast。
           el.textContent = '测活中…';
@@ -1098,6 +1262,10 @@ document.addEventListener('click', async e => {
         else if (a === 'pause') { await api(p + 'pause', { method: 'POST' }); toast('已暂停选号（签到 / 保活照常）', 'ok'); }
         else if (a === 'resume') { await api(p + 'resume', { method: 'POST' }); toast('已恢复选号', 'ok'); }
         else if (a === 'disable') { await api(p + 'disable', { method: 'POST' }); toast('已禁用', 'ok'); }
+      } catch (e) {
+        // 余额接口对失效号回 502，dead / moved_to 在错误体里；不接住就只剩一句 502。
+        const mv = e.body && e.body.moved_to;
+        toast(e.body && e.body.dead ? '账号已失效（401），已移入「' + (mv || '失效池') + '」' : (e.message || '操作失败'), 'err');
       } finally { el.disabled = false; await load(); }
       return;
     }
@@ -1106,21 +1274,26 @@ document.addEventListener('click', async e => {
       await runGroupAlive(g); return;
     }
     if (act === 'alive-stop') { stopAlive(); return; }
+    if (act === 'batch-stop') { stopBatch(); return; }
     if (act === 'group-bulk') {
       const g = selectedGroup(); if (!g || el.disabled) return;
-      const what = el.dataset.what;
-      const items = groupAccounts(g.id).filter(a => !a.disabled && !(what === 'checkin' && a.enterprise));
-      if (!items.length) { toast('本组没有可执行的账号', 'err'); return; }
-      const label = el.textContent; el.disabled = true;
-      let ok = 0, fail = 0;
-      try {
-        for (let i = 0; i < items.length; i++) {
-          el.textContent = label + ' ' + (i + 1) + '/' + items.length;
-          try { await api('accounts/' + encodeURIComponent(items[i].uid) + '/' + what, { method: 'POST' }); ok++; } catch (e2) { fail++; }
-        }
-      } finally { el.disabled = false; el.textContent = label; }
-      toast(label + '完成：成功 ' + ok + (fail ? '，失败 ' + fail : ''), fail ? 'err' : 'ok');
-      await load(); return;
+      const what = el.dataset.what === 'balance' ? 'balance' : 'checkin';
+      // 原来是在按钮上跑数字进度、失败只累加一个计数：401 失效号到底是谁、有没有
+      // 移进失效池都看不见。改成和测活 / 主页「全部签到」同一套弹窗清单。
+      // 跳过项不预先过滤，保留成「跳过」行，运维才能确认禁用号 / 企业版没被漏跑。
+      const items = groupAccounts(g.id).map(a => ({
+        a: a,
+        skip: a.disabled ? '已禁用' : (what === 'checkin' && a.enterprise ? '企业版' : ''),
+      }));
+      if (!items.some(it => !it.skip)) { toast('本组没有可执行的账号', 'err'); return; }
+      await runAccountBatch({
+        kind: what,
+        title: (what === 'checkin' ? '本组签到' : '本组余额') + ' · ' + g.name,
+        scope: '（' + items.length + ' 个账号）',
+        desc: '并发 ' + BATCH_CONC + '；跳过已禁用' + (what === 'checkin' ? '与企业版' : '') + '；401 失效号自动移入失效池。',
+        items: items,
+      });
+      return;
     }
     if (act === 'group-tasks') {
       const g = selectedGroup(); if (!g || el.disabled) return;

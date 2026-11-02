@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -61,6 +62,13 @@ type Config struct {
 	// 待办并执行，与面板「执行全部待办」按钮同管线）。调度器只管时点不管实现——
 	// panel 在 scheduler 之后构造，用 SetGrowthHook 事后挂载；nil 时到点跳过。
 	GrowthHook func()
+
+	// SessionDeadHook 凭证失效回调（401 / 12153 Offline user session not found）：
+	// 批量任务命中时以 (uid, detail) 调用，面板据此把账号移入隔离分组「失效池」。
+	// panel 在 scheduler 之后构造，用 SetSessionDeadHook 事后挂载；nil 时不回调。
+	// 与 RunKeepaliveNow 的 NoteSessionDead 连续计数禁用是两条独立判定：本回调只移组
+	// （「失效池」可人工搬回），禁用仍走连续 3 次的防误判计数。
+	SessionDeadHook func(uid, detail string)
 }
 
 // Scheduler 调度器。
@@ -139,6 +147,34 @@ func (s *Scheduler) SetGrowthHook(fn func()) {
 	s.schedMu.Lock()
 	s.cfg.GrowthHook = fn
 	s.schedMu.Unlock()
+}
+
+// SetSessionDeadHook 挂载/替换凭证失效回调（panel 构造晚于 scheduler，事后接线）。
+func (s *Scheduler) SetSessionDeadHook(fn func(uid, detail string)) {
+	s.schedMu.Lock()
+	s.cfg.SessionDeadHook = fn
+	s.schedMu.Unlock()
+}
+
+// notifySessionDead 命中凭证失效时回调面板归组（快照当前 hook，未设置则无操作）。
+// 回调会写 groups.json；调用点均在后台任务 goroutine / 异步路径上，同步执行即可。
+func (s *Scheduler) notifySessionDead(uid, detail string) {
+	s.schedMu.Lock()
+	fn := s.cfg.SessionDeadHook
+	s.schedMu.Unlock()
+	if fn != nil {
+		fn(uid, detail)
+	}
+}
+
+// sessionDeadErr 判定上游凭证失效：*upstream.Error 且 HTTP 401 或分类为 ErrSessionDead。
+// 口径同 panel.isSessionDeadErr；scheduler 不依赖 panel，本地实现避免反向依赖成环。
+func sessionDeadErr(err error) bool {
+	var ue *upstream.Error
+	if !errors.As(err, &ue) {
+		return false
+	}
+	return ue.Status == http.StatusUnauthorized || ue.Kind == upstream.ErrSessionDead
 }
 
 // includeDisabledInTasks 返回保号类任务是否应覆盖禁用账号（配置快照，供循环开头取一次）。
@@ -478,6 +514,10 @@ func (s *Scheduler) RunCheckinNow() {
 					log.Printf("checkin %s: %v", logfmt.Label(st.UID, st.Nickname), err)
 				}
 				// 其余业务错误也继续走余额查询
+				// 凭证失效（401/12153）：回调面板移入「失效池」（可人工搬回，此处不禁用）。
+				if sessionDeadErr(err) {
+					s.notifySessionDead(st.UID, "批量签到 401")
+				}
 			} else {
 				// 首次签到成功此前静默——排查「签到到底跑没跑」时无迹可循（幂等行只在
 				// 重复触发时出现），成功也落一行。
@@ -489,6 +529,10 @@ func (s *Scheduler) RunCheckinNow() {
 		remain, total, expiring, earliestAt, earliestRemaining, err := s.cfg.Upstream.UserResourceDetailedWithExpiry(a, expiringSoon)
 		if err != nil {
 			log.Printf("user-resource %s: %v", logfmt.Label(st.UID, st.Nickname), err)
+			// 凭证失效（401/12153）：回调面板移入「失效池」。
+			if sessionDeadErr(err) {
+				s.notifySessionDead(st.UID, "批量余额 401")
+			}
 			continue
 		}
 		s.cfg.Pool.ReenableIfCredits(st.UID, remain, total)
@@ -591,6 +635,9 @@ func (s *Scheduler) RunKeepaliveNow() {
 			log.Printf("keepalive %s: %v", logfmt.Label(st.UID, st.Nickname), err)
 			var ue *upstream.Error
 			if errors.As(err, &ue) && ue.Kind == upstream.ErrSessionDead && !st.Disabled {
+				// 移组与禁用是两条独立判定：立即回调归组「失效池」（人工可搬回），
+				// 禁用仍走连续 3 次的防误判计数（NoteSessionDead），互不影响。
+				s.notifySessionDead(st.UID, "保活 12153 session dead")
 				if s.cfg.Pool.NoteSessionDead(st.UID) {
 					log.Printf("keepalive %s: 连续 %d 次 12153 session dead — 禁用", logfmt.Label(st.UID, st.Nickname), pool.SessionDeadThreshold())
 				}
@@ -629,6 +676,10 @@ func (s *Scheduler) RunBalanceRefreshNow() {
 			remain, total, expiring, earliestAt, earliestRemaining, err := s.cfg.Upstream.UserResourceDetailedWithExpiry(a, expiringSoon)
 			if err != nil {
 				log.Printf("balance %s: %v", logfmt.Label(uid, a.Nickname), err)
+				// 凭证失效（401/12153）：回调面板移入「失效池」。
+				if sessionDeadErr(err) {
+					s.notifySessionDead(uid, "批量余额 401")
+				}
 				return
 			}
 			s.cfg.Pool.ReenableIfCredits(uid, remain, total)

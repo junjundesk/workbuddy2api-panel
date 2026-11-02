@@ -1554,6 +1554,26 @@ func mergeModelInfos(primary, secondary []ModelInfo) []ModelInfo {
 	return out
 }
 
+// modelsAPIError 模型目录端点的非 200 响应：对外文本保持 "models api status N: body"，
+// 同时把结构化 *Error 挂进错误链（Unwrap）——上层（面板测活 / 巡检 / 主链路）可用
+// errors.As 判 401 / ErrSessionDead，不必退回字符串匹配。
+type modelsAPIError struct {
+	status int
+	body   string
+	ue     *Error
+}
+
+func newModelsAPIError(status int, body string) *modelsAPIError {
+	return &modelsAPIError{
+		status: status,
+		body:   body,
+		ue:     &Error{Kind: Classify(status, body), Status: status, Msg: body, Code: envelopeCode([]byte(body))},
+	}
+}
+
+func (e *modelsAPIError) Error() string { return fmt.Sprintf("models api status %d: %s", e.status, e.body) }
+func (e *modelsAPIError) Unwrap() error { return e.ue }
+
 // fetchEnterpriseModels 单路探测企业模型端点（/console/enterprises/personal/models）。
 // 解析口径：agents[cli].models 过滤 + nonChatModel 剔除 + disabled 剔除。
 func (c *Client) fetchEnterpriseModels(a *auth.Auth) ([]ModelInfo, error) {
@@ -1577,7 +1597,8 @@ func (c *Client) fetchEnterpriseModels(a *auth.Auth) ([]ModelInfo, error) {
 		return nil, fmt.Errorf("read body: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("models api status %d: %s", resp.StatusCode, truncate(string(raw), 120))
+		// 非 200 → 结构化挂链（文本不变），上层可判 401 / ErrSessionDead。
+		return nil, newModelsAPIError(resp.StatusCode, truncate(string(raw), 120))
 	}
 	var env struct {
 		Code int `json:"code"`
@@ -1931,7 +1952,8 @@ func (c *Client) fetchV3ConfigModelMap(a *auth.Auth, ua string) (map[string]Mode
 		return nil, fmt.Errorf("read body: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("v3/config status %d: %s", resp.StatusCode, truncate(string(raw), 120))
+		// 同 fetchEnterpriseModels：结构化挂链（文本不变），上层可判 401 / ErrSessionDead。
+		return nil, newModelsAPIError(resp.StatusCode, truncate(string(raw), 120))
 	}
 	var env struct {
 		Code int `json:"code"`

@@ -158,6 +158,13 @@ func New(cfg Config) *Panel {
 		logins:  map[string]loginSession{},
 	}
 	p.patrol = newPatrolRunner(p, cfg.PatrolFile)
+	// 批量任务（签到/余额/保活）命中凭证失效时回调面板实时归组「失效池」。
+	// 方法值闭包挂载：p 此刻已构造完成，无未初始化捕获问题。
+	if cfg.Scheduler != nil {
+		cfg.Scheduler.SetSessionDeadHook(func(uid, detail string) {
+			p.NotifyAccountDead(uid, detail)
+		})
+	}
 	p.routes()
 	return p
 }
@@ -761,6 +768,8 @@ func (p *Panel) accountCheckin(w http.ResponseWriter, r *http.Request) {
 	}
 	checkinMsg := ""
 	checkinDone := false
+	dead := false      // 凭证失效（401/12153）：响应带 dead/moved_to 标记
+	movedTo := ""
 	// 企业版无签到体系（上游 400 code 10001「企业账号不支持该操作」）：不发起该调用，
 	// 端点退化为「刷新额度」——企业额度走 get-enterprise-user-usage 口径（见 upstream）。
 	// 前端对企业号不渲染「签到」按钮；此处是 API 侧防御（外部脚本/旧缓存前端仍可能调用）。
@@ -773,6 +782,10 @@ func (p *Panel) accountCheckin(w http.ResponseWriter, r *http.Request) {
 			p.cfg.Pool.NoteCheckinDone(uid)
 			checkinDone = true
 		}
+		// 凭证失效（401/12153）：实时移入「失效池」，响应带 dead/moved_to 标记。
+		if isSessionDeadErr(err) {
+			dead, movedTo = true, p.NotifyAccountDead(uid, "签到 401")
+		}
 	} else {
 		p.cfg.Pool.NoteCheckinDone(uid)
 		checkinDone = true
@@ -784,9 +797,24 @@ func (p *Panel) accountCheckin(w http.ResponseWriter, r *http.Request) {
 	if checkinMsg != "" {
 		resp["checkin_message"] = checkinMsg
 	}
+	if dead {
+		resp["dead"] = true
+		if movedTo != "" {
+			resp["moved_to"] = movedTo
+		}
+	}
 	remain, total, expiring, earliestAt, earliestRemaining, err := p.cfg.Upstream.UserResourceDetailedWithExpiry(a, p.expiringSoonWindow())
 	if err != nil {
 		resp["balance_error"] = err.Error()
+		// 余额查询同样命中凭证失效时归组（签到与余额可能只挂一边）。
+		// 保持「签到出错仍继续查余额」的既有语义：此分支只补标记不改流程。
+		if isSessionDeadErr(err) {
+			dead, movedTo = true, p.NotifyAccountDead(uid, "余额查询 401")
+			resp["dead"] = true
+			if movedTo != "" {
+				resp["moved_to"] = movedTo
+			}
+		}
 		writeJSON(w, http.StatusOK, resp)
 		return
 	}
@@ -808,6 +836,17 @@ func (p *Panel) accountBalance(w http.ResponseWriter, r *http.Request) {
 	}
 	remain, total, expiring, earliestAt, earliestRemaining, err := p.cfg.Upstream.UserResourceDetailedWithExpiry(a, p.expiringSoonWindow())
 	if err != nil {
+		// 凭证失效（401/12153）：先实时移入「失效池」，仍回 502。writeErr 不支持附加
+		// 字段，这里改走 writeJSON——同一 502 状态码上带结构化 dead/moved_to 标记
+		// （前端按 error 文本展示，dead/moved_to 逐行标记）。
+		if isSessionDeadErr(err) {
+			body := map[string]any{"ok": false, "error": "user resource: " + err.Error(), "dead": true}
+			if moved := p.NotifyAccountDead(uid, "余额查询 401"); moved != "" {
+				body["moved_to"] = moved
+			}
+			writeJSON(w, http.StatusBadGateway, body)
+			return
+		}
 		writeErr(w, http.StatusBadGateway, "user resource: "+err.Error())
 		return
 	}

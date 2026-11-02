@@ -50,6 +50,8 @@ type aliveResp struct {
 	Kind           string `json:"kind,omitempty"`            // 上游错误分类（*upstream.Error）
 	UpstreamStatus int    `json:"upstream_status,omitempty"` // 上游 HTTP 状态（有则带）
 	Error          string `json:"error,omitempty"`
+	Dead           bool   `json:"dead"`             // 凭证失效（401/12153），账号已移入「失效池」
+	MovedTo        string `json:"moved_to,omitempty"` // dead 时被移入的分组名（幂等命中也带）
 }
 
 // accountAlive 面板「测活」：POST /panel/api/accounts/{uid}/alive。
@@ -77,6 +79,11 @@ func (p *Panel) accountAlive(w http.ResponseWriter, r *http.Request) {
 		resp.Stage = "catalog"
 		resp.LatencyMS = time.Since(started).Milliseconds()
 		resp.Error = err.Error()
+		// 凭证失效（401/12153）：实时移入「失效池」并回填标记。
+		if isSessionDeadErr(err) {
+			resp.Dead = true
+			resp.MovedTo = p.NotifyAccountDead(uid, "测活模型目录 401")
+		}
 		log.Printf("panel: 测活 uid=%s realm=%s 模型目录失败: %v", uid, realm, err)
 		writeJSON(w, http.StatusOK, resp)
 		return
@@ -129,6 +136,11 @@ func (p *Panel) accountAlive(w http.ResponseWriter, r *http.Request) {
 		resp.Error = aliveErrorText(chatErr)
 		resp.Kind = kind
 		resp.UpstreamStatus = upStatus
+		// 凭证失效（401/12153）：实时移入「失效池」并回填标记。
+		if isSessionDeadErr(chatErr) {
+			resp.Dead = true
+			resp.MovedTo = p.NotifyAccountDead(uid, "测活对话 401")
+		}
 		log.Printf("panel: 测活 uid=%s realm=%s model=%s 对话失败: %v", uid, realm, model, chatErr)
 		writeJSON(w, http.StatusOK, resp)
 		return

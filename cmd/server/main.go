@@ -354,6 +354,9 @@ func main() {
 		RecordClientInfo: cfg.Logging.RequestClientInfo,
 		// 主链路 11140 实时归组：账号被封时立刻进「封号池」，不必等下一轮巡检。
 		OnAccountBanned: pn.NotifyAccountBanned,
+		// 主链路 12153 实时归组：凭证失效立刻进「失效池」。回调在请求路径上调用，
+		// NotifyAccountDead 会写 groups.json，这里自行异步化（回调契约要求）。
+		OnAccountDead: func(uid string) { go pn.NotifyAccountDead(uid, "主链路 12153 session dead") },
 		// handler 侧第三道闸（global realm）：false（显式逃生门）时不列 global: 模型名。
 		GlobalEnabled: cfg.Global.Enabled,
 		// Responses 流式首事件提前开局（缺省 true，server.responses_early_created 可关）。

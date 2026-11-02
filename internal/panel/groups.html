@@ -271,6 +271,26 @@ input:focus,select:focus,textarea:focus { outline:none; border-color:var(--accen
   </div>
 </div>
 
+<!-- 批量签到 / 余额：与主页「全部签到」同构——进度条 + 逐号结果清单 + 停止 -->
+<div class="veil" id="batchVeil">
+  <div class="dlg" style="width:720px">
+    <header>
+      <h3><span id="batchTitle">批量执行</span> <span class="hint" id="batchScope"></span></h3>
+      <div class="hint" id="batchDesc">逐个账号执行，结果逐条更新在下方清单。</div>
+    </header>
+    <div class="body" style="overflow:hidden;padding-bottom:6px">
+      <div class="qprog"><div class="qbar"><i id="batchBar"></i></div><span class="note" id="batchProgText">准备中…</span></div>
+      <div class="alive-list" id="batchList"></div>
+    </div>
+    <footer>
+      <span class="note" id="batchSum"></span>
+      <span class="grow"></span>
+      <button class="ghost" data-act="batch-stop" id="batchStop" disabled>停止</button>
+      <button class="primary" data-act="close" data-target="batchVeil">关闭</button>
+    </footer>
+  </div>
+</div>
+
 <!-- 积分任务：与主页同一套交互（接受 / 领取 / 一键完成），在本页弹窗而不是深链回主页 -->
 <div class="veil" id="taskVeil">
   <div class="dlg" style="width:940px">
