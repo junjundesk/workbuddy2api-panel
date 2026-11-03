@@ -103,6 +103,12 @@ input:focus,select:focus,textarea:focus { outline:none; border-color:var(--accen
 .acc-wrap { max-height:560px; overflow:auto; }
 .acc { width:100%; border-collapse:collapse; font-size:12.5px; min-width:820px; }
 .acc th { text-align:left; font-size:11px; font-weight:500; color:var(--ink-3); padding:8px 10px; border-bottom:1px solid var(--line); position:sticky; top:0; background:var(--surface); z-index:1; white-space:nowrap; }
+/* 可排序表头：手型 + 三态箭头（⇅ 未排 / ▲ 升 / ▼ 降），排序中的列高亮 */
+.acc th[data-act="sort"] { cursor:pointer; user-select:none; }
+.acc th[data-act="sort"]:hover { color:var(--ink); }
+.acc th[data-act="sort"] .sar { margin-left:3px; font-style:normal; font-size:9px; opacity:.4; }
+.acc th[data-act="sort"].on { color:var(--ink); }
+.acc th[data-act="sort"].on .sar { opacity:1; color:var(--accent); }
 .acc td { padding:9px 10px; border-bottom:1px solid var(--line-soft); vertical-align:middle; }
 .acc tbody tr:hover { background:var(--surface-2); }
 .acc .mark { width:3px; padding:0; } .acc .mark i { display:block; width:3px; min-height:34px; background:var(--ok); } .acc tr.cool .mark i { background:var(--warn); } .acc tr.off .mark i { background:var(--bad); } .acc tr.paused .mark i { background:var(--ink-3); }

@@ -1,6 +1,7 @@
 package panel
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -142,5 +143,97 @@ func TestGroupsJSRemoveSelected(t *testing.T) {
 	}
 	if n := strings.Count(js[start:start+end], "confirm("); n != 1 {
 		t.Errorf("removeSelected 里 confirm 出现 %d 次，应只确认一次", n)
+	}
+}
+
+// TestGroupsJSSortAccounts 分组内表头排序的口径。
+//
+// 运维在几百个号的组里找「谁快没积分了」「谁一直失败」靠排序，所以这里锁住三件
+// 容易写错的事：企业版不限量（credits_total=-1）算最大值而不是最小；没查到积分的
+// 账号永远沉底（升序降序都在最后，否则空值会白占一屏）；同分账号保持后端顺序，
+// 否则每次刷新行都在跳，勾选跟着错位。
+func TestGroupsJSSortAccounts(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; sort test skipped")
+	}
+	script := `const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const start = src.indexOf("const SORT_KEY = 'wb2api.gpSort';");
+const end = src.indexOf('function renderStats(');
+if (start < 0 || end < 0) throw new Error('sort block not found');
+// statusOf 是排序的依赖（状态列按可运维性排），这里给个同口径的桩。
+const ctx = {
+  localStorage: { getItem: () => null, setItem: () => {} },
+  statusOf: a => (a.disabled ? { cls: 'off' } : a.paused ? { cls: 'paused' } : a.cooling ? { cls: 'cool' } : { cls: 'ok' }),
+};
+vm.createContext(ctx);
+vm.runInContext(src.slice(start, end) + [
+  '',
+  'this.setSort=function(k,d){sortState.key=k;sortState.dir=d;};',
+  'this.sortAccounts=sortAccounts;',
+  'this.th=function(k,l){return sortTh(k,l);};',
+  'this.label=sortStateLabel;',
+].join('\n'), ctx);
+const A = [
+  { uid: 'a1', nickname: 'beta', credits: 50, success_count: 3, err_total: 1, in_flight: 2 },
+  { uid: 'a2', nickname: 'Alpha', credits: 100, success_count: 9, err_total: 0, cooling: true },
+  { uid: 'a3', nickname: 'delta', credits: null, success_count: 0, err_total: 0 },
+  { uid: 'a4', nickname: 'gamma', credits_total: -1, credits: 5, success_count: 1, err_total: 2, disabled: true },
+  { uid: 'a5', nickname: 'epsilon', credits: 100, success_count: 9, err_total: 0 },
+];
+const ids = l => l.map(a => a.uid).join(',');
+const out = { def: ids(ctx.sortAccounts(A)) };
+ctx.setSort('credits', -1); out.creditsDesc = ids(ctx.sortAccounts(A));
+ctx.setSort('credits', 1); out.creditsAsc = ids(ctx.sortAccounts(A));
+ctx.setSort('status', 1); out.statusAsc = ids(ctx.sortAccounts(A));
+ctx.setSort('calls', -1); out.callsDesc = ids(ctx.sortAccounts(A));
+ctx.setSort('name', 1); out.nameAsc = ids(ctx.sortAccounts(A));
+ctx.setSort('credits', 1);
+out.th = ctx.th('credits', '积分');
+out.thOff = ctx.th('name', '账号');
+out.label = ctx.label();
+process.stdout.write(JSON.stringify(out));`
+	f, err := os.CreateTemp(t.TempDir(), "sort-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "groups.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("sort node test failed: %v\n%s", err, out)
+	}
+	var got struct {
+		Def         string `json:"def"`
+		CreditsDesc string `json:"creditsDesc"`
+		CreditsAsc  string `json:"creditsAsc"`
+		StatusAsc   string `json:"statusAsc"`
+		CallsDesc   string `json:"callsDesc"`
+		NameAsc     string `json:"nameAsc"`
+		Th          string `json:"th"`
+		ThOff       string `json:"thOff"`
+		Label       string `json:"label"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(string(out))), &got); err != nil {
+		t.Fatalf("sort output not json: %v\n%s", err, out)
+	}
+	for _, c := range []struct{ name, got, want string }{
+		{"默认顺序", got.Def, "a1,a2,a3,a4,a5"},
+		{"积分降序", got.CreditsDesc, "a4,a2,a5,a1,a3"}, // 不限量最前、空值沉底、同分保序
+		{"积分升序", got.CreditsAsc, "a1,a2,a5,a4,a3"},
+		{"状态升序", got.StatusAsc, "a1,a3,a5,a2,a4"}, // ok → cool → paused → off
+		{"成功降序", got.CallsDesc, "a2,a5,a1,a4,a3"},
+		{"账号升序", got.NameAsc, "a2,a1,a3,a5,a4"},
+		{"积分列名", got.Label, "积分"},
+		{"排序中表头", got.Th, `<th class="on" data-act="sort" data-key="credits" title="按积分排序：点一次升序、再点降序、第三次恢复默认">积分<i class="sar">▲</i></th>`},
+		{"未排序列", got.ThOff, `<th class="" data-act="sort" data-key="name" title="按账号排序：点一次升序、再点降序、第三次恢复默认">账号<i class="sar">⇅</i></th>`},
+	} {
+		if c.got != c.want {
+			t.Errorf("%s=%q\nwant    %q", c.name, c.got, c.want)
+		}
 	}
 }
