@@ -52,6 +52,12 @@ func GatewayHint(kind ErrKind, msg string, ctx HintContext) string {
 		// （等待窗口过去再试，换号/立刻重试无意义）。
 		return "upstream WAF blocked the gateway; retry after the block window"
 	case ErrSoftRate:
+		// 14003 是「模型×账号」请求速率限流：账号本身可用，换模型/稍后重试即可，
+		// 与账号级 429 的「等 reset」不是一回事——文案要指向正确动作，
+		// 否则客户端会误以为整号被限、进而无谓等待。
+		if IsRequestRateLimit(msg) {
+			return "model busy at upstream (request rate limit); switch models or retry later"
+		}
 		return "rate limited by upstream; retry after reset"
 	case ErrAccountFault:
 		return "account-level fault at upstream (auth/quota state); the gateway will rotate or disable this account"
@@ -99,11 +105,11 @@ func FrameHintFunc(ctxFn func() HintContext) func(string) string {
 	}
 }
 
-// FrameKind 从 SSE error 帧 payload 判定 ErrKind：6004 模型级限流的流式形态
-// （IsModelRateLimit 对帧 JSON 直接命中）优先；其余取帧内 error.message 走
-// Classify（请求级 400 口径）。判不出 → ErrNone（无 hint）。
+// FrameKind 从 SSE error 帧 payload 判定 ErrKind：模型级限流的流式形态
+// （6004 / 14003，IsModelScopeRateLimit 对帧 JSON 直接命中）优先；其余取帧内
+// error.message 走 Classify（请求级 400 口径）。判不出 → ErrNone（无 hint）。
 func FrameKind(payload string) ErrKind {
-	if IsModelRateLimit(payload) {
+	if IsModelScopeRateLimit(payload) {
 		return ErrSoftRate
 	}
 	var f struct {

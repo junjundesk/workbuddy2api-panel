@@ -812,6 +812,8 @@ async function loadOverview(quiet) {
 function aliveToast(r) {
   // 失效（401）在服务端已搬进失效池：先把这句话说清楚，再谈 catalog / 对话阶段。
   if (r && r.dead) return '测活失败：账号已失效（401），已移入「' + (r.moved_to || '失效池') + '」';
+  // 14003「模型繁忙」不是账号问题：号是好的，换模型 / 稍后重试即可，别照着失败去删号。
+  if (r && r.model_busy) return '模型繁忙（14003 请求过于频繁）· 非账号问题，稍后重试';
   if (!r || !r.ok) {
     const where = r && r.stage === 'catalog' ? '模型目录' : '对话';
     return '测活失败（' + where + '）：' + ((r && r.error) || '未知错误');
@@ -1138,6 +1140,8 @@ function aliveFlat(s, n) {
 function aliveRowText(r) {
   // 测活撞 401 时后端已把号搬进失效池，清单里要写明去哪了，否则只是「失败（对话）」。
   if (r && r.dead) return '账号已失效（401）· 已移入「' + esc(r.moved_to || '失效池') + '」';
+  // 14003 与 401 分开表述：一个是模型挤、一个是号坏了，混着显示会让人误删好号。
+  if (r && r.model_busy) return '模型繁忙（14003 请求过于频繁）· 非账号问题，稍后重试';
   if (!r || !r.ok) {
     const where = r && r.stage === 'catalog' ? '模型目录' : '对话';
     return '失败（' + where + '）：' + (esc(aliveFlat(r && r.error, 160)) || '未知错误');

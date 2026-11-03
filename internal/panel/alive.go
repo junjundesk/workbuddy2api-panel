@@ -52,6 +52,10 @@ type aliveResp struct {
 	Error          string `json:"error,omitempty"`
 	Dead           bool   `json:"dead"`             // 凭证失效（401/12153），账号已移入「失效池」
 	MovedTo        string `json:"moved_to,omitempty"` // dead 时被移入的分组名（幂等命中也带）
+	// ModelBusy 上游 14003「模型繁忙/请求速率限流」：账号本身健康，只是这个模型此刻
+	// 太挤（换模型立刻可用）。前端据此显示「模型繁忙」而不是「账号失效」——测活失败
+	// 不等于号坏了，把两者混为一谈会让人误删好号。
+	ModelBusy bool `json:"model_busy,omitempty"`
 }
 
 // accountAlive 面板「测活」：POST /panel/api/accounts/{uid}/alive。
@@ -141,6 +145,8 @@ func (p *Panel) accountAlive(w http.ResponseWriter, r *http.Request) {
 			resp.Dead = true
 			resp.MovedTo = p.NotifyAccountDead(uid, "测活对话 401")
 		}
+		// 14003（模型繁忙）：只加标记，不动分组——号是好的，不该因为一个模型挤就归组。
+		resp.ModelBusy = isModelBusyErr(chatErr)
 		log.Printf("panel: 测活 uid=%s realm=%s model=%s 对话失败: %v", uid, realm, model, chatErr)
 		writeJSON(w, http.StatusOK, resp)
 		return
@@ -164,6 +170,8 @@ func (p *Panel) accountAlive(w http.ResponseWriter, r *http.Request) {
 		resp.Error = aliveErrorText(aggErr)
 		resp.Kind = kind
 		resp.UpstreamStatus = upStatus
+		// 200 + error 帧（14003 也走这条：上游开流后才吐错误帧）：同 chat 失败口径。
+		resp.ModelBusy = isModelBusyErr(aggErr)
 		log.Printf("panel: 测活 uid=%s realm=%s model=%s 流读取失败: %v", uid, realm, model, aggErr)
 		writeJSON(w, http.StatusOK, resp)
 		return
@@ -238,6 +246,19 @@ func aliveTotalTokens(agg map[string]any) int64 {
 		return int64(v)
 	}
 	return 0
+}
+
+// isModelBusyErr 报告测活失败是否只是上游 14003（模型繁忙 / 请求速率限流）。
+//
+// 与 401 的处置刻意区分：401 要移组（号废了），14003 只需提示换模型/稍后重试
+// （号没坏）。判据用结构化业务码，不靠 "too many requests" 文案——文案与真正的
+// 账号级限流高度重合，靠文案会把「该冷却这个号」误判成「模型忙」。
+func isModelBusyErr(err error) bool {
+	var ue *upstream.Error
+	if !errors.As(err, &ue) {
+		return false
+	}
+	return ue.Code == 14003 || upstream.IsRequestRateLimit(ue.Msg)
 }
 
 // aliveErrorFields 从上游错误里取分类与 HTTP 状态（非 *upstream.Error 返回空/0）。

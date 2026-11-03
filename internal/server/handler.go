@@ -190,6 +190,38 @@ func (h *Handler) softCooldown() time.Duration {
 // 故固定 60s 防雪崩即可，不随 soft_rate 配置、也不参与软退避指数。
 const notFoundCooldown = 60 * time.Second
 
+// 上游 14003「模型级请求速率限流」的冷却边界。上游 body 明写
+// retry_policy.retry_after（实测 30s），到期同模型即可再试：这是**模型**在忙，
+// 不是账号有问题，也不是整号限流。
+//
+// 三个值的作用：
+//   - requestRateMax 硬顶 2 分钟：该限流天生是秒级窗口，跟 soft_rate（600s 起、
+//     封顶 2h 的账号级退避）完全不是一个量级；给大了等于把号从这个模型上摘掉半天。
+//   - requestRateFallback 兜底 30s：body/头都没给时长时用它（上游文案本身也写
+//     "retry later"，30s 足够滑过速率窗口）。
+//   - requestRateMin 下限 5s：上游偶尔给 1s 这种没有退避意义的脏值，钳一下才不至于
+//     在同一秒内反复撞墙（等于没冷却，还会把请求打得更密）。
+const (
+	requestRateMax      = 2 * time.Minute
+	requestRateFallback = 30 * time.Second
+	requestRateMin      = 5 * time.Second
+)
+
+// clampRequestRate 把 14003 的冷却时长夹到 [requestRateMin, requestRateMax]。
+// d<=0 时用 requestRateFallback（调用方已试过 body 与响应头，仍没拿到时长）。
+func clampRequestRate(d time.Duration) time.Duration {
+	if d <= 0 {
+		d = requestRateFallback
+	}
+	if d < requestRateMin {
+		d = requestRateMin
+	}
+	if d > requestRateMax {
+		d = requestRateMax
+	}
+	return d
+}
+
 // ServiceName 网关身份标识。经 /healthz 响应体 service 字段与 X-Service 头同时透出：
 // 宿主（如 workbuddy-switch 托管网关子进程）探测同端口的旧服务/其他服务时，对方即使
 // 返回 2xx 也不带本标识，宿主据此可识别"假成功"。
@@ -1213,10 +1245,11 @@ func (h *Handler) chatCompletionsIn(w http.ResponseWriter, r *http.Request, in *
 			if kind == upstream.ErrWafBlock && h.wafIP.noteWaf(scope.GroupID, acct.UID) {
 				break
 			}
-			// 6004 模型级限流：该号该模型已被冷冻，换下一个号立刻可用——退避
-			// 500ms/1s 只是把客户端延迟堆起来（一次请求可能换到 8 个号）。
+			// 6004 / 14003 模型级限流：该号该模型已被冷冻，换下一个号立刻可用——退避
+			// 500ms/1s 只是把客户端延迟堆起来（一次请求可能换到 8 个号）。14003 尤其
+			// 不能退避：它是速率窗口，退避反而把「换号即可」的救路径拖成秒级等待。
 			// 其余分类仍走退避（上游可能在抖，连打会加重风控）。
-			if kind == upstream.ErrSoftRate && upstream.IsModelRateLimit(string(respBody)) {
+			if kind == upstream.ErrSoftRate && upstream.IsModelScopeRateLimit(string(respBody)) {
 				if r.Context().Err() != nil {
 					break // 客户端断连：终止轮转
 				}
@@ -1345,7 +1378,7 @@ func (h *Handler) chatCompletionsIn(w http.ResponseWriter, r *http.Request, in *
 				st.status = ue.Status
 				h.applyErrorPolicy(acct.UID, ue.Kind, ue.Msg, bareModel, ue)
 				fail(acct.UID)
-				if ue.Kind == upstream.ErrSoftRate && upstream.IsModelRateLimit(ue.Msg) {
+				if ue.Kind == upstream.ErrSoftRate && upstream.IsModelScopeRateLimit(ue.Msg) {
 					if r.Context().Err() != nil {
 						break
 					}
@@ -1626,9 +1659,11 @@ func isUpstreamTimeout(err error, clientGone bool) bool {
 //
 // 十条路径，各司其职：
 //   - ErrHardCredit → CooldownUntilTomorrow4AM：即时硬冷却到次日 04:00（等签到恢复）。
-//   - ErrSoftRate → 6004 只锁 (账号, 模型) 并精确对齐上游重置墙钟（无文案时用
-//     Retry-After 头，再没有就有界探测 TTL；**永不**降级成账号级冷却）；非 6004
-//     走账号级软冷却（同样优先对齐墙钟/头，最后才是有界退避）。均不做指数堆加。
+//   - ErrSoftRate → 6004 / 14003 只锁 (账号, 模型)：6004 对齐上游重置墙钟（无文案
+//     时用 Retry-After 头，再没有就有界探测 TTL）；14003 用 body 明写的 retry_after
+//     （兜底 30s、夹到 5s~2m，模型级速率窗口本来就是秒级）。两者**永不**降级成
+//     账号级冷却——那会让整号所有模型陪葬。其余 429 走账号级软冷却（同样优先对齐
+//     墙钟/头，最后才是有界退避）。均不做指数堆加。
 //   - ErrWafBlock → 账号级软冷却：**不 Disable**——WAF 403 是 IP/指纹维频控信号，
 //     罚过即走、到期自愈。时长优先 Retry-After 头；缺失按 wafCooldownBase(60s)
 //     起 · softStreak 指数、封顶 soft_rate_max 的既有 CooldownSoftRate 有界退避。
@@ -1659,6 +1694,24 @@ func (h *Handler) applyErrorPolicy(uid string, kind upstream.ErrKind, body, mode
 		// 不需要异步核查（冗余）。立即换号。
 		h.cfg.Pool.CooldownUntilTomorrow4AM(uid, "余额不足")
 	case upstream.ErrSoftRate:
+		// 14003 先判：上游明说「Model busy. Please switch models or retry later」，
+		// 是同号换模型立刻可用的**模型级请求速率限流**。此前它落账号级软冷却，
+		// 一个模型忙就把整号所有模型摘掉 30s~600s（2026-09-23 上游 14003 风暴里
+		// 16 个号在 76 秒内全部阵亡的根因形态）。这里只冷冻 (账号, 模型)。
+		//
+		// 时长来源优先级：body.retry_policy.retry_after（上游明写的等待意图）>
+		// Retry-After 头 > 30s 兜底，夹到 [5s, 2m]——速率窗口是秒级的，用账号级
+		// soft_rate 的 600s 基数纯属误伤。
+		if upstream.IsRequestRateLimit(body) {
+			d := time.Duration(0)
+			if bodyD, ok := upstream.ParseBodyRetryAfter(body); ok {
+				d = bodyD
+			} else if uerr != nil && uerr.RetryAfter > 0 {
+				d = uerr.RetryAfter
+			}
+			h.cfg.Pool.CooldownModelFor(uid, model, clampRequestRate(d), "14003 request rate limit")
+			return
+		}
 		// 6004（模型级）与普通 429（账号级）语义不同，必须分流：
 		//   - 6004 → **只锁 (账号, 模型)**：有「将在 … 重置」按该墙钟；只有 Retry-After
 		//     头就按头；两者都没有给有界探测 TTL。绝不降级成账号级冷却——那会让整号

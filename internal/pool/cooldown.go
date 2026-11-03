@@ -181,6 +181,42 @@ func (p *Pool) CooldownSoftForModel(uid string, base time.Duration, resetAt time
 	p.dirty.Store(true)
 }
 
+// CooldownModelFor 固定时长的 (账号, 模型) 冷冻入口，给「模型级请求速率限流」
+// （上游 14003）用：上游明说 retry_after（常见 30s），到期即可重试同一模型，
+// 账号本身完全健康。
+//
+// 与 CooldownSoftForModel 的差别只在时长来源：后者对齐「将在 … 重置」墙钟，
+// 无墙钟时回落 30 分钟探测 TTL——对 14003 的 30 秒语义来说长得离谱（会把号在
+// 一个模型上白白冻半小时）。本入口只吃调用方算好的固定时长（handler 按
+// retry_after / 兜底值夹到 5s~2m），因此不需要重置时刻。
+//
+// 语义与 6004 一致的三条底线：
+//   - 只写 modelCooldowns[model]，**不碰账号级** until/coolKind：该账号的其他模型
+//     必须照常可选（否则就是 2026-09-23 那次「一个模型忙 → 整号下线」的复现）；
+//   - 已有更长的冷冻（6004 墙钟 / 11102 负缓存）不被这次的短冷却截短；
+//   - 重复命中不堆加、不延长（固定时长即最终时长）。
+func (p *Pool) CooldownModelFor(uid, model string, d time.Duration, reason string) {
+	if uid == "" || model == "" || d <= 0 {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.byUID[uid]
+	if !ok {
+		return
+	}
+	now := time.Now()
+	until := now.Add(d)
+	if prev, exists := e.modelCooldowns[model]; exists && !prev.AuditOnly && prev.Until.After(until) {
+		return // 已有更长的冷冻，短冷却不得截短它
+	}
+	if e.modelCooldowns == nil {
+		e.modelCooldowns = map[string]modelCooldown{}
+	}
+	e.modelCooldowns[model] = modelCooldown{Until: until, Reason: reason}
+	p.dirty.Store(true)
+}
+
 // RecordModelRateLimitAudit 记录只供展示、不参与模型路由的 6004 台账项。
 // 说明：无重置时间的 6004 现在由 CooldownSoftForModel 写**真实路由冷冻**（模型级
 // 探测 TTL），生产路径已不再调用本方法；保留它是为了历史 state.json 的 AuditOnly

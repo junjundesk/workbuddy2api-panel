@@ -137,6 +137,83 @@ func TestIsModelRateLimit(t *testing.T) {
 	}
 }
 
+// TestIsRequestRateLimit 14003 是「模型繁忙 / 请求速率限流」：模型级、账号无关。
+// 判据必须走结构化业务码，不能靠 "too many requests" 文案——那段文案与真正的
+// 账号级限流高度重合，靠文案会把两种情况混成一个处置。
+func TestIsRequestRateLimit(t *testing.T) {
+	cases := []struct {
+		body string
+		want bool
+	}{
+		{`{"code":14003,"msg":"too many requests","retry_policy":{"retry":true,"retry_after":30}}`, true},
+		{`{"code": 14003,"msg":"x"}`, true},
+		{`{"error":{"code":14003,"msg":"too many requests"}}`, true},
+		// 6004 是另一类模型级限流（重置墙钟），不算 14003。
+		{`{"code":6004,"msg":"将在 2026-09-11 18:33:27 UTC+8 重置"}`, false},
+		// 只有文案没有业务码：不判（可能是账号级 429 文本）。
+		{`{"msg":"too many requests"}`, false},
+		{`{"code":140030,"msg":"x"}`, false}, // 前缀相同的其他码不得命中
+		{``, false},
+	}
+	for _, c := range cases {
+		if got := IsRequestRateLimit(c.body); got != c.want {
+			t.Errorf("IsRequestRateLimit(%q)=%v want %v", c.body, got, c.want)
+		}
+	}
+}
+
+// TestIsModelScopeRateLimit 两个模型级限流码都算「只锁模型、换号即救」，
+// 其余（含账号级 429）不算。
+func TestIsModelScopeRateLimit(t *testing.T) {
+	cases := []struct {
+		body string
+		want bool
+	}{
+		{`{"code":6004,"msg":"将在 2026-09-11 18:33:27 UTC+8 重置"}`, true},
+		{`{"code":14003,"msg":"too many requests"}`, true},
+		{`{"code":11140,"msg":"The model provider is rate-limiting requests."}`, false},
+		{`{"code":1,"msg":"429 rate limit"}`, false},
+		{``, false},
+	}
+	for _, c := range cases {
+		if got := IsModelScopeRateLimit(c.body); got != c.want {
+			t.Errorf("IsModelScopeRateLimit(%q)=%v want %v", c.body, got, c.want)
+		}
+	}
+}
+
+// TestParseBodyRetryAfter 解析 14003 body 里明写的 retry_policy.retry_after：
+// 上游会用它告诉客户端「30 秒后再来」，优先采信比我们猜的兜底值更准。
+func TestParseBodyRetryAfter(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want time.Duration
+		ok   bool
+	}{
+		{"数字 30 秒", `{"code":14003,"retry_policy":{"retry":true,"retry_after":30}}`, 30 * time.Second, true},
+		{"数字字符串", `{"code":14003,"retry_policy":{"retry_after":"45"}}`, 45 * time.Second, true},
+		{"小数", `{"code":14003,"retry_policy":{"retry_after":2.5}}`, 2500 * time.Millisecond, true},
+		{"只有 retry 布尔", `{"code":14003,"retry_policy":{"retry":true}}`, 0, false},
+		{"没有 retry_policy", `{"code":14003,"msg":"too many requests"}`, 0, false},
+		{"零值丢弃", `{"code":14003,"retry_policy":{"retry_after":0}}`, 0, false},
+		{"负数丢弃", `{"code":14003,"retry_policy":{"retry_after":-5}}`, 0, false},
+		{"超 2h 丢弃（脏数据防永久冷冻）", `{"code":14003,"retry_policy":{"retry_after":7201}}`, 0, false},
+		{"非法字符串丢弃", `{"code":14003,"retry_policy":{"retry_after":"soon"}}`, 0, false},
+		{"空 body", ``, 0, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := ParseBodyRetryAfter(c.body)
+			if ok != c.ok {
+				t.Fatalf("ok=%v want %v (body=%s)", ok, c.ok, c.body)
+			}
+			if ok && got != c.want {
+				t.Errorf("d=%v want %v", got, c.want)
+			}
+		})
+	}
+}
 // TestParseSoftRateReset 解析上游 429 6004 msg 里的「将在 … 重置」时间（## UTC+8）。
 func TestParseSoftRateReset(t *testing.T) {
 	future := time.Now().Add(35 * time.Minute)

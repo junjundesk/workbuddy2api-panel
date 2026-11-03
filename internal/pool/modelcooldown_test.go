@@ -283,6 +283,124 @@ func TestModelCooldownsExpiredAllowsSameModel(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------------
+// 14003 请求速率限流：模型级固定时长冷却（CooldownModelFor）
+// ---------------------------------------------------------------------------
+
+// TestCooldownModelForLocksOnlyModel 14003 只冷 (账号, 模型)：触发模型不可选，
+// 同账号其他模型仍可选，账号级 until 一动不动。这是本改造的核心——
+// 旧实现把 14003 当账号级 429，30 秒内整号所有模型一起摘，等于把一个模型的抖动放大成账号故障。
+func TestCooldownModelForLocksOnlyModel(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.CooldownModelFor("u1", "glm-5.3", 30*time.Second, "14003 request rate limit")
+
+	p.mu.RLock()
+	e := p.byUID["u1"]
+	mc, ok := e.modelCooldowns["glm-5.3"]
+	until := e.until
+	p.mu.RUnlock()
+	if !ok {
+		t.Fatal("modelCooldowns 缺少 glm-5.3")
+	}
+	if rem := time.Until(mc.Until); rem < 25*time.Second || rem > 31*time.Second {
+		t.Errorf("Until 剩余=%v want ~30s（回归默认 30 分钟就太长、把模型冻死的旧路径）", rem)
+	}
+	if !mc.ResetAt.IsZero() {
+		t.Errorf("ResetAt=%v 应为零值（14003 没说重置墙钟，只有相对 retry_after）", mc.ResetAt)
+	}
+	if mc.Reason != "14003 request rate limit" {
+		t.Errorf("Reason=%q 应保留调用方原因", mc.Reason)
+	}
+	if !until.IsZero() {
+		t.Errorf("until=%v 应为零值（14003 绝不写账号级冷却）", until)
+	}
+	now := time.Now()
+	if e.healthyForModel(now, "glm-5.3") {
+		t.Error("触发模型 glm-5.3 应不可选")
+	}
+	if !e.healthyForModel(now, "hy3-x") {
+		t.Error("其他模型 hy3-x 应仍可选")
+	}
+	if !e.healthy(now) {
+		t.Error("账号级 healthy 应为 true")
+	}
+	st, _ := p.Status("u1")
+	if st.Cooling {
+		t.Errorf("Status.Cooling=true 说明账号级冷却被写脏: %+v", st)
+	}
+	if len(st.RateLimitedModels) != 1 || st.RateLimitedModels[0].Model != "glm-5.3" || st.RateLimitedModels[0].Kind != "rate_limit" {
+		t.Errorf("台账行=%+v want 一行 glm-5.3/rate_limit", st.RateLimitedModels)
+	}
+}
+
+// TestCooldownModelForKeepsLonger 短冷却绝不截短已有的长冷却：
+// 6004 那条可能锁到上游重置墙钟（小时级），一次 14003 的 30 秒不能把它提前放出来。
+func TestCooldownModelForKeepsLonger(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	long := time.Now().Add(2 * time.Hour)
+	p.CooldownSoftForModel("u1", time.Minute, long, "glm-5.3", "6004 model rate limit")
+	p.CooldownModelFor("u1", "glm-5.3", 30*time.Second, "14003 request rate limit")
+
+	p.mu.RLock()
+	mc := p.byUID["u1"].modelCooldowns["glm-5.3"]
+	p.mu.RUnlock()
+	if d := mc.Until.Sub(long); d < -time.Second || d > time.Second {
+		t.Errorf("Until=%v 被 14003 的 30s 截短（want ~%v）", mc.Until, long)
+	}
+	if mc.Reason != "6004 model rate limit" {
+		t.Errorf("Reason=%q 不应被短冷却覆盖", mc.Reason)
+	}
+}
+
+// TestCooldownModelForOverridesShorter 反过来：新冷却更长时应当延长，
+// 否则上游回 retry_after=120 而我们只按 30s 记，会在窗口内反复撞限。
+func TestCooldownModelForOverridesShorter(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.CooldownModelFor("u1", "glm-5.3", 10*time.Second, "14003 request rate limit")
+	p.CooldownModelFor("u1", "glm-5.3", 90*time.Second, "14003 request rate limit")
+	p.mu.RLock()
+	mc := p.byUID["u1"].modelCooldowns["glm-5.3"]
+	p.mu.RUnlock()
+	if rem := time.Until(mc.Until); rem < 80*time.Second || rem > 91*time.Second {
+		t.Errorf("Until 剩余=%v want ~90s（更长的新冷却应覆盖）", rem)
+	}
+}
+
+// TestCooldownModelForNoOps 空 uid / 空模型 / 非正时长一律不写台账（防御脏参数）。
+func TestCooldownModelForNoOps(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.CooldownModelFor("", "glm-5.3", time.Minute, "r")
+	p.CooldownModelFor("u1", "", time.Minute, "r")
+	p.CooldownModelFor("u1", "glm-5.3", 0, "r")
+	p.CooldownModelFor("u1", "glm-5.3", -time.Second, "r")
+	p.mu.RLock()
+	n := len(p.byUID["u1"].modelCooldowns)
+	p.mu.RUnlock()
+	if n != 0 {
+		t.Errorf("modelCooldowns=%d want 0（脏参数不得落盘）", n)
+	}
+}
+
+// TestCooldownModelForExpires 到期即恢复：14003 是短窗口，不该像 6004 那样长冻。
+func TestCooldownModelForExpires(t *testing.T) {
+	p := New("")
+	p.Add(&auth.Auth{UID: "u1"})
+	p.CooldownModelFor("u1", "glm-5.3", 40*time.Millisecond, "14003 request rate limit")
+	p.mu.RLock()
+	e := p.byUID["u1"]
+	p.mu.RUnlock()
+	if e.healthyForModel(time.Now(), "glm-5.3") {
+		t.Fatal("冷却期内应不可选")
+	}
+	time.Sleep(60 * time.Millisecond)
+	if !e.healthyForModel(time.Now(), "glm-5.3") {
+		t.Fatal("到期后应恢复可选")
+	}
+}
 // TestRateLimitedModelsMultiModel 6004 多模型同时限流 → /status 台账全部展示。
 func TestRateLimitedModelsMultiModel(t *testing.T) {
 	p := New("")

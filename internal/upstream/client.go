@@ -243,6 +243,75 @@ func IsModelRateLimit(body string) bool {
 	return reModelRateLimit.MatchString(body)
 }
 
+// requestRateLimitCode 上游「模型级请求速率限流」业务码。
+//
+// 14003 语义是**该模型此刻太忙/请求太密**（body: too many requests +
+// retry_policy.retry_after，displayMsg: "Model busy. Please switch models or
+// retry later"），与账号无关：同号换模型立刻可用。它绝不能被当作账号级软限流
+// ——那会把一个健康号的所有模型一起摘掉，正是 2026-09-23 上游 14003 风暴
+// （76 秒命中全部 16 个号、每号被冷 600 秒）的根因形态。
+const requestRateLimitCode = "14003"
+
+// IsRequestRateLimit 报告 body 是否为 14003 请求速率限流。
+//
+// 用 hasBusinessCode 做结构化判定（精确比对 JSON 的 code 字段），不做文本子串
+// 匹配：错误体里还有 requestId / traceId，整段子串匹配容易把 "14003" 撞在 ID
+// 上，误把一次普通 429 降级成模型级（该罚的账号级限流反而没罚）。
+func IsRequestRateLimit(body string) bool {
+	return hasBusinessCode(body, requestRateLimitCode)
+}
+
+// IsModelScopeRateLimit 报告限流是否只需避让「这个账号的这个模型」：
+// 6004（模型用量限流）与 14003（模型请求速率限流）都属此类，切模型即可恢复，
+// 账号其余模型仍可用。handler 的换号轮转与冷却决策共用本判定。
+func IsModelScopeRateLimit(body string) bool {
+	return IsModelRateLimit(body) || IsRequestRateLimit(body)
+}
+
+// ParseBodyRetryAfter 解析 14003 响应**正文**里明写的等待秒数
+// （retry_policy:{"retry":true,"retry_after":30}）。
+//
+// 与 ParseRetryAfter 的分工：后者读响应头；14003 的等待时长在 body 里，且并非
+// 每次 429 都带 Retry-After 头——只读头会让冷却回落到账号级 600s 基数（最坏的
+// 组合：模型级抖动 × 账号级长冷却）。只认结构化字段，number 与数字字符串都吃
+// （上游不同网关序列化不一致）；非正数 / 超 retryAfterSanity（2h）视为脏值丢弃。
+func ParseBodyRetryAfter(body string) (time.Duration, bool) {
+	if body == "" || !strings.Contains(body, "retry_after") {
+		return 0, false
+	}
+	var env struct {
+		RetryPolicy struct {
+			RetryAfter json.RawMessage `json:"retry_after"`
+		} `json:"retry_policy"`
+	}
+	if err := json.Unmarshal([]byte(body), &env); err != nil {
+		return 0, false
+	}
+	raw := strings.TrimSpace(string(env.RetryPolicy.RetryAfter))
+	if raw == "" || raw == "null" {
+		return 0, false
+	}
+	var secs float64
+	if err := json.Unmarshal([]byte(raw), &secs); err != nil {
+		// 数字字符串形态（"30"）。
+		var s string
+		if err2 := json.Unmarshal([]byte(raw), &s); err2 != nil {
+			return 0, false
+		}
+		if _, err3 := fmt.Sscanf(strings.TrimSpace(s), "%f", &secs); err3 != nil {
+			return 0, false
+		}
+	}
+	if secs <= 0 {
+		return 0, false
+	}
+	d := time.Duration(secs * float64(time.Second))
+	if d > retryAfterSanity {
+		return 0, false
+	}
+	return d, true
+}
+
 // modelBlockCode 明确指向「该后端无此模型」的业务 code。
 const modelBlockCode = "11102"
 

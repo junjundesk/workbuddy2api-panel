@@ -135,6 +135,8 @@ function updatePoolSelUI() {
 // 服务端对上游失败仍回 200 + ok:false（与代理测试同口径），因此这里按 r.ok 选 toast 颜色。
 function aliveToast(r) {
   if (r && r.dead) return '测活失败：账号已失效（401），已移入「' + (r.moved_to || '失效池') + '」';
+  // 14003「模型繁忙」是模型级限流，账号本身健康：换模型 / 稍后重试即可，别照着失败删号。
+  if (r && r.model_busy) return '模型繁忙（14003 请求过于频繁）· 非账号问题，稍后重试';
   if (!r || !r.ok) {
     const where = r && r.stage === 'catalog' ? '模型目录' : '对话';
     return '测活失败（' + where + '）：' + ((r && r.error) || '未知错误');
@@ -185,6 +187,8 @@ function aliveFlat(s, n) {
 // 上游回来的 error / reply 一律 esc：这些字段内容不受我们控制（错误页甚至是整段 HTML）。
 function aliveRowText(r) {
   if (r && r.dead) return '账号已失效（401）· 已移入「' + esc(r.moved_to || '失效池') + '」';
+  // 与 dead 分开表述：一个是模型挤、一个是号坏了，混着显示会让人误删好号。
+  if (r && r.model_busy) return '模型繁忙（14003 请求过于频繁）· 非账号问题，稍后重试';
   if (!r || !r.ok) {
     const where = r && r.stage === 'catalog' ? '模型目录' : '对话';
     return '失败（' + where + '）：' + (esc(aliveFlat(r && r.error, 160)) || '未知错误');
@@ -382,7 +386,8 @@ async function runGroupAlive(g) {
       aliveProgress();
       let r;
       try { r = await api('accounts/' + encodeURIComponent(row.a.uid) + '/alive', { method: 'POST' }); }
-      catch (e) { r = { ok: false, stage: 'chat', error: e.message || String(e) }; } // 网络层失败只落到这一行，不中断整组
+      // 网络层失败只落到这一行，不中断整组；错误体里的 dead / moved_to / model_busy 一并带出来。
+      catch (e) { r = Object.assign({ ok: false, stage: 'chat', error: e.message || String(e) }, (e && e.body) || {}); }
       row.state = r && r.ok ? 'done' : 'err';
       aliveSetRow(nodes[i], row.state, row.state === 'done' ? '通过' : '失败', aliveRowText(r));
       aliveProgress();
