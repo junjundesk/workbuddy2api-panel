@@ -241,6 +241,18 @@ label.fld > .hint { display: block; font-size: 11.5px; color: var(--ink-3); marg
 .acc .mark i { display: block; width: 3px; height: 100%; min-height: 36px; background: var(--ok); }
 .acc tbody tr.cool .mark i { background: var(--warn); }
 .acc tbody tr.off .mark i { background: var(--bad); }
+/* 暂停选号是「主动退出」不是故障：用中性灰，别和封号 / 禁用（红）混为一谈。 */
+.acc tbody tr.paused .mark i { background: var(--ink-3); }
+/* 可排序表头（表头由 pool_list.js 生成）：手型 + 三态箭头（⇅ 未排 / ▲ 升 / ▼ 降） */
+.acc th[data-act="sort"] { cursor: pointer; user-select: none; }
+.acc th[data-act="sort"]:hover { color: var(--ink); }
+.acc th[data-act="sort"] .sar { margin-left: 3px; font-style: normal; font-size: 9px; opacity: .4; }
+.acc th[data-act="sort"].on { color: var(--ink); }
+.acc th[data-act="sort"].on .sar { opacity: 1; color: var(--accent); }
+/* 行内小语义：失效 / 限流原因、弱化文字、失败数 */
+.acc td .note { font-size: 11.5px; color: var(--ink-3); margin-top: 3px; }
+.acc td.dim, .acc .dim { color: var(--ink-3); }
+.acc .bad-txt { color: var(--bad); }
 /* 模型表无色条（健康指示只属于账号表）。 */
 .acc.md .mark { display: none; }
 /* 操作列用 width:1px + nowrap 的经典技巧：列宽恰为内容宽，其余列按内容自适应 */
@@ -1477,6 +1489,8 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 
 <div id="toasts"></div>
 
+<!-- 号池列表的共享实现：行渲染 / 状态口径 / 排序 / 行内操作都在这份脚本里，主页与分组页共用 -->
+<script src="pool_list.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

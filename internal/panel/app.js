@@ -570,27 +570,48 @@ async function savePatrolSettings() {
 }
 
 /* ── 账号池 ───────────────────────────────────────────────────────── */
+/* 账号池表格的排序状态：与分组页各自记忆（localStorage key 不同），
+   但排序口径 / 表头箭头全部由 PoolList 提供，两页永远一致。 */
+const ACC_SORT = PoolList.createSort('wb2api.accSort');
+
+// accTableOpts 主页列表的渲染开关。与分组页只有三处不同：勾选内嵌在账号列
+// （省一列宽度）、积分带余额条、用量给四项明细；其余列定义、状态口径、操作按钮、
+// 排序全部来自 PoolList —— 改号池列表只改 pool_list.js 一处，两页同时生效。
+function accTableOpts(maxCred, groups) {
+  return {
+    mode: 'overview', sort: ACC_SORT, sel: accSel, selInline: true,
+    credBar: true, usageDetail: true, actsHeadClass: "c-acts", maxCred: maxCred,
+    canMove: !!(groups && groups.length),
+  };
+}
+
 function renderAccounts(list, groups) {
   accSelPrune(list);
   accSelSync();
   const tb = $('accBody');
   // 有分组 → 每组一张卡片（方案 B），原单表隐藏；没有分组 → 与原来完全一致的单表。
   const gbox = $('accGroups'), wrap = $('accTblWrap');
+  const ordered = ACC_SORT.sort(list);
   if (gbox) {
     const grouped = !!(groups && groups.length && list.length);
     gbox.hidden = !grouped; if (wrap) wrap.hidden = grouped;
-    if (grouped) { renderAccountGroups(list, groups); return; }
+    if (grouped) { renderAccountGroups(ordered, groups); return; }
     gbox.innerHTML = '';
   }
-  if (!list.length) {
+  if (!ordered.length) {
     tb.innerHTML = '<tr><td colspan="9"><div class="empty"><div class="big">账号池是空的</div>点击右上角「添加账号」，用浏览器登录一个 WorkBuddy 账号</div></td></tr>';
     return;
   }
   // 有总额度（credits_total）→ 进度条按自身 剩余/总额 百分比；旧数据无总额 → 退回池内最高=100%
-  const maxCred = Math.max(1, ...list.map(s => s.credits || 0));
-  tb.innerHTML = list.map(s => accRowHtml(s, maxCred, groups)).join('');
+  const maxCred = Math.max(1, ...ordered.map(s => s.credits || 0));
+  const opts = accTableOpts(maxCred, groups);
+  // 单表表头同样由 PoolList 生成：否则只有分组卡片能点排序，两种视图行为不一致。
+  if (wrap) {
+    const th = wrap.querySelector('table > thead');
+    if (th) th.outerHTML = PoolList.head(opts);
+  }
+  tb.innerHTML = ordered.map(s => PoolList.row(s, opts)).join("");
 }
-
 // groupAccountsForView 把账号分到「公共池 + 各分组」桶里。
 // 公共池口径与「号池分组」页的 publicAccounts 完全一致：未分组账号 + 已开启
 // 「允许本组账号进入公共池」的共享分组账号——共享就是把这个组的容量借给公共池，
@@ -659,13 +680,16 @@ function renderAccountGroups(list, groups) {
   // 固定列宽：各卡片的列上下对齐。
   // 账号列不设宽度，吸收剩余空间；操作列必须显式给宽——表头 .c-acts 的 width:1px 在 fixed 布局下会把它压成 1px，按钮溢出盖住左侧列。
   const cols = '<colgroup><col style="width:4px"><col><col style="width:200px"><col style="width:100px"><col style="width:90px"><col style="width:50px"><col style="width:300px"><col style="width:90px"><col style="width:490px"></colgroup>';
-  const head = '<thead><tr><th class="mark" aria-hidden="true"></th><th>账号</th><th>状态</th><th>积分</th><th>成功 / 失败</th><th>在途</th><th>用量</th><th>最近成功</th><th class="c-acts"></th></tr></thead>';
+  // 表头与行都交给 PoolList：列名 / 排序箭头 / 点击区域只有一处定义，
+  // 与分组页改一次两边同时生效。
+  const opts = accTableOpts(maxCred, groups);
+  const head = PoolList.head(opts);
   const tag = (n, cls, label) => n ? '<span class="tag ' + cls + '">' + label + ' ' + n + '</span>' : '';
   $('accGroups').innerHTML = groupAccountsForView(list, groups).map(b => {
     const c = accGroupCounts(b.items, now);
     const bg = groupCardBadge(b, b.pub ? null : groupViewOf(b.id));
     const cred = c.total > 0 ? '积分 ' + c.credits + ' / ' + c.total : (c.credits ? '积分 ' + c.credits : '');
-    const rows = b.items.length ? b.items.map(s => accRowHtml(s, maxCred, groups)).join('')
+    const rows = b.items.length ? PoolList.rows(b.items, opts)
       : '<tr><td colspan="9"><div class="empty">' + (b.pub ? '没有未分组的账号' : '这个分组还没有账号') + '</div></td></tr>';
     const k = esc(b.key);
     return '<div class="box gcard' + (fold[b.key] ? ' fold' : '') + '"><header data-gfold="' + k + '" title="点击折叠 / 展开">' +
@@ -685,94 +709,6 @@ function renderAccountGroups(list, groups) {
       (b.pub ? '<button class="xs ghost" data-gnew="1" title="新建一个专属分组（独立号池，默认与公共池隔离）">＋ 新建分组</button>' : '') +
       '</header><div class="tbl-wrap"><table class="acc gfix">' + cols + head + '<tbody>' + rows + '</tbody></table></div></div>';
   }).join('');
-}
-
-function accRowHtml(s, maxCred, groups) {
-    // 有分组时任何账号都能移动；没有分组时只有已分组账号还能移回公共池。
-    const canMove = (groups && groups.length > 0) || !!s.group;
-    const bl = (new Date(s.breaker_until || 0) - Date.now()) / 1000;
-    const dg = (new Date(s.degrade_until || 0) - Date.now()) / 1000;
-    const cool = Math.max(s.cool_remaining_sec || 0, bl > 0 ? bl : 0, dg > 0 ? dg : 0);
-    let cls = '', tag;
-    if (s.banned) { cls = 'off'; tag = '<span class="tag bad" title="上游 11140 request illegal：已封号，积分不计入池统计">封号</span>'; }
-    else if (s.disabled) { cls = 'off'; tag = '<span class="tag bad">已禁用</span>'; }
-    else if (s.paused) { cls = 'off'; tag = '<span class="tag warn">已暂停选号</span>'; }
-    else if (cool > 0) {
-      cls = 'cool';
-      const kind = bl > Math.max(s.cool_remaining_sec || 0, dg > 0 ? dg : 0) ? '熔断'
-        : (dg > (s.cool_remaining_sec || 0) ? '连败降权' : (s.cool_kind === 'hard_credit' ? '积分冷却' : '限流冷却'));
-      tag = '<span class="tag warn">' + kind + ' · ' + dur(cool) + '</span>';
-    } else tag = '<span class="tag ok">可用</span>' + (s.in_flight ? '' : '');
-    const note = s.reason ? '<div class="hint" style="font-size:11.5px;color:var(--ink-3);margin-top:3px">' + esc(s.reason) + '</div>' : '';
-    const rateLimits = rateLimitRowsHtml(s.rate_limited_models, Date.now());
-    const short = s.uid.length > 16 ? s.uid.slice(0, 16) + '…' : s.uid;
-    // 企业版不限量：上游 limitNum == -1，网关以 credits_total=-1 透出（见 upstream
-    // enterpriseUnlimitedTotal）。此时剩余额度不参与展示，直接标「不限」。
-    const unlimited = s.credits_total === -1;
-    const cred = unlimited ? '不限'
-      : (s.credits == null ? '—' : (s.credits_total > 0 ? s.credits + '<span class="of">/' + s.credits_total + '</span>' : String(s.credits)));
-    const pct = unlimited ? 100
-      : (s.credits_total > 0
-        ? Math.min(100, Math.round((s.credits || 0) / s.credits_total * 100))
-        : Math.round((s.credits || 0) / maxCred * 100));
-    // 成本台账 tooltip（model_costs）：每模型实测单价（≤0 = 实测免费），运维据此
-    // 看「为什么总选它」——免费号垄断 / 单价排序一眼可见。
-    let credTip;
-    if (s.banned) credTip = '封号账号（11140）：余额不可用，不计入池积分统计';
-    else if (unlimited) credTip = '企业版不限量（上游 limitNum=-1）';
-    else if (s.credits_total > 0) {
-      credTip = (s.enterprise ? '企业版剩余额度 ' : '剩余 ')
-        + s.credits + ' / ' + (s.enterprise ? '分配 ' : '总额 ') + s.credits_total + '（' + pct + '%）';
-    } else credTip = '积分（相对池内最高）';
-    const costs = (s.model_costs || []).filter(c => c.model);
-    if (costs.length) {
-      credTip += '\n实测单价（credits/1K）：\n' + costs.map(c =>
-        '  ' + c.model + '：' + (c.cost_per_1k <= 0 ? '免费' : c.cost_per_1k)).join('\n');
-    }
-    const frozen = s.disabled || cool > 0;
-    const tu = s.token_usage || {};
-    const req = tu.request_count || 0;
-    const totalTok = formatTokenCount(tu.total_tokens);
-    const totalTokUnit = totalTok === '—' ? '' : '<em>tok</em>';
-    const latency = formatLatency(tu.last_latency_ms);
-    const rate = formatRate(tu.last_tokens_per_second);
-    const usageTitle = '最近一次：' + req + ' 次 / ' + totalTok + ' / 延迟 ' + latency + ' / ' + rate;
-    return '<tr class="' + cls + '" title="uid: ' + esc(s.uid) + '">' +
-      '<td class="mark" aria-hidden="true"><i></i></td>' +
-      '<td class="who"><div class="nm"><label class="acc-pick" title="选中后可批量删除"><input type="checkbox" data-sel="' + esc(s.uid) + '"' + (accSel.has(s.uid) ? ' checked' : '') + '></label>' + (s.nickname ? esc(s.nickname) : '<span style="color:var(--ink-3)">未命名</span>') + (s.realm === 'global' ? ' <span class="realm-tag">国际版</span>' : '') + (s.enterprise ? ' <span class="realm-tag">企业版</span>' : '') + '</div><div class="id">' + esc(short) + '</div></td>' +
-      '<td>' + tag + note + rateLimits + '</td>' +
-      '<td class="cred" title="' + esc(credTip) + '"><div class="n">' + cred + '</div><div class="bar"><i style="width:' + pct + '%"></i></div></td>' +
-      '<td class="num">' + (s.success_count || 0) + ' <span style="color:var(--ink-3)">/</span> <span style="color:var(--bad)">' + (s.err_total || 0) + '</span></td>' +
-      '<td class="num">' + (s.in_flight || 0) + '</td>' +
-      '<td class="num usage-cell" title="' + esc(usageTitle) + '"><span class="usage-line" aria-label="' + esc(usageTitle) + '">' +
-        '<span class="usage-item usage-count"><b>' + req + '</b><em>次</em></span>' +
-        '<span class="usage-item usage-total"><b>' + totalTok + '</b>' + totalTokUnit + '</span>' +
-        '<span class="usage-item usage-latency"><b>' + latency + '</b></span>' +
-        '<span class="usage-item usage-rate"><b>' + rate + '</b></span>' +
-      '</span></td>' +
-      '<td class="num" style="color:var(--ink-3)">' + ago(s.last_success) + '</td>' +
-      '<td class="acts">' +
-        // 企业版无个人成长体系（签到 400「企业账号不支持该操作」/ 成长任务 403）：
-        // 不渲染「签到」「任务」按钮，只留「额度」——点它走 /balance，企业额度由
-        // upstream 的 get-enterprise-user-usage 口径填充。
-        (s.enterprise ? '' :
-          '<button class="xs ghost" data-a="checkin" data-u="' + esc(s.uid) + '"' + (s.checkin_done ? ' title="今日已签到；点击可重新签到并刷新余额"' : '') + '>' + (s.checkin_done ? '已签' : '签到') + '</button>') +
-        '<button class="xs ghost" data-a="balance" data-u="' + esc(s.uid) + '"' + (s.enterprise ? ' title="刷新企业版已分配额度（上游 get-enterprise-user-usage）"' : '') + '>' + (s.enterprise ? '额度' : '余额') + '</button>' +
-        (s.enterprise ? '' :
-          '<button class="xs ghost" data-a="tasks" data-u="' + esc(s.uid) + '">任务</button>') +
-        '<button class="xs ghost" data-a="models" data-u="' + esc(s.uid) + '">模型</button>' +
-        '<button class="xs ghost" data-a="alive" data-u="' + esc(s.uid) + '" title="向该账号发一句 hi 验证能否正常对话（会消耗少量积分；不改选号 / 冷却状态）">测活</button>' +
-        (frozen ? '<button class="xs primary" data-a="revive" data-u="' + esc(s.uid) + '">解冻</button>'
-                : (s.paused ? '<button class="xs primary" data-a="resume" data-u="' + esc(s.uid) + '">恢复选号</button>'
-                            : '<button class="xs ghost" data-a="pause" data-u="' + esc(s.uid) + '" title="' + (s.enterprise ? '退出选号，但照常保活 / 刷新额度' : '退出选号，但照常签到 / 活跃上报 / 保活 / 刷新余额') + '">暂停选号</button>')) +
-        (s.disabled ? '' : '<button class="xs ghost" data-a="disable" data-u="' + esc(s.uid) + '">禁用</button>') +
-        (canMove ? '<button class="xs ghost" data-a="move" data-u="' + esc(s.uid) + '" title="移动到公共池或其他分组">移动</button>' : '') +
-        // 「前往分组」「导出」与号池分组页的行操作同口径：一个跳去看该组的密钥 / 代理，
-        // 一个把单个账号连凭证导出成 JSON（跨实例搬运、备份单号都靠它）。
-        (s.group ? '<button class="xs ghost" data-a="gogroup" data-g="' + esc(s.group) + '" data-u="' + esc(s.uid) + '" title="在「号池分组」页打开它所在的分组">前往分组</button>' : '') +
-        '<button class="xs ghost" data-a="export" data-u="' + esc(s.uid) + '" title="导出该账号 JSON（含登录凭证），可在其他实例导入">导出</button>' +
-        '<button class="xs ghost danger" data-a="remove" data-u="' + esc(s.uid) + '">移除</button>' +
-      '</td></tr>';
 }
 
 // renderModelLocks 模型锁池：哪些模型不能用、锁了几个号、还要锁多久。
@@ -1073,6 +1009,20 @@ async function onAccClick(ev) {
   finally { b.disabled = false; loadOverview(true); }
 }
 $('accBody').addEventListener('click', onAccClick);
+
+// 表头排序：单表与分组卡片的表头都由 PoolList 生成，点一下切 升序 → 降序 → 取消，
+// 直接用缓存里的 overviewData 重绘（不重新请求，避免闪一下 / 打断正在看的数字）。
+function onAccSortClick(e) {
+  const th = e.target.closest('th[data-act="sort"]');
+  if (!th || !th.dataset.key || !overviewData) return;
+  ACC_SORT.toggle(th.dataset.key);
+  renderAccounts(overviewData.accounts || [], overviewData.groups || []);
+  accSelSync();
+}
+['accGroups', 'accTblWrap'].forEach(function (id) {
+  const el = $(id);
+  if (el) el.addEventListener('click', onAccSortClick);
+});
 
 /* 多选：行内勾选框（分组卡片与单表共用同一委托；change 比 click 稳——click 时
    checked 状态在部分浏览器仍未落定）。工具条与巡检弹窗按钮各自绑定。 */

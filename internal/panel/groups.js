@@ -71,67 +71,18 @@ async function load() {
     return false;
   }
 }
-function statusOf(a) {
-  if (a.disabled) return { cls: 'off', text: '已禁用', tag: 'bad' };
-  if (a.paused) return { cls: 'paused', text: '已暂停', tag: 'mute' };
-  if (a.cooling) return { cls: 'cool', text: '冷却 ' + (a.cool_remaining_sec ? Math.ceil(a.cool_remaining_sec / 60) + ' 分' : ''), tag: 'warn' };
-  return { cls: 'ok', text: '可用', tag: 'ok' };
-}
-
-/* ── 表头排序 ─────────────────────────────────────────────────────────────
-   点表头按该列排序：升序 → 降序 → 恢复默认（后端顺序，即加入顺序）。
-   状态按可运维性排（可用 → 冷却 → 暂停 → 禁用），不是字典序；空值（没查到积分、
-   从没跑过）永远沉底，降序时也不占第一屏。排序偏好存 localStorage：切分组、
-   刷新页面都保持同一视角。 */
-const SORT_KEY = 'wb2api.gpSort';
-const STATUS_RANK = { ok: 0, cool: 1, paused: 2, off: 3 };
-let sortState = loadSort();
-function loadSort() {
-  try {
-    const v = JSON.parse(localStorage.getItem(SORT_KEY) || 'null');
-    if (v && typeof v.key === 'string' && v.key) return { key: v.key, dir: v.dir === 1 ? 1 : -1 };
-  } catch (e) { /* 隐私模式 / 脏数据：退回默认顺序 */ }
-  return { key: '', dir: -1 };
-}
-function saveSort() { try { localStorage.setItem(SORT_KEY, JSON.stringify(sortState)); } catch (e) {} }
-function sortValue(a, key) {
-  switch (key) {
-    case 'name': return (a.nickname || a.uid || '').toLowerCase();
-    case 'status': { const r = STATUS_RANK[statusOf(a).cls]; return typeof r === 'number' ? r : 9; }
-    // 企业版不限量按最大值算（降序排最前）；没查到积分的留空，沉底。
-    case 'credits': return a.credits_total === -1 ? Number.MAX_SAFE_INTEGER : (a.credits == null ? null : a.credits);
-    // 成功 / 失败同列：成功数为主序、失败数为次序，避免两位数字符串比较。
-    case 'calls': return (a.success_count || 0) * 1e9 + (a.err_total || 0);
-    case 'inflight': return a.in_flight || 0;
-    case 'tokens': return (a.token_usage && a.token_usage.total_tokens) || null;
-    case 'realm': return a.realm || 'cn';
-    default: return null;
-  }
-}
-function sortAccounts(list) {
-  if (!sortState.key) return list;
-  const key = sortState.key, dir = sortState.dir;
-  // 相等时回落到后端顺序：否则每次刷新同分账号到处跳，勾选也跟着乱。
-  const base = new Map(list.map((a, i) => [a.uid, i]));
-  return list.slice().sort((x, y) => {
-    const vx = sortValue(x, key), vy = sortValue(y, key);
-    const nx = vx === null || vx === undefined, ny = vy === null || vy === undefined;
-    if (nx && ny) return base.get(x.uid) - base.get(y.uid);
-    if (nx) return 1;
-    if (ny) return -1;
-    let c;
-    if (typeof vx === 'string' || typeof vy === 'string') c = String(vx).localeCompare(String(vy), 'zh-Hans-CN');
-    else c = vx === vy ? 0 : (vx < vy ? -1 : 1);
-    return c ? c * dir : base.get(x.uid) - base.get(y.uid);
-  });
-}
-const SORT_LABEL = { name: '账号', status: '状态', credits: '积分', calls: '成功 / 失败', inflight: '在途', tokens: '用量', realm: '域' };
-function sortStateLabel() { return SORT_LABEL[sortState.key] || sortState.key; }
-// sortTh 生成可点表头；箭头三态对应当前列的方向，未排序列给一个淡的 ⇅ 提示可点。
-function sortTh(key, label) {
-  const on = sortState.key === key;
-  const arrow = on ? (sortState.dir === 1 ? '▲' : '▼') : '⇅';
-  return '<th class="' + (on ? 'on' : '') + '" data-act="sort" data-key="' + key + '" title="按' + label + '排序：点一次升序、再点降序、第三次恢复默认">' + label + '<i class="sar">' + arrow + '</i></th>';
+/* ── 账号表：渲染与排序都来自 pool_list.js（共享模块） ─────────────────────
+   与主页账号池是同一份实现（列集合 = PRESET.group）。以后加列、改状态文案、
+   改按钮顺序、改排序口径只动 pool_list.js，两页同时生效——主页不用跟着改。
+   本页只保留差异开关：勾选独立成列（表头能全选）、用量只给总量、操作外包一层
+   .acts 便于窄屏换行。 */
+const GP_SORT = PoolList.createSort('wb2api.gpSort');
+function gpOpts(mode) {
+  return {
+    mode: 'group', style: 'group', sort: GP_SORT, actsWrap: 'div',
+    usageDetail: false, sel: state.sel,
+    emptyTitle: mode === 'group' ? '这个分组还没有账号' : '没有账号',
+  };
 }
 
 function renderStats() {
@@ -139,7 +90,7 @@ function renderStats() {
   const groupAcc = state.accounts.filter(a => a.group);
   let keys = 0, proxies = 0, healthy = 0;
   state.groups.forEach(g => { if (g.has_key) keys++; if (g.proxy) proxies++; }); if (state.publicProxy) proxies++;
-  state.accounts.forEach(a => { if (a.group && !a.disabled && !a.cooling && !a.paused) healthy++; });
+  state.accounts.forEach(a => { if (a.group && PoolList.statusOf(a).cls === 'ok') healthy++; });
   const shared = state.groups.filter(g => g.shared_pool).length;
   $('stats').innerHTML =
     '<div class="stat accent"><div class="v">' + pub.length + '</div><div class="k">公共池可见<span>未分组 ' + state.accounts.filter(a => !a.group).length + ' + 共享 ' + (pub.length - state.accounts.filter(a => !a.group).length) + '</span></div></div>' +
@@ -227,44 +178,7 @@ function aliveToast(r) {
   if (r.latency_ms != null) s += ' · ' + r.latency_ms + 'ms';
   return s + (r.reply ? '：' + r.reply : '');
 }
-// accActs 账号行操作，与主页账号池（app.js renderAccounts）同口径：
-// 企业版不显示签到 / 任务（上游不支持），冻结 → 解冻、暂停 → 恢复选号、否则 → 暂停选号。
-// 任务：本页弹窗（与主页同实现，见下方「积分任务」段）；模型：新标签页深链
-// /panel/?open=models&uid=...（那套模型表弹窗尚未搬过来）。
-// 测活与主页一致：服务端用该账号直连上游发一句 hi，结果以 toast 呈现。
-function accActs(a, mode) {
-  const u = esc(a.uid);
-  const b = (act, label, cls, title) => '<button class="xs ' + (cls || 'ghost') + '" data-act="acc" data-a="' + act + '" data-uid="' + u + '"' + (title ? ' title="' + esc(title) + '"' : '') + '>' + label + '</button>';
-  const frozen = a.disabled || a.cooling;
-  let h = '';
-  if (!a.enterprise) h += b('checkin', a.checkin_done ? '已签' : '签到', '', a.checkin_done ? '今日已签到；点击可重新签到并刷新余额' : '');
-  h += b('balance', a.enterprise ? '额度' : '余额');
-  if (!a.enterprise) h += b('tasks', '任务', '', '查看 / 执行该账号的积分任务（弹窗，接受、领取、一键完成）');
-  h += b('models', '模型', '', '在控制台打开模型面板');
-  h += b('alive', '测活', '', '向该账号发一句 hi 验证能否正常对话（会消耗少量积分；不改选号 / 冷却状态）');
-  h += frozen ? b('revive', '解冻', 'primary') : (a.paused ? b('resume', '恢复选号', 'primary') : b('pause', '暂停选号', '', '退出选号，但照常签到 / 保活 / 刷新余额'));
-  if (!a.disabled) h += b('disable', '禁用');
-  h += '<button class="xs ghost" data-act="move-account" data-uid="' + u + '" title="移动到公共池或其他分组">移动</button>';
-  if (mode !== 'group' && a.group) h += '<button class="xs ghost" data-act="select" data-id="' + esc(a.group) + '">前往分组</button>';
-  h += '<button class="xs ghost" data-act="export-account" data-uid="' + u + '" title="导出该账号 JSON（含凭证）">导出</button>';
-  h += '<button class="xs ghost danger" data-act="remove-account" data-uid="' + u + '">移除</button>';
-  return h;
-}
-function credText(a) {
-  if (a.credits_total === -1) return '不限';
-  if (a.credits == null) return '—';
-  return fmt(a.credits) + (a.credits_total > 0 ? '<span style="color:var(--ink-3)">/' + fmt(a.credits_total) + '</span>' : '');
-}
-function rowsHtml(list, mode) {
-  if (!list.length) return '<tr><td colspan="10"><div class="empty"><div class="big">' + (mode === 'group' ? '这个分组还没有账号' : '没有账号') + '</div>点击「添加账号」或「导入 JSON」。</div></td></tr>';
-  return list.map(a => {
-    const st = statusOf(a);
-    const acts = accActs(a, mode);
-    const tags = (a.realm === 'global' ? ' <span class="tag accent">国际版</span>' : '') + (a.enterprise ? ' <span class="tag accent">企业版</span>' : '');
-    const note = a.reason ? '<div class="id" style="margin-top:3px">' + esc(a.reason) + '</div>' : '';
-    return '<tr class="' + st.cls + '"><td class="mark"><i></i></td><td class="ck"><input type="checkbox" data-act="sel-one" data-uid="' + esc(a.uid) + '"' + (state.sel.has(a.uid) ? ' checked' : '') + '></td><td><div class="who"><div class="nm">' + esc(a.nickname || a.uid.slice(0, 8)) + tags + '</div><div class="id">' + esc(a.uid) + '</div></div></td><td><span class="tag ' + st.tag + '">' + st.text + '</span>' + note + '</td><td class="num">' + credText(a) + '</td><td class="num">' + fmt(a.success_count) + ' / ' + fmt(a.err_total) + '</td><td class="num">' + (a.in_flight || 0) + '</td><td class="num">' + (a.token_usage && a.token_usage.total_tokens ? fmtTokens(a.token_usage.total_tokens) : '—') + '</td><td class="num">' + (a.realm || 'cn').toUpperCase() + '</td><td><div class="acts">' + acts + '</div></td></tr>';
-  }).join('');
-}
+// 账号行（状态标签、积分、操作按钮）全部由 pool_list.js 生成，这里不再各自拼 HTML。
 // 分组批量操作，与主页分组卡片同口径：签到跳过禁用 / 企业版；任务执行只跑能做成长任务的号。
 function taskEligible(a) { return !a.disabled && !a.enterprise && a.realm !== 'global'; }
 function groupBulkBtns(list) {
@@ -523,8 +437,9 @@ async function runGroupAlive(g) {
   await load(); // 测活不改池状态，刷新只为让余额变化立刻可见
 }
 function accountsBox(list, mode) {
-  const rows = sortAccounts(list);
-  return '<div class="box"><header><h3>' + (mode === 'group' ? '分组账号' : '公共池账号') + ' <span class="hint">' + (mode === 'group' ? '仅本组密钥可见' : '未分组 + 共享') + '</span></h3><span class="grow"></span>' + (mode === 'group' ? groupBulkBtns(list) : '') + '<span class="hint" id="selInfo"></span><button class="xs" data-act="move-sel" disabled>移动所选</button><button class="xs" data-act="export-sel" disabled title="导出所选账号 JSON（含凭证），可在其他实例直接导入">导出所选</button><button class="xs danger" data-act="remove-sel" disabled title="删除所选账号：池状态与 auths/ 下的凭证文件一并删除，不可恢复">移除所选</button><button class="xs" data-act="add-account">添加账号</button><button class="xs" data-act="import">导入 JSON</button></header><div class="acc-wrap"><table class="acc"><thead><tr><th class="mark"></th><th class="ck"><input type="checkbox" data-act="sel-all" title="全选当前列表"></th>' + sortTh('name', '账号') + sortTh('status', '状态') + sortTh('credits', '积分') + sortTh('calls', '成功 / 失败') + sortTh('inflight', '在途') + sortTh('tokens', '用量') + sortTh('realm', '域') + '<th></th></tr></thead><tbody>' + rowsHtml(rows, mode) + '</tbody></table></div><div class="table-foot">共 ' + list.length + ' 个账号' + (sortState.key ? ' · 按' + sortStateLabel() + '排序' : '') + '</div></div>';
+  const opts = gpOpts(mode);
+  const ordered = GP_SORT.sort(list);
+  return '<div class="box"><header><h3>' + (mode === 'group' ? '分组账号' : '公共池账号') + ' <span class="hint">' + (mode === 'group' ? '仅本组密钥可见' : '未分组 + 共享') + '</span></h3><span class="grow"></span>' + (mode === 'group' ? groupBulkBtns(list) : '') + '<span class="hint" id="selInfo"></span><button class="xs" data-act="move-sel" disabled>移动所选</button><button class="xs" data-act="export-sel" disabled title="导出所选账号 JSON（含凭证），可在其他实例直接导入">导出所选</button><button class="xs danger" data-act="remove-sel" disabled title="删除所选账号：池状态与 auths/ 下的凭证文件一并删除，不可恢复">移除所选</button><button class="xs" data-act="add-account">添加账号</button><button class="xs" data-act="import">导入 JSON</button></header><div class="acc-wrap"><table class="acc">' + PoolList.head(opts) + '<tbody>' + PoolList.rows(ordered, opts) + '</tbody></table></div><div class="table-foot">共 ' + list.length + ' 个账号' + (GP_SORT.key ? ' · 按' + GP_SORT.label() + '排序' : '') + '</div></div>';
 }
 function renderDetail() {
   const g = selectedGroup();
@@ -1147,14 +1062,7 @@ document.addEventListener('click', async e => {
   const act = el.dataset.act;
   try {
     if (act === 'select') { state.selected = el.dataset.id; state.sel.clear(); renderAll(); syncHash(); return; }
-    if (act === 'sort') {
-      // 三态：换列 → 该列默认方向（文本列升序、数值列降序）→ 反向 → 取消排序。
-      const key = el.dataset.key;
-      if (sortState.key !== key) { sortState.key = key; sortState.dir = (key === 'name' || key === 'realm') ? 1 : -1; }
-      else if (sortState.dir === -1) { sortState.dir = 1; }
-      else { sortState.key = ''; sortState.dir = -1; }
-      saveSort(); renderDetail(); updateSelUI(); return;
-    }
+    if (act === 'sort') { GP_SORT.toggle(el.dataset.key); renderDetail(); updateSelUI(); return; }
     if (act === 'sel-one') { if (el.checked) state.sel.add(el.dataset.uid); else state.sel.delete(el.dataset.uid); updateSelUI(); return; }
     if (act === 'sel-all') { const on = el.checked; visibleAccounts().forEach(a => { if (on) state.sel.add(a.uid); else state.sel.delete(a.uid); }); document.querySelectorAll('[data-act="sel-one"]').forEach(c => { c.checked = on; }); updateSelUI(); return; }
     if (act === 'sel-pool') {

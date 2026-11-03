@@ -114,7 +114,19 @@ input:focus,select:focus,textarea:focus { outline:none; border-color:var(--accen
 .acc .mark { width:3px; padding:0; } .acc .mark i { display:block; width:3px; min-height:34px; background:var(--ok); } .acc tr.cool .mark i { background:var(--warn); } .acc tr.off .mark i { background:var(--bad); } .acc tr.paused .mark i { background:var(--ink-3); }
 .who { min-width:130px; max-width:220px; } .who .nm { font-weight:550; } .who .id { font:10.5px var(--mono); color:var(--ink-3); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .num { font-family:var(--mono); font-size:12px; white-space:nowrap; }
-.acts { display:flex; gap:4px; justify-content:flex-end; }
+.acts { display:flex; gap:4px; justify-content:flex-end; flex-wrap:wrap; }
+/* 与主页共用同一种行内语义类（原因说明 / 弱化 / 失败数） */
+.acc td .note { font-size:11px; color:var(--ink-3); margin-top:3px; max-width:230px; overflow:hidden; text-overflow:ellipsis; }
+.acc td.dim, .acc .dim { color:var(--ink-3); }
+.acc .bad-txt { color:var(--bad); }
+.acc .cred .n { font-variant-numeric:tabular-nums; }
+/* 与主页同款的版别标记 / 模型限流提示（都由 pool_list.js 生成） */
+.realm-tag { display:inline-block; margin-left:6px; padding:1px 5px; border-radius:4px; font:500 10px/1 var(--sans); color:var(--accent); background:var(--accent-soft); border:1px solid color-mix(in srgb,var(--accent) 22%,transparent); vertical-align:1px; }
+.rate-limits { display:flex; flex-direction:column; gap:4px; margin-top:6px; min-width:210px; }
+.rate-limit { display:flex; align-items:baseline; gap:6px; padding:4px 7px; border:1px solid color-mix(in srgb,var(--warn) 24%,var(--line)); border-radius:6px; background:var(--warn-soft); font-size:11.5px; line-height:1.35; }
+.rate-limit.model-unavailable { border-color:var(--line); background:var(--surface-2); color:var(--ink-3); }
+.rate-limit b { color:var(--ink); font-family:var(--mono); font-weight:600; }
+.rate-limit span { color:var(--ink-2); }
 .box > header { display:flex; align-items:center; gap:10px; padding:12px 16px; border-bottom:1px solid var(--line-soft); flex-wrap:wrap; }
 .box > header h3 { font-size:13.5px; font-weight:600; white-space:nowrap; }
 .box > header .hint { font-size:11.5px; color:var(--ink-3); font-weight:400; }
@@ -369,6 +381,8 @@ input:focus,select:focus,textarea:focus { outline:none; border-color:var(--accen
 
 <div class="veil" id="keyGate" data-lock="1"><div class="dlg" style="width:420px"><header><h3>需要访问密钥</h3><div class="hint">请输入 config.json 中的 api_key。</div></header><div class="body"><input type="password" id="gateKey" placeholder="api_key"><div class="state err" id="gateErr" hidden>密钥无效</div></div><footer><span class="grow"></span><button class="primary" data-act="gate-ok">进入</button></footer></div></div>
 
+<!-- 与主页账号池共用同一份列表实现（pool_list.js），改列表只改那一处 -->
+<script src="/panel/pool_list.js"></script>
 <script src="/panel/groups.js"></script>
 </body>
 </html>

@@ -3,6 +3,8 @@
 // 资源经 go:embed 打进二进制（随服务部署，无外部构建步骤）：
 //   - index.html  页面骨架
 //   - app.js      全部前端逻辑（独立文件而非内联，为了启用无需 unsafe-inline 的严格 CSP）
+//   - pool_list.js 号池账号列表的共享实现（主页账号池与分组页共用同一份渲染/排序/操作）
+//   - groups.html/groups.js 号池分组页
 //
 // 安全头对"面板页面与全部 /panel/api/* 响应"统一生效：CSP 限制脚本只能来自本服务，
 // 禁止被 iframe 嵌套（防点击劫持），禁 MIME 嗅探，并声明不泄露 Referer 出去。
@@ -24,6 +26,9 @@ var groupsHTML []byte
 
 //go:embed groups.js
 var groupsJS []byte
+
+//go:embed pool_list.js
+var poolListJS []byte
 
 // csp 内容安全策略（严格版，无需 unsafe-inline）：
 //   - default-src 'none'        默认全禁，逐个开口
@@ -79,4 +84,13 @@ func (p *Panel) groupsScript(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(groupsJS)
+}
+
+// poolListScript 号池账号列表的共享脚本：主页与分组页都引它，
+// 列表字段 / 状态口径 / 行内操作只在这一个文件里改。
+func (p *Panel) poolListScript(w http.ResponseWriter, r *http.Request) {
+	setSecurityHeaders(w)
+	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(poolListJS)
 }

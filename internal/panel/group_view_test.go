@@ -157,43 +157,41 @@ func TestGroupsJSSortAccounts(t *testing.T) {
 	if err != nil {
 		t.Skip("node not installed; sort test skipped")
 	}
+	// 排序已搬进共享模块 pool_list.js：整份模块在 vm 里跑，取 window.PoolList 直接验，
+	// 断言的是两页真正共用的那份实现，而不是某一页的副本。
 	script := `const fs = require('fs');
 const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
-const start = src.indexOf("const SORT_KEY = 'wb2api.gpSort';");
-const end = src.indexOf('function renderStats(');
-if (start < 0 || end < 0) throw new Error('sort block not found');
-// statusOf 是排序的依赖（状态列按可运维性排），这里给个同口径的桩。
-const ctx = {
-  localStorage: { getItem: () => null, setItem: () => {} },
-  statusOf: a => (a.disabled ? { cls: 'off' } : a.paused ? { cls: 'paused' } : a.cooling ? { cls: 'cool' } : { cls: 'ok' }),
-};
+// 模块只依赖 window / localStorage：给最小桩即可（localStorage 用来记排序偏好）。
+const ctx = { window: {}, localStorage: { getItem: () => null, setItem: () => {} } };
 vm.createContext(ctx);
-vm.runInContext(src.slice(start, end) + [
-  '',
-  'this.setSort=function(k,d){sortState.key=k;sortState.dir=d;};',
-  'this.sortAccounts=sortAccounts;',
-  'this.th=function(k,l){return sortTh(k,l);};',
-  'this.label=sortStateLabel;',
-].join('\n'), ctx);
+vm.runInContext(src, ctx);
+const PL = ctx.window.PoolList;
+if (!PL) throw new Error('window.PoolList missing');
+const st = PL.createSort('test.sort');
 const A = [
   { uid: 'a1', nickname: 'beta', credits: 50, success_count: 3, err_total: 1, in_flight: 2 },
-  { uid: 'a2', nickname: 'Alpha', credits: 100, success_count: 9, err_total: 0, cooling: true },
+  { uid: 'a2', nickname: 'Alpha', credits: 100, success_count: 9, err_total: 0, cool_remaining_sec: 600 },
   { uid: 'a3', nickname: 'delta', credits: null, success_count: 0, err_total: 0 },
   { uid: 'a4', nickname: 'gamma', credits_total: -1, credits: 5, success_count: 1, err_total: 2, disabled: true },
   { uid: 'a5', nickname: 'epsilon', credits: 100, success_count: 9, err_total: 0 },
 ];
 const ids = l => l.map(a => a.uid).join(',');
-const out = { def: ids(ctx.sortAccounts(A)) };
-ctx.setSort('credits', -1); out.creditsDesc = ids(ctx.sortAccounts(A));
-ctx.setSort('credits', 1); out.creditsAsc = ids(ctx.sortAccounts(A));
-ctx.setSort('status', 1); out.statusAsc = ids(ctx.sortAccounts(A));
-ctx.setSort('calls', -1); out.callsDesc = ids(ctx.sortAccounts(A));
-ctx.setSort('name', 1); out.nameAsc = ids(ctx.sortAccounts(A));
-ctx.setSort('credits', 1);
-out.th = ctx.th('credits', '积分');
-out.thOff = ctx.th('name', '账号');
-out.label = ctx.label();
+// toggle 只能相邻切换：先落到该列，再翻到想要的方向。
+function setS(key, dir) {
+  for (let n = 0; n < 10 && (st.key !== key || st.dir !== dir); n++) st.toggle(key);
+  if (st.key !== key || st.dir !== dir) throw new Error('cannot reach ' + key + '/' + dir + ', at ' + st.key + '/' + st.dir);
+}
+const out = { def: ids(st.sort(A)) };
+setS('credits', -1); out.creditsDesc = ids(st.sort(A));
+setS('credits', 1); out.creditsAsc = ids(st.sort(A));
+setS('status', 1); out.statusAsc = ids(st.sort(A));
+setS('calls', -1); out.callsDesc = ids(st.sort(A));
+setS('name', 1); out.nameAsc = ids(st.sort(A));
+setS('credits', 1);
+out.th = st.th('credits', '积分');
+out.thOff = st.th('name', '账号');
+out.label = st.label();
 process.stdout.write(JSON.stringify(out));`
 	f, err := os.CreateTemp(t.TempDir(), "sort-*.cjs")
 	if err != nil {
@@ -203,7 +201,7 @@ process.stdout.write(JSON.stringify(out));`
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "groups.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), "pool_list.js").CombinedOutput()
 	if err != nil {
 		t.Fatalf("sort node test failed: %v\n%s", err, out)
 	}
@@ -234,6 +232,53 @@ process.stdout.write(JSON.stringify(out));`
 	} {
 		if c.got != c.want {
 			t.Errorf("%s=%q\nwant    %q", c.name, c.got, c.want)
+		}
+	}
+}
+
+// 号池列表（列、状态、积分、按钮、排序）只有 pool_list.js 一份实现：
+// 两页都必须引它、都必须用 PoolList 渲染，且各自的副本要已经删干净——
+// 否则「改一处两页生效」的承诺会在下一次改动里悄悄失效。
+func TestPoolListSharedAcrossPages(t *testing.T) {
+	read := func(name string) string {
+		b, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		return string(b)
+	}
+	index := read("index.html")
+	groups := read("groups.html")
+	app := read("app.js")
+	gjs := read("groups.js")
+	shared := read("pool_list.js")
+
+	for _, c := range []struct{ name, src, want string }{
+		{"主页引用共享模块", index, `<script src="pool_list.js"></script>`},
+		{"分组页引用共享模块", groups, `<script src="/panel/pool_list.js"></script>`},
+		{"共享模块导出", shared, "window.PoolList = {"},
+		{"主页用共享表头", app, "PoolList.head("},
+		{"主页用共享行", app, "PoolList.rows("},
+		{"主页排序实例", app, "PoolList.createSort('wb2api.accSort')"},
+		{"分组页用共享表头", gjs, "PoolList.head(opts)"},
+		{"分组页用共享行", gjs, "PoolList.rows(ordered, opts)"},
+		{"分组页排序实例", gjs, "PoolList.createSort('wb2api.gpSort')"},
+	} {
+		if !strings.Contains(c.src, c.want) {
+			t.Errorf("%s：缺少 %q", c.name, c.want)
+		}
+	}
+	// 旧的各页副本必须消失，否则下次有人改副本就又分叉了。
+	for _, c := range []struct{ name, src, dead string }{
+		{"主页行渲染副本", app, "function accRowHtml("},
+		{"主页状态副本", app, "function statusOf(a)"},
+		{"分组页行渲染副本", gjs, "function rowsHtml("},
+		{"分组页按钮副本", gjs, "function accActs("},
+		{"分组页状态副本", gjs, "function statusOf(a)"},
+		{"分组页排序副本", gjs, "function sortAccounts("},
+	} {
+		if strings.Contains(c.src, c.dead) {
+			t.Errorf("%s 仍然存在：%s", c.name, c.dead)
 		}
 	}
 }
