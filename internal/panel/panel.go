@@ -232,6 +232,8 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/api/groups/{id}/key", p.withAuth(p.groupRevealKey))
 	p.mux.HandleFunc("GET /panel/api/groups/{id}/prompt", p.withAuth(p.groupGetPrompt))
 	p.mux.HandleFunc("PUT /panel/api/groups/{id}/prompt", p.withAuth(p.groupSetPrompt))
+	p.mux.HandleFunc("GET /panel/api/groups/{id}/config", p.withAuth(p.groupExportConfig))
+	p.mux.HandleFunc("PUT /panel/api/groups/{id}/config", p.withAuth(p.groupImportConfig))
 	p.mux.HandleFunc("POST /panel/api/accounts/{uid}/group", p.withAuth(p.accountSetGroup))
 	p.mux.HandleFunc("POST /panel/api/accounts/remove_batch", p.withAuth(p.accountsRemoveBatch))
 	p.mux.HandleFunc("GET /panel/api/patrol", p.withAuth(p.patrolState))

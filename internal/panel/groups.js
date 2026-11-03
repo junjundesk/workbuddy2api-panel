@@ -412,6 +412,117 @@ function accountsBox(list, mode) {
   const ordered = GP_SORT.sort(list);
   return '<div class="box"><header><h3>' + (mode === 'group' ? '分组账号' : '公共池账号') + ' <span class="hint">' + (mode === 'group' ? '仅本组密钥可见' : '未分组 + 共享') + '</span></h3><span class="grow"></span>' + (mode === 'group' ? groupBulkBtns(list) : '') + '</header><div class="gbar">' + AcctActions.bar({ scope: 'gp', group: mode === 'group' && selectedGroup() ? selectedGroup().id : '' }) + '</div><div class="acc-wrap"><table class="acc">' + PoolList.head(opts) + '<tbody>' + PoolList.rows(ordered, opts) + '</tbody></table></div><div class="table-foot">共 ' + list.length + ' 个账号' + (GP_SORT.key ? ' · 按' + GP_SORT.label() + '排序' : '') + '</div></div>';
 }
+/* ── 单分组配置导入导出 ─────────────────────────────────────────────
+   一个分组"能搬走的东西" = 网络代理 + 共享池/公共池开关 + 提示词规则。
+   不含分组名/识别色/密钥/成员：换台实例搬配置时，那些属于目标分组的身份，
+   跟着文件改只会制造事故（后端导入接口同样忽略它们）。
+   文件格式 workbuddy-group-config v1，由 GET/PUT groups/{id}/config 提供；
+   这里只做「读文件 → 校验 → 给人看影响面 → 确认后整体 PUT」，条数与字节
+   上限仍由后端校验，前端不维护第二套阈值。 */
+function cfgFileName(name) {
+  const bad = '\\/:*?"<>|';
+  let safe = '';
+  for (const ch of String(name || 'group')) safe += bad.indexOf(ch) >= 0 || ch.trim() === '' ? '-' : ch;
+  safe = safe.replace(/^-+|-+$/g, '').slice(0, 40) || 'group';
+  const d = new Date(), p = n => String(n).padStart(2, '0');
+  return 'workbuddy-group-' + safe + '-' + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + '.json';
+}
+
+// parseGroupConfig 校验并归一配置文件；抛出的 Error 文案直接展示给用户。
+// 代理参数必须在这里挡住：后端只回一句 invalid proxy config，用户看不出哪个字段错。
+function parseGroupConfig(text) {
+  let f;
+  try { f = JSON.parse(String(text == null ? '' : text)); }
+  catch (e) { throw new Error('不是有效的 JSON 文件'); }
+  if (!f || typeof f !== 'object' || Array.isArray(f)) throw new Error('配置文件的顶层必须是 JSON 对象');
+  if (f.format && f.format !== 'workbuddy-group-config') throw new Error('不是分组配置文件（format：' + f.format + '）');
+  const ver = f.version == null ? 1 : Number(f.version);
+  if (!(ver >= 1 && ver <= 1)) throw new Error('配置版本 ' + f.version + ' 不受支持（本面板支持 v1）');
+  const g = f.group;
+  if (!g || typeof g !== 'object' || Array.isArray(g)) throw new Error('配置缺少 group 节点');
+  let proxy = null;
+  if (g.proxy != null) {
+    const px = g.proxy;
+    if (typeof px !== 'object' || Array.isArray(px)) throw new Error('proxy 必须是对象或 null');
+    const type = String(px.type || '').toLowerCase();
+    if (['http', 'socks5', 'socks5h'].indexOf(type) < 0) throw new Error('代理类型不支持：' + (px.type || '空') + '（仅 http / socks5 / socks5h）');
+    const host = String(px.host || '').trim();
+    if (!host) throw new Error('代理缺少 host');
+    const port = Number(px.port);
+    if (port % 1 !== 0 || port < 1 || port > 65535) throw new Error('代理端口不合法：' + px.port);
+    proxy = { type: type, host: host, port: port, username: String(px.username || ''), password: String(px.password || '') };
+  }
+  const pr = (g.prompt && typeof g.prompt === 'object' && !Array.isArray(g.prompt)) ? g.prompt : {};
+  const entries = Array.isArray(pr.entries) ? pr.entries : [];
+  const replaces = Array.isArray(pr.replaces) ? pr.replaces : [];
+  for (const e of entries) if (!e || typeof e.text !== 'string') throw new Error('提示词条目缺少 text');
+  for (const rp of replaces) if (!rp || typeof rp.match !== 'string') throw new Error('关键词替换缺少 match');
+  return {
+    raw: f,
+    name: String(g.name || ''),
+    shared: !!g.shared_pool,
+    callPublic: !!g.call_public,
+    proxy: proxy,
+    prompt: { enabled: !!pr.enabled, text: String(pr.text || ''), entries: entries, replaces: replaces },
+  };
+}
+
+// groupConfigSummary 导入确认弹窗里的影响面清单。所有来自文件的文本都过 esc。
+function groupConfigSummary(cfg) {
+  const px = cfg.proxy;
+  const proxyText = px
+    ? esc(px.type + '://' + px.host + ':' + px.port) + (px.username ? ' <span class="hint">用户 ' + esc(px.username) + '</span>' : '') + (px.password ? ' <span class="tag warn">含密码</span>' : '')
+    : '直连 <span class="hint">（会清除本组现有代理）</span>';
+  const nE = cfg.prompt.entries.length || (cfg.prompt.text ? 1 : 0);
+  const nR = cfg.prompt.replaces.length;
+  const rules = nE + ' 条提示词 · ' + nR + ' 条替换';
+  const promptText = cfg.prompt.enabled
+    ? '<span class="tag ok">启用</span> ' + rules
+    : '<span class="tag">关闭</span> ' + rules + ' <span class="hint">（规则保留，导入后不生效）</span>';
+  const rows = [
+    ['来源分组', cfg.name ? esc(cfg.name) : '<span class="hint">未命名</span>'],
+    ['网络代理', proxyText],
+    ['提示词规则', promptText],
+    ['共享池', cfg.shared ? '开 <span class="hint">（本组账号进入公共选号）</span>' : '关'],
+  ];
+  return '<div class="cfg-io-sum">' + rows.map(r => '<div class="row"><span class="k">' + r[0] + '</span><span class="v">' + r[1] + '</span></div>').join('') + '</div>' +
+    '<div class="modal-warn">导入会覆盖目标分组现有的代理、共享池开关与提示词规则，不可撤销。</div>';
+}
+
+async function exportGroupConfig() {
+  const g = selectedGroup(); if (!g) return;
+  let d;
+  try { d = await api('groups/' + encodeURIComponent(g.id) + '/config'); }
+  catch (e) { toast('导出失败：' + (e.message || e), 'err'); return; }
+  const px = d && d.group && d.group.proxy;
+  const blob = new Blob([JSON.stringify(d, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = cfgFileName(g.name);
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+  toast('已导出「' + g.name + '」配置' + (px && px.password ? '（含代理密码，请妥善保管）' : ''), 'ok');
+}
+
+async function importGroupConfig(file) {
+  const g = selectedGroup(); if (!g || !file) return;
+  let cfg;
+  try { cfg = parseGroupConfig(await file.text()); }
+  catch (e) { toast('配置读取失败：' + (e.message || e), 'err'); return; }
+  openConfirm('导入分组配置', groupConfigSummary(cfg) + '<div class="hint" style="margin-top:8px">目标分组：<b>' + esc(g.name) + '</b></div>', '覆盖导入', async () => {
+    await api('groups/' + encodeURIComponent(g.id) + '/config', { method: 'PUT', body: JSON.stringify(cfg.raw) });
+    closeVeil('confirmVeil');
+    await load();
+    toast('配置已导入到「' + g.name + '」', 'ok');
+  });
+}
+
+function cfgIOToolbar() {
+  return '<div class="cfg-io"><span class="hint">整组配置可搬运：网络代理 · 共享池 · 提示词规则（不含分组密钥与账号）</span><span class="grow"></span>' +
+    '<button class="xs ghost" data-act="cfg-export" title="导出为 JSON 文件（含代理密码）">导出配置</button>' +
+    '<button class="xs ghost" data-act="cfg-import" title="从 JSON 文件覆盖本组配置">导入配置</button></div>';
+}
+
 function renderDetail() {
   const g = selectedGroup();
   // 配置卡（密钥 / 代理 / 共享池 / 提示词）由 group_cfg.js 渲染，和主页分组卡片是同一份 DOM；
@@ -425,7 +536,7 @@ function renderDetail() {
   }
   const list = groupAccounts(g.id);
   $('detail').innerHTML = '<div class="detail-head"><div class="dh-title"><span class="group-mark" style="--c:' + esc(g.color || '#5b7cfa') + '"></span><div><h1>' + esc(g.name) + '</h1><div class="sub">' + esc(g.id) + ' · ' + g.member_count + ' 个账号</div></div></div><div class="dh-acts"><span class="tag ' + (g.shared_pool ? 'warn' : 'accent') + '">' + (g.shared_pool ? '共享分组' : '独立分组') + '</span><button class="xs" data-act="edit-group">编辑</button><button class="xs danger" data-act="delete-group">删除</button></div></div>' +
-    '<div id="gcCards" class="gc-cards"></div>' + accountsBox(list, 'group');
+    cfgIOToolbar() + '<div id="gcCards" class="gc-cards"></div>' + accountsBox(list, 'group');
   GroupCfg.render('gcCards', g);
 }
 function renderAll() { renderStats(); renderRail(); renderDetail(); updateSelUI(); }
@@ -786,6 +897,8 @@ document.addEventListener('click', async e => {
     // 导出 / 移动 / 移除 / 添加 / 导入 全部走共享的 acct_actions.js：弹窗与请求只有一份，
     // 这里只做「点到了哪个入口」的分发（行内单号按钮另走 act === 'acc'）。
     if (act === 'export-groups') { AcctActions.actOn('export'); return; }
+    if (act === 'cfg-export') { await exportGroupConfig(); return; }
+    if (act === 'cfg-import') { $('cfgImportFile').click(); return; }
     if (act === 'new-group') { openGroupModal(null); return; }
     if (act === 'edit-group') { const g = selectedGroup(); if (g) openGroupModal(g); return; }
     if (act === 'group-color') { state.groupColor = el.dataset.color; document.querySelectorAll('#groupColors .swatch').forEach(b => b.classList.toggle('on', b.dataset.color === state.groupColor)); return; }
@@ -922,6 +1035,13 @@ GroupCfg.mount({
 });
 // 账号级动作（移动 / 导出 / 移除 / 添加账号 / 导入 JSON）与主页是同一份 acct_actions.js：
 // 分组页只有一个列表，作用域固定 'gp'；勾选、刷新走本页现有实现。
+// 配置导入走同一套确认弹窗：选文件本身不算确认，解析通过后再列出影响面让人点。
+$('cfgImportFile').onchange = async e => {
+  const f = e.target.files && e.target.files[0];
+  e.target.value = '';
+  await importGroupConfig(f);
+};
+
 $('aaModals').innerHTML = AcctActions.modals();
 AcctActions.mount({
   container: 'aaModals',

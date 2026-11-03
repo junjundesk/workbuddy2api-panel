@@ -711,6 +711,7 @@ http://127.0.0.1:7863/panel/
 - **分组导入/添加**：分组页支持单账号或批量 JSON 导入（兼容上述三种 JSON 形态，多选文件时按 uid 合并去重）、浏览器 OAuth 添加账号；删除分组时可选「账号移到公共池」或「完全删除（含 auth 文件）」。
 - **单号操作**：分组页账号行提供签到 / 余额 / 任务 / 模型 / 测活 / 解冻 / 暂停选号 / 禁用 / 移动 / 导出 / 移除；主页账号池账号行同样支持「移动」（弹窗选择公共池 / 其他分组）与其余单号操作（导出除外）。「任务」「模型」都在**当前页弹窗**打开（与主页同一套实现：任务可接受 / 领取 / 一键完成；模型是该账号直连上游的实时列表 + 与上次拉取的差集），其余原地执行——账号行的按钮一律不再跳转页面，运维不会因此丢掉当前分组、勾选与详情。
 - **分组提示词规则**：每个分组一张「提示词规则」卡片——开关 + 规则编辑器（系统提示词多条 / 用户提示词多条 / 关键词替换多条，总量上限 64 KiB、系统+用户最多 16 条、替换最多 32 条）。开启后本组密钥的聊天与 Responses 请求按规则改写（见「系统提示词体系 → 分组级覆盖」）；保存后**下一个请求立即生效**，无需重启。未开启时沿用全局 `prompt.mode`。
+- **分组配置导入导出**：分组工具栏「导出配置 / 导入配置」把单个分组的**网络代理**（含用户名/密码）、**共享池两个开关**与**提示词规则**打包成一个 JSON 文件（`{"format":"workbuddy-group-config","version":1,…}`），用于在分组之间或不同实例之间搬运同一套策略。导入是**整体覆盖**：文件里 `proxy: null` 表示改为直连，提示词以文件为准（关闭但保留规则也会一并带回）；分组名、颜色、分组密钥与账号归属**不在**导出范围，导入后保持目标分组原值。写入单次落盘、失败整组回滚，并立即失效该分组的选号/上游缓存。⚠️ 文件内的代理密码是**明文**，请按密钥保管。
 
 ### 账号巡检（封号 / 无积分自动归组）
 
@@ -749,7 +750,7 @@ http://127.0.0.1:7863/panel/
 | 账号运维 | `POST accounts/{uid}/checkin` · `balance` · `alive` · `revive` · `disable` · `remove`；`POST checkin_all` · `travel_all` · `activity_all` · `keepalive_all` · `balance_all` |
 | 任务 | `GET accounts/{uid}/tasks`；`POST accounts/{uid}/tasks/accept` · `accept_all` · `claim` · `auto` · `auto_all`；`POST tasks/scan_all` · `tasks/run_queue` |
 | 添加账号 | `POST login/start` · `GET login/poll` · `GET login/regions` · `POST import/cockpit`（兼容 cockpit / 面板导出 / auths 原文件三种 JSON 形态） |
-| 号池分组 | `GET groups` · `POST groups` · `PATCH groups/{id}` · `DELETE groups/{id}?account_action=move\|delete` · `POST groups/{id}/key/rotate` · `GET/PUT groups/{id}/prompt` · `PUT groups/{id}/proxy` · `POST groups/{id}/proxy/test` · `POST accounts/{uid}/group` |
+| 号池分组 | `GET groups` · `POST groups` · `PATCH groups/{id}` · `DELETE groups/{id}?account_action=move\|delete` · `POST groups/{id}/key/rotate` · `GET/PUT groups/{id}/prompt` · `GET/PUT groups/{id}/config` · `PUT groups/{id}/proxy` · `POST groups/{id}/proxy/test` · `POST accounts/{uid}/group` |
 | 账号巡检 | `GET patrol`（设置 + 运行态 + 最近处理日志）· `POST patrol`（保存设置）· `POST patrol/run`（立即巡检，body 可带 `dry_run` / `uids`）· `POST patrol/stop`（取消当前轮 + 关闭自动巡检）· `POST accounts/remove_batch`（多选删除账号与凭证文件） |
 | 写入 | `POST config`（校验 → 落盘 → 热应用，返回需重启字段清单）· `POST usage/save`（立即把内存用量落盘）· `POST logs/clear`（清空运行日志环形缓冲）· `POST request_logs/clear`（删除请求记录 JSONL 归档并清空最近记录） |
 

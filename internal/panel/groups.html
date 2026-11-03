@@ -204,6 +204,7 @@ input:focus,select:focus,textarea:focus { outline:none; border-color:var(--accen
 .key-big { background:var(--surface-2); border:1px solid var(--line); border-radius:8px; padding:12px; font:13px/1.5 var(--mono); color:var(--accent); word-break:break-all; user-select:all; margin-bottom:12px; }
 .radio { display:flex; gap:8px; padding:8px 10px; border:1px solid var(--line); border-radius:8px; margin-bottom:7px; font-size:12.5px; cursor:pointer; }
 .radio input { width:auto; margin-top:2px; }
+.cfg-io { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin:0 0 10px; } .cfg-io .hint { font-size:11.5px; } .cfg-io .grow { flex:1; } .cfg-io-sum { border:1px solid var(--line); border-radius:9px; overflow:hidden; margin-bottom:10px; background:var(--surface); } .cfg-io-sum .row { display:flex; gap:10px; padding:7px 10px; font-size:12.5px; border-top:1px solid var(--line-soft); } .cfg-io-sum .row:first-child { border-top:0; } .cfg-io-sum .k { width:74px; flex:none; color:var(--ink-3); } .cfg-io-sum .v { flex:1; min-width:0; word-break:break-word; }
 .modal-warn { border:1px solid color-mix(in srgb,var(--bad) 30%,var(--line)); background:var(--bad-soft); color:var(--bad); border-radius:8px; padding:9px 11px; font-size:11.5px; line-height:1.55; }
 .tabs { display:inline-flex; gap:2px; background:var(--surface-2); border-radius:9px; padding:3px; }
 .tabs .tab { border:0; background:transparent; padding:4px 14px; border-radius:7px; color:var(--ink-3); font:550 12.5px var(--sans); }
@@ -248,6 +249,8 @@ input:focus,select:focus,textarea:focus { outline:none; border-color:var(--accen
   </div>
 </div>
 <div id="toasts"></div>
+<!-- 单分组配置导入的选文件入口：按钮只负责 click()，真正解析在 groups.js -->
+<input type="file" id="cfgImportFile" accept=".json,application/json" hidden>
 <!-- 分组配置弹窗（代理/提示词/密钥）由 group_cfg.js 注入，与主页共用同一份 -->
 <div id="gcModals"></div>
 <!-- 账号级动作弹窗（移动/导出/导入/添加）由 acct_actions.js 注入，与主页共用同一份 -->

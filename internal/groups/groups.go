@@ -58,6 +58,19 @@ type Group struct {
 	Members   []string  `json:"members"`
 }
 
+// Config 分组可整体导入/导出的配置：共享开关、分组代理与提示词规则。
+//
+// 刻意不包含名称、识别色、分组密钥与成员：这些是"这台实例上的身份"，导入到
+// 别的分组/实例时改名、换密钥或搬账号都是意料之外的副作用；面板的配置导入接口
+// 也只认这些策略字段。
+type Config struct {
+	SharedPool    bool
+	CallPublic    bool
+	Proxy         *Proxy
+	PromptEnabled bool
+	Rules         prompt.Rules
+}
+
 // Meta 是 pool 选号需要的分组策略快照（不含密钥/代理等敏感配置）。
 type Meta struct {
 	Shared     bool
@@ -426,6 +439,45 @@ func (s *Store) writePrompt(id string, enabled bool, text string, rs prompt.Rule
 	g.PromptEnabled, g.PromptText = enabled, text
 	g.PromptEntries, g.PromptReplaces = rs.Entries, rs.Replaces
 	if err := s.saveLocked(); err != nil {
+		g.PromptEnabled, g.PromptText = oldEnabled, oldText
+		g.PromptEntries, g.PromptReplaces = oldEntries, oldReplaces
+		return err
+	}
+	return nil
+}
+
+// SetConfig 一次性覆盖分组的可导入配置（共享/公共池开关、代理、提示词规则）。
+//
+// 与逐个调用 SetProxy / SetPromptRules 的区别是**原子性**：导入一份配置文件时
+// 要么全部生效，要么原样不动。先做完全部校验再持锁写入并只落盘一次，落盘失败
+// 全量回滚——否则代理已换、提示词校验失败的半套配置会留在 groups.json 里。
+// cfg.Proxy 为 nil 表示直连（与 SetProxy 同语义）。
+func (s *Store) SetConfig(id string, cfg Config) error {
+	var np *Proxy
+	if cfg.Proxy != nil {
+		cp := *cfg.Proxy
+		if np = normalizeProxy(&cp); np == nil {
+			return fmt.Errorf("invalid proxy config")
+		}
+	}
+	rs := cfg.Rules.Normalize()
+	if err := checkPromptRules(cfg.PromptEnabled, rs); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	g, ok := s.groups[id]
+	if !ok {
+		return os.ErrNotExist
+	}
+	oldShared, oldCall, oldProxy := g.SharedPool, g.CallPublic, g.Proxy
+	oldEnabled, oldText := g.PromptEnabled, g.PromptText
+	oldEntries, oldReplaces := g.PromptEntries, g.PromptReplaces
+	g.SharedPool, g.CallPublic, g.Proxy = cfg.SharedPool, cfg.CallPublic, np
+	g.PromptEnabled, g.PromptText = cfg.PromptEnabled, ""
+	g.PromptEntries, g.PromptReplaces = rs.Entries, rs.Replaces
+	if err := s.saveLocked(); err != nil {
+		g.SharedPool, g.CallPublic, g.Proxy = oldShared, oldCall, oldProxy
 		g.PromptEnabled, g.PromptText = oldEnabled, oldText
 		g.PromptEntries, g.PromptReplaces = oldEntries, oldReplaces
 		return err
