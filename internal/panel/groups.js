@@ -466,7 +466,7 @@ async function runGroupAlive(g) {
   await load(); // 测活不改池状态，刷新只为让余额变化立刻可见
 }
 function accountsBox(list, mode) {
-  return '<div class="box"><header><h3>' + (mode === 'group' ? '分组账号' : '公共池账号') + ' <span class="hint">' + (mode === 'group' ? '仅本组密钥可见' : '未分组 + 共享') + '</span></h3><span class="grow"></span>' + (mode === 'group' ? groupBulkBtns(list) : '') + '<span class="hint" id="selInfo"></span><button class="xs" data-act="move-sel" disabled>移动所选</button><button class="xs" data-act="export-sel" disabled title="导出所选账号 JSON（含凭证），可在其他实例直接导入">导出所选</button><button class="xs" data-act="add-account">添加账号</button><button class="xs" data-act="import">导入 JSON</button></header><div class="acc-wrap"><table class="acc"><thead><tr><th class="mark"></th><th class="ck"><input type="checkbox" data-act="sel-all" title="全选当前列表"></th><th>账号</th><th>状态</th><th>积分</th><th>成功 / 失败</th><th>在途</th><th>用量</th><th>域</th><th></th></tr></thead><tbody>' + rowsHtml(list, mode) + '</tbody></table></div><div class="table-foot">共 ' + list.length + ' 个账号</div></div>';
+  return '<div class="box"><header><h3>' + (mode === 'group' ? '分组账号' : '公共池账号') + ' <span class="hint">' + (mode === 'group' ? '仅本组密钥可见' : '未分组 + 共享') + '</span></h3><span class="grow"></span>' + (mode === 'group' ? groupBulkBtns(list) : '') + '<span class="hint" id="selInfo"></span><button class="xs" data-act="move-sel" disabled>移动所选</button><button class="xs" data-act="export-sel" disabled title="导出所选账号 JSON（含凭证），可在其他实例直接导入">导出所选</button><button class="xs danger" data-act="remove-sel" disabled title="删除所选账号：池状态与 auths/ 下的凭证文件一并删除，不可恢复">移除所选</button><button class="xs" data-act="add-account">添加账号</button><button class="xs" data-act="import">导入 JSON</button></header><div class="acc-wrap"><table class="acc"><thead><tr><th class="mark"></th><th class="ck"><input type="checkbox" data-act="sel-all" title="全选当前列表"></th><th>账号</th><th>状态</th><th>积分</th><th>成功 / 失败</th><th>在途</th><th>用量</th><th>域</th><th></th></tr></thead><tbody>' + rowsHtml(list, mode) + '</tbody></table></div><div class="table-foot">共 ' + list.length + ' 个账号</div></div>';
 }
 function renderDetail() {
   const g = selectedGroup();
@@ -487,10 +487,35 @@ function visibleAccounts() { const g = selectedGroup(); return g ? groupAccounts
 function updateSelUI() {
   const list = visibleAccounts(); const n = list.filter(a => state.sel.has(a.uid)).length;
   const info = $('selInfo'); if (info) info.textContent = n ? '已选 ' + n : '';
-  document.querySelectorAll('[data-act="move-sel"],[data-act="export-sel"]').forEach(b => { b.disabled = !n; });
+  document.querySelectorAll('[data-act="move-sel"],[data-act="export-sel"],[data-act="remove-sel"]').forEach(b => {
+    b.disabled = !n;
+    // 移除是不可恢复操作，按钮上直接写数量，避免「以为只删一个」。
+    if (b.dataset.act === 'remove-sel') b.textContent = n ? '移除所选 (' + n + ')' : '移除所选';
+  });
   const all = document.querySelector('[data-act="sel-all"]'); if (all) { all.checked = n > 0 && n === list.length; all.indeterminate = n > 0 && n < list.length; }
 }
 function selectedVisible() { return visibleAccounts().filter(a => state.sel.has(a.uid)).map(a => a.uid); }
+// removeSelected 一键移除勾选的账号。后端 remove_batch 逐号删池状态 + auths/ 凭证
+// （单次上限 500，防误触删空号池）；这里只弹一次确认，失败号保留勾选便于重试。
+async function removeSelected() {
+  const uids = selectedVisible();
+  if (!uids.length) { toast('请先勾选账号', 'err'); return; }
+  if (!confirm('将删除 ' + uids.length + ' 个账号：池状态与 auths/ 下的凭证文件一并删除，且不可恢复。\n\n确认删除？')) return;
+  const btn = document.querySelector('[data-act="remove-sel"]');
+  if (btn) { btn.disabled = true; btn.textContent = '移除中…'; }
+  try {
+    const r = await api('accounts/remove_batch', { method: 'POST', body: JSON.stringify({ uids: uids }) });
+    const ok = (r.removed || []).length, bad = (r.failed || []).length, fe = (r.file_errors || []).length;
+    (r.removed || []).forEach(u => state.sel.delete(u));
+    toast('已移除 ' + ok + ' 个账号' + (bad ? '，失败 ' + bad : '') + (fe ? '，凭证文件删除失败 ' + fe : ''), bad || fe ? 'err' : 'ok');
+    await load(); // 重建列表后按钮是新的，updateSelUI 会按剩余勾选复位
+  } catch (e) {
+    toast('移除失败：' + (e.message || '未知错误'), 'err');
+  } finally {
+    updateSelUI();
+  }
+}
+
 // exportAccounts 导出账号 JSON。uids = 勾选的账号；groups = 按号池（分组）导出。
 // 两者可同时给，服务端取并集。groups 用 'public' 表示公共号池。
 async function exportAccounts(uids, groups) {
@@ -1095,6 +1120,7 @@ document.addEventListener('click', async e => {
     if (act === 'export-sel') { await exportAccounts(selectedVisible()); return; }
     if (act === 'export-account') { await exportAccounts([el.dataset.uid]); return; }
     if (act === 'move-sel') { const u = selectedVisible(); if (!u.length) { toast('请先勾选账号', 'err'); return; } openMoveModal(u); return; }
+    if (act === 'remove-sel') { await removeSelected(); return; }
     if (act === 'move-do') {
       const target = $('moveTarget').value; const uids = state.moveUids.slice(); let ok = 0, fail = 0, lastErr = '';
       for (const uid of uids) {

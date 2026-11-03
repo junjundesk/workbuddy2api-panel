@@ -3,6 +3,7 @@ package panel
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -103,3 +104,43 @@ process.stdout.write(JSON.stringify(cases.map(c => ctx.f(c[0], c[1]))));`
 	}
 }
 
+// TestGroupsJSRemoveSelected 分组页多选必须能一键移除。
+//
+// 早先勾完一堆账号只有「移动所选 / 导出所选」：要清失效号得一行行点「移除」，
+// 每行各弹一次 confirm。现在按钮带勾选数、只确认一次、走 remove_batch 批量删，
+// 删成功的从勾选里摘掉，失败的留下便于重试。
+func TestGroupsJSRemoveSelected(t *testing.T) {
+	path, err := filepath.Abs("groups.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	js := string(b)
+	for _, want := range []string{
+		`data-act="remove-sel"`, // 工具条按钮
+		`'移除所选 (' + n + ')'`,    // 勾选数直接写在按钮上
+		`[data-act="move-sel"],[data-act="export-sel"],[data-act="remove-sel"]`, // 跟随勾选启停
+		`if (act === 'remove-sel') { await removeSelected(); return; }`,
+		`api('accounts/remove_batch'`,
+		`(r.removed || []).forEach(u => state.sel.delete(u))`,
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("groups.js 缺少 %q：多选后应能一键移除所选账号", want)
+		}
+	}
+	// 只确认一次：逐个 confirm 在清号时要点到手酸，也让「取消」语义不可预期。
+	start := strings.Index(js, "async function removeSelected()")
+	if start < 0 {
+		t.Fatal("groups.js 缺少 removeSelected")
+	}
+	end := strings.Index(js[start:], "\n}\n")
+	if end < 0 {
+		t.Fatal("removeSelected 未闭合")
+	}
+	if n := strings.Count(js[start:start+end], "confirm("); n != 1 {
+		t.Errorf("removeSelected 里 confirm 出现 %d 次，应只确认一次", n)
+	}
+}
