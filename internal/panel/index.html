@@ -627,6 +627,11 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
   .gcard > header .car { width: 10px; color: var(--ink-3); transition: transform .15s; display: inline-block; font-size: 11px; }
   .gcard.fold > header .car { transform: rotate(-90deg); }
   .gcard.fold > .tbl-wrap { display: none; }
+  .gcard.fold > .gbar { display: none; }
+  /* 每组表格上方的账号级动作条（移动/导出/移除/添加/导入 由 acct_actions.js 生成）：
+     组级动作留在卡片头，账号级动作贴着列表放，11 个按钮才不用挤同一行。 */
+  .gcard > .gbar { padding: 8px 14px; border-bottom: 1px solid var(--line-soft); background: var(--surface-2); }
+  .box > .gbar { padding: 8px 14px; border-bottom: 1px solid var(--line-soft); background: var(--surface-2); }
   .gcard.fold > header { border-bottom: none; }
   .gcard .gdot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
   .gcard .gn { font-weight: 600; font-size: 13px; }
@@ -754,12 +759,13 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
           <span class="note" id="accNote"></span>
           <button class="xs" id="btnPatrol" title="巡检全部账号：封号（上游 code 11140）与积分 0 的账号自动移入「封号池」「无积分」分组">巡检</button>
           <label class="acc-selall" title="全选当前账号池（含各分组）"><input type="checkbox" id="accSelAll">全选</label>
-          <button class="xs ghost danger" id="btnBulkRemove" disabled title="删除所选的账号：池状态与 auths/ 下的凭证文件一并删除，不可恢复">删除所选</button>
           <button class="xs" id="btnCheckinAll" title="逐号签到并刷新余额，进度与每号结果在弹窗里逐条展示；401 失效号自动移入失效池">全部签到</button>
           <button class="xs" id="btnTravelAll">旅行巡检</button>
           <button class="xs" id="btnActivityAll">活跃上报</button>
           <button class="xs" id="btnKeepaliveAll">全部保活</button>
         </header>
+        <!-- 账号级动作条：与分组卡片、号池分组页同一份实现（acct_actions.js） -->
+        <div class="gbar" id="accAllBar"></div>
         <div class="tbl-wrap" id="accTblWrap">
         <table class="acc">
           <thead><tr>
@@ -1495,11 +1501,15 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 <div id="toasts"></div>
 <!-- 分组配置的三个弹窗（密钥/代理/提示词）由 group_cfg.js 注入，与号池分组页共用 -->
 <div id="gcModals"></div>
+<!-- 账号级批量动作的四个弹窗（移动/导出/导入/添加）由 acct_actions.js 注入，与号池分组页共用 -->
+<div id="aaModals"></div>
 
 <!-- 号池列表的共享实现：行渲染 / 状态口径 / 排序 / 行内操作都在这份脚本里，主页与分组页共用 -->
 <link rel="stylesheet" href="/panel/group_cfg.css">
+<link rel="stylesheet" href="/panel/acct_actions.css">
 <script src="pool_list.js"></script>
 <script src="group_cfg.js"></script>
+<script src="acct_actions.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

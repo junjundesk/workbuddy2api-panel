@@ -251,7 +251,8 @@
       : (a.paused ? btn('resume', '恢复选号', 'primary')
         : btn('pause', '暂停选号', '', a.enterprise ? '退出选号，但照常保活 / 刷新额度' : '退出选号，但照常签到 / 活跃上报 / 保活 / 刷新余额'));
     if (!a.disabled) h += btn('disable', '禁用');
-    if (o.canMove) h += btn('move', '移动', '', '移动到公共池或其他分组');
+    // 带上当前分组：共享弹窗会把它标成「（当前）」并禁用，避免原地移动。
+    if (o.canMove) h += btn('move', '移动', '', '移动到公共池或其他分组', a.group ? { group: a.group } : null);
     if (o.mode !== 'group' && a.group) h += btn('gogroup', '前往分组', '', '在「号池分组」页打开它所在的分组', { g: a.group });
     h += btn('export', '导出', '', '导出该账号 JSON（含登录凭证），可在其他实例导入');
     h += btn('remove', '移除', 'danger');

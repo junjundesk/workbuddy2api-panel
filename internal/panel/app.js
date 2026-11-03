@@ -399,14 +399,32 @@ function accSelPrune(list) {
 }
 function accSelSync() {
   const n = accSel.size;
-  const b = $('btnBulkRemove');
-  if (b) { b.disabled = n === 0; b.textContent = n ? '删除所选 (' + n + ')' : '删除所选'; }
   const all = $('accSelAll');
   if (all) {
     const total = ((overviewData && overviewData.accounts) || []).length;
     all.checked = total > 0 && n === total;
     all.indeterminate = n > 0 && n < total;
   }
+  // 分组卡片里的「移动 / 导出 / 移除」按各卡片自己的勾选数启停（acct_actions.js 维护）。
+  if (window.AcctActions) AcctActions.syncAll();
+}
+
+// 账号级动作的作用域 = 一张分组卡片（公共池 '_public'，其余用分组 id）。模块只问这两个问题：
+// 这个作用域勾了哪些号、删完要清哪些勾选。
+function accScopeBucket(scope) {
+  const list = (overviewData && overviewData.accounts) || [];
+  const groups = (overviewData && overviewData.groups) || [];
+  return groupAccountsForView(list, groups).find(x => x.key === scope) || null;
+}
+function accScopeUids(scope) {
+  // 'all' = 账号池整表，勾选集合本来就是全局的，直接照抄；其余作用域按分组筛。
+  if (scope === 'all') return Array.from(accSel);
+  const b = accScopeBucket(scope);
+  return b ? b.items.filter(a => accSel.has(a.uid)).map(a => a.uid) : [];
+}
+function accScopeClear(scope, uids) {
+  (uids || []).forEach(u => accSel.delete(u));
+  accSelSync();
 }
 function accSelAll(on) {
   const list = (overviewData && overviewData.accounts) || [];
@@ -414,24 +432,8 @@ function accSelAll(on) {
   renderAccounts(list, (overviewData && overviewData.groups) || []);
   accSelSync();
 }
-async function accBulkRemove() {
-  const uids = Array.from(accSel);
-  if (!uids.length) return;
-  if (!confirm('将删除 ' + uids.length + ' 个账号：池状态与 auths/ 下的凭证文件一并删除，且不可恢复。\n\n确认删除？')) return;
-  const b = $('btnBulkRemove');
-  if (b) { b.disabled = true; b.textContent = '删除中…'; }
-  try {
-    const r = await api('accounts/remove_batch', { method: 'POST', body: JSON.stringify({ uids }) });
-    const ok = (r.removed || []).length, bad = (r.failed || []).length, fe = (r.file_errors || []).length;
-    accSel.clear();
-    toast('已删除 ' + ok + ' 个账号' + (bad ? '，失败 ' + bad : '') + (fe ? '，凭证文件删除失败 ' + fe : ''), bad || fe ? 'err' : 'ok');
-    await loadOverview(true);
-  } catch (e) {
-    toast('删除失败：' + e.message, 'err');
-  } finally {
-    if (b) { b.disabled = accSel.size === 0; b.textContent = accSel.size ? '删除所选 (' + accSel.size + ')' : '删除所选'; }
-  }
-}
+// 整表与分组卡片的「移除所选」都走共享的 acct_actions.js（POST accounts/remove_batch，
+// 成功后清勾选 + 刷新），这里不再保留第二份实现。
 
 /* ── 巡检（封号 11140 / 积分 0 自动归组） ─────────────────────────── */
 // 只把真正执行成功的移动 / 回流作为处理日志，兼容旧服务端返回的全量检查记录。
@@ -709,8 +711,14 @@ function renderAccountGroups(list, groups) {
       (!b.pub ? '<button class="xs ghost" data-gopen="' + k + '" title="在「号池分组」页打开该分组（密钥 / 代理 / 提示词 / 成员导入）">分组页</button>' +
         '<button class="xs ghost" data-gedit="' + k + '" title="编辑分组名称 / 识别色 / 共享策略，或删除分组">设置</button>' : '') +
       (b.pub ? '<button class="xs ghost" data-gnew="1" title="新建一个专属分组（独立号池，默认与公共池隔离）">＋ 新建分组</button>' : '') +
-      '</header><div class="tbl-wrap"><table class="acc gfix">' + cols + head + '<tbody>' + rows + '</tbody></table></div></div>';
+      // 账号级动作（移动/导出/移除/添加/导入）贴在列表上方，与号池分组页是同一份
+      // acct_actions.js：按钮、弹窗、请求都共用，改一处两页同时生效。
+      '</header><div class="gbar">' + AcctActions.bar({ scope: b.key, group: b.pub ? '' : b.id }) + '</div>' +
+      '<div class="tbl-wrap"><table class="acc gfix">' + cols + head + '<tbody>' + rows + '</tbody></table></div></div>';
   }).join('');
+  // 卡片是整段重建的，新生成的按钮条默认 disabled；按当前勾选立刻同步一次，
+  // 否则刷新后已勾的号要再点一下才「亮」。
+  accSelSync();
 }
 
 // renderModelLocks 模型锁池：哪些模型不能用、锁了几个号、还要锁多久。
@@ -971,6 +979,22 @@ if ($('gcModals')) {
     copyText: copyText,
   });
 }
+// 账号级批量动作（移动 / 导出 / 移除 / 添加账号 / 导入 JSON）：按钮在各分组卡片的
+// .gbar 里，弹窗挂在 #aaModals，逻辑全在共享的 acct_actions.js —— 与号池分组页同一份。
+if ($('aaModals') && window.AcctActions) {
+  AcctActions.mount({
+    container: 'aaModals',
+    api: api,
+    toast: toast,
+    groups: () => (overviewGroupViews || []).map(g => ({ id: g.id, name: g.name, member_count: g.member_count, shared_pool: g.shared_pool })),
+    publicCount: () => { const b = accScopeBucket('_public'); return b ? b.items.length : 0; },
+    selUids: accScopeUids,
+    clearSel: accScopeClear,
+    reload: () => loadOverview(true),
+  });
+}
+// 账号池整表也放一条同款动作条，作用域 'all'（勾选集合是全局的 accSel）。
+if ($('accAllBar') && window.AcctActions) $('accAllBar').innerHTML = AcctActions.bar({ scope: 'all', group: '' });
 if ($('grpName')) $('grpName').addEventListener('keydown', ev => { if (ev.key === 'Enter') saveGroup(); });
 if ($('grpColors')) $('grpColors').addEventListener('click', ev => {
   const b = ev.target.closest('button[data-gcolor]');
@@ -984,11 +1008,12 @@ async function onAccClick(ev) {
   const b = ev.target.closest('button[data-a]');
   if (!b) return;
   const u = b.dataset.u, a = b.dataset.a;
-  if (a === 'move') { openMoveModal(u); return; }
+  // 移动 / 导出 / 移除和工具条上的同名按钮共用 acct_actions.js 的弹窗与接口，
+  // 只是把选中集合换成「就这一个号」；这三个都不需要 disable 行内按钮。
+  if (a === 'move') { AcctActions.actOn('move', u, b.dataset.group || ''); return; }
   if (a === 'gogroup') { openGroupPage(b.dataset.g); return; }
-  // 导出只在本地拼文件、没有在途请求，不必 disable 按钮，单独提前返回。
-  if (a === 'export') { await exportAccountsJSON([u]); return; }
-  if (a === 'remove' && !confirm('移除账号将删除池状态与 auths/ 下的凭证文件，且不可恢复。确认移除？')) return;
+  if (a === 'export') { AcctActions.actOn('export', u); return; }
+  if (a === 'remove') { await AcctActions.actOn('remove', u); return; }
   if (a === 'disable' && !confirm('禁用后该账号不再参与选号（保号任务默认也跳过），需手动解冻才能恢复。若只是想临时让位、仍要保号，请改用「暂停选号」。确认禁用？')) return;
   b.disabled = true;
   try {
@@ -1023,9 +1048,6 @@ async function onAccClick(ev) {
       openTasks(u);
     } else if (a === 'models') {
       openAccountModels(u);
-    } else if (a === 'remove') {
-      const r = await api('accounts/' + encodeURIComponent(u) + '/remove', { method: 'POST' });
-      toast(r.file_error ? '已移除（凭证文件删除失败：' + r.file_error + '）' : '已移除', 'ok');
     }
   } catch (e) {
     // 余额接口把失效信息放在 502 体内（dead/moved_to），api() 已挂到 e.body；
@@ -1060,7 +1082,6 @@ document.addEventListener('change', ev => {
   accSelSync();
 });
 if ($('accSelAll')) $('accSelAll').addEventListener('change', ev => accSelAll(ev.target.checked));
-if ($('btnBulkRemove')) $('btnBulkRemove').onclick = accBulkRemove;
 if ($('btnPatrol')) $('btnPatrol').onclick = openPatrol;
 if ($('btnPatrolClose')) $('btnPatrolClose').onclick = closePatrol;
 if ($('btnPatrolRun')) $('btnPatrolRun').onclick = runPatrol;

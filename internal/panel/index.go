@@ -5,6 +5,7 @@
 //   - app.js      全部前端逻辑（独立文件而非内联，为了启用无需 unsafe-inline 的严格 CSP）
 //   - pool_list.js 号池账号列表的共享实现（主页账号池与分组页共用同一份渲染/排序/操作）
 //   - group_cfg.js/group_cfg.css 分组配置的共享实现（密钥/代理/共享池/提示词，两页同一份）
+//   - acct_actions.js/acct_actions.css 账号级批量动作的共享实现（移动/导出/移除/添加/导入，两页同一份）
 //   - groups.html/groups.js 号池分组页
 //
 // 安全头对"面板页面与全部 /panel/api/* 响应"统一生效：CSP 限制脚本只能来自本服务，
@@ -36,6 +37,12 @@ var groupCfgJS []byte
 
 //go:embed group_cfg.css
 var groupCfgCSS []byte
+
+//go:embed acct_actions.js
+var acctActionsJS []byte
+
+//go:embed acct_actions.css
+var acctActionsCSS []byte
 
 // csp 内容安全策略（严格版，无需 unsafe-inline）：
 //   - default-src 'none'        默认全禁，逐个开口
@@ -116,4 +123,21 @@ func (p *Panel) groupCfgStyle(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/css; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(groupCfgCSS)
+}
+
+// acctActionsScript / acctActionsStyle 账号级批量动作（移动 / 导出 / 移除 / 添加 / 导入）
+// 的共享脚本与样式：主页分组卡片与号池分组页挂的是同一份按钮与弹窗，
+// 交互口径只在这一个文件里改。
+func (p *Panel) acctActionsScript(w http.ResponseWriter, r *http.Request) {
+	setSecurityHeaders(w)
+	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(acctActionsJS)
+}
+
+func (p *Panel) acctActionsStyle(w http.ResponseWriter, r *http.Request) {
+	setSecurityHeaders(w)
+	w.Header().Set("Content-Type", "text/css; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(acctActionsCSS)
 }

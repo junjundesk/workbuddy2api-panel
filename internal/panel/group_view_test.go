@@ -105,13 +105,14 @@ process.stdout.write(JSON.stringify(cases.map(c => ctx.f(c[0], c[1]))));`
 	}
 }
 
-// TestGroupsJSRemoveSelected 分组页多选必须能一键移除。
+// TestAcctActionsRemoveSelected 多选必须能一键移除，且两个页面共用同一份实现。
 //
 // 早先勾完一堆账号只有「移动所选 / 导出所选」：要清失效号得一行行点「移除」，
 // 每行各弹一次 confirm。现在按钮带勾选数、只确认一次、走 remove_batch 批量删，
-// 删成功的从勾选里摘掉，失败的留下便于重试。
-func TestGroupsJSRemoveSelected(t *testing.T) {
-	path, err := filepath.Abs("groups.js")
+// 删成功的从勾选里摘掉，失败的留下便于重试。这段能力已经搬进 acct_actions.js，
+// 主页工具条、主页每张分组卡片、号池分组页共用同一个按钮，所以断言也改在这里做。
+func TestAcctActionsRemoveSelected(t *testing.T) {
+	path, err := filepath.Abs("acct_actions.js")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,28 +122,30 @@ func TestGroupsJSRemoveSelected(t *testing.T) {
 	}
 	js := string(b)
 	for _, want := range []string{
-		`data-act="remove-sel"`, // 工具条按钮
-		`'移除所选 (' + n + ')'`,    // 勾选数直接写在按钮上
-		`[data-act="move-sel"],[data-act="export-sel"],[data-act="remove-sel"]`, // 跟随勾选启停
-		`if (act === 'remove-sel') { await removeSelected(); return; }`,
+		`data-aa="remove"`,                                       // 工具条按钮
+		`'移除所选 (' + n + ')'`,                                     // 勾选数直接写在按钮上
+		`[data-aa="move"],[data-aa="export"],[data-aa="remove"]`, // 跟随勾选启停
 		`api('accounts/remove_batch'`,
-		`(r.removed || []).forEach(u => state.sel.delete(u))`,
+		`clearSel(scope, r.removed || [])`,
+		`function doRemove(scope, only)`, // only：行内单号按钮传 [uid]
+		`function actOn(kind, uid, gid)`,
 	} {
 		if !strings.Contains(js, want) {
-			t.Errorf("groups.js 缺少 %q：多选后应能一键移除所选账号", want)
+			t.Errorf("acct_actions.js 缺少 %q：多选后应能一键移除所选账号", want)
 		}
 	}
 	// 只确认一次：逐个 confirm 在清号时要点到手酸，也让「取消」语义不可预期。
-	start := strings.Index(js, "async function removeSelected()")
+	// 两处 confirm 是「环境钩子 + 原生兜底」的同一次确认，不是两个弹窗。
+	start := strings.Index(js, "async function doRemove(")
 	if start < 0 {
-		t.Fatal("groups.js 缺少 removeSelected")
+		t.Fatal("acct_actions.js 缺少 doRemove")
 	}
-	end := strings.Index(js[start:], "\n}\n")
+	end := strings.Index(js[start:], "\n  }\n")
 	if end < 0 {
-		t.Fatal("removeSelected 未闭合")
+		t.Fatal("doRemove 未闭合")
 	}
-	if n := strings.Count(js[start:start+end], "confirm("); n != 1 {
-		t.Errorf("removeSelected 里 confirm 出现 %d 次，应只确认一次", n)
+	if n := strings.Count(js[start:start+end], "confirm("); n != 2 {
+		t.Errorf("doRemove 里 confirm 出现 %d 次，应只有一处确认（env.confirm 与 window.confirm 两个分支）", n)
 	}
 }
 
@@ -355,6 +358,131 @@ func TestGroupCfgSharedAcrossPages(t *testing.T) {
 		{"分组页提示词卡副本", gjs, "function promptCard("},
 		{"分组页代理弹窗副本", gjs, "function openProxyModal("},
 		{"分组页提示词行副本", gjs, "function renderPromptRows("},
+	} {
+		if strings.Contains(c.src, c.dead) {
+			t.Errorf("%s 仍然存在：%s", c.name, c.dead)
+		}
+	}
+}
+
+// TestAcctActionsExportModal 导出/移动弹窗：行内单号按钮与工具条共用同一套渲染。
+//
+// 早先这里断的是 groups.js 里的 renderExportModal；实现搬进共享模块后，
+// 同一个 openExport 既要服务「导出所选」，也要服务行内单号的「导出」，
+// 所以用 actOn 走一遍最小沙箱：弹窗四件套在、单号导出只算 1 个、号池清单带公共池。
+func TestAcctActionsExportModal(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; export modal test skipped")
+	}
+	script := `const fs = require('fs'), vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const els = {};
+function mk(tag) {
+  const cl = {};
+  return { tag: tag || 'div', innerHTML: '', textContent: '', hidden: false, disabled: false, value: '', options: [],
+    classList: { add: function(c){ cl[c]=1; }, remove: function(c){ delete cl[c]; }, toggle: function(c,on){ if (on) cl[c]=1; else delete cl[c]; }, contains: function(c){ return !!cl[c]; } },
+    appendChild: function(){}, remove: function(){}, click: function(){}, addEventListener: function(){}, querySelectorAll: function(){ return []; } };
+}
+const document = {
+  getElementById: function(id){ return els[id] || (els[id] = mk('div')); },
+  querySelectorAll: function(){ return []; },
+  querySelector: function(){ return null; },
+  createElement: function(t){ return mk(t); },
+  addEventListener: function(){},
+  body: mk('body'), documentElement: mk('html')
+};
+const ctx = { document: document, console: console, JSON: JSON, Math: Math, Date: Date, Number: Number, String: String, Object: Object, Array: Array, RegExp: RegExp, setTimeout: function(){}, Blob: function(){}, URL: { createObjectURL: function(){ return ''; }, revokeObjectURL: function(){} }, encodeURIComponent: encodeURIComponent, decodeURIComponent: decodeURIComponent };
+ctx.window = ctx; ctx.globalThis = ctx;
+vm.createContext(ctx);
+vm.runInContext(src, ctx);
+const AA = ctx.window.AcctActions;
+if (!AA || typeof AA.actOn !== 'function') throw new Error('AcctActions 没导出 actOn');
+const bar = AA.bar({ scope: 'all', group: '' });
+['move', 'export', 'remove', 'add', 'import'].forEach(function(k){ if (bar.indexOf('data-aa="' + k + '"') < 0) throw new Error('工具条缺按钮 ' + k); });
+if (bar.indexOf('disabled') < 0) throw new Error('移动/导出/移除 未勾选时应禁用');
+AA.mount({ container: 'aaModals', api: function(){ return Promise.resolve({}); }, toast: function(){}, groups: function(){ return [{ id: 'g1', name: '甲组', member_count: 2, shared_pool: false }]; }, publicCount: function(){ return 4; }, selUids: function(){ return []; }, clearSel: function(){}, reload: function(){ return Promise.resolve(); } });
+const modals = els.aaModals.innerHTML;
+['aaMoveVeil', 'aaExportVeil', 'aaImportVeil', 'aaAddVeil'].forEach(function(id){ if (modals.indexOf(id) < 0) throw new Error('弹窗缺失 ' + id); });
+AA.actOn('export', 'u1');
+if (els.aaExportPreview.textContent !== '将导出 1 个账号') throw new Error('导出预览不对: ' + els.aaExportPreview.textContent);
+if (els.aaExportSel.innerHTML.indexOf('u1') < 0) throw new Error('导出勾选清单没有 u1');
+if (els.aaExportPools.innerHTML.indexOf('公共号池') < 0) throw new Error('导出号池清单缺公共号池');
+AA.actOn('move', 'u1', 'g1');
+if (els.aaMoveHint.textContent.indexOf('1 个账号') < 0) throw new Error('移动提示不对: ' + els.aaMoveHint.textContent);
+if (els.aaMoveTarget.innerHTML.indexOf('甲组') < 0) throw new Error('移动目标缺分组');
+process.stdout.write('OK');`
+	f, err := os.CreateTemp(t.TempDir(), "aa-export-*.cjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(script); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	out, err := exec.Command(node, f.Name(), "acct_actions.js").CombinedOutput()
+	if err != nil {
+		t.Fatalf("acct_actions export node test failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "OK") {
+		t.Fatalf("unexpected output: %s", out)
+	}
+}
+
+// TestAcctActionsSharedAcrossPages 账号级动作只允许有一份实现。
+//
+// 用户在主页与号池分组页之间来回切，按钮文案、确认语气、失败提示必须一致；
+// 一旦某页偷偷留一份旧实现，就会出现「这页能导入那页不能」的割裂。
+func TestAcctActionsSharedAcrossPages(t *testing.T) {
+	read := func(name string) string {
+		p, err := filepath.Abs(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(b)
+	}
+	body := read("acct_actions.js")
+	app := read("app.js")
+	grp := read("groups.js")
+	idx := read("index.html")
+	gh := read("groups.html")
+
+	for _, c := range []struct{ name, src, want string }{
+		{"共享模块导出 actOn", body, "actOn: actOn"},
+		{"主页引入样式", idx, "/panel/acct_actions.css"},
+		{"主页引入脚本", idx, `src="acct_actions.js"`},
+		{"主页弹窗容器", idx, `id="aaModals"`},
+		{"主页整表工具条", idx, `id="accAllBar"`},
+		{"主页整表工具条渲染", app, "AcctActions.bar({ scope: 'all', group: '' })"},
+		{"主页分组卡片工具条", app, "AcctActions.bar({ scope: b.key"},
+		{"主页挂载共享弹窗", app, "AcctActions.mount("},
+		{"主页行内移动", app, "AcctActions.actOn('move', u, b.dataset.group"},
+		{"分组页引入样式", gh, "/panel/acct_actions.css"},
+		{"分组页引入脚本", gh, "/panel/acct_actions.js"},
+		{"分组页弹窗容器", gh, `id="aaModals"`},
+		{"分组页工具条", grp, "AcctActions.bar({ scope: 'gp'"},
+		{"分组页挂载共享弹窗", grp, "AcctActions.mount("},
+		{"分组页导出入口", grp, "AcctActions.actOn('export')"},
+		{"分组页行内移动", grp, "AcctActions.actOn('move', u, el.dataset.group"},
+	} {
+		if !strings.Contains(c.src, c.want) {
+			t.Errorf("%s：缺少 %q", c.name, c.want)
+		}
+	}
+
+	// 旧副本必须清干净：留着就会有人接着往里加逻辑，两份实现再次分叉。
+	for _, c := range []struct{ name, src, dead string }{
+		{"主页批量删除按钮", idx, `id="btnBulkRemove"`},
+		{"主页批量删除函数", app, "function accBulkRemove("},
+		{"分组页移除函数", grp, "async function removeSelected("},
+		{"分组页导出弹窗", grp, "function openExportModal("},
+		{"分组页移动弹窗", grp, "function openMoveModal("},
+		{"分组页导入弹窗", grp, "function openImportModal("},
+		{"分组页旧勾选提示", grp, `id="selInfo"`},
 	} {
 		if strings.Contains(c.src, c.dead) {
 			t.Errorf("%s 仍然存在：%s", c.name, c.dead)

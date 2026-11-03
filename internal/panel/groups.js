@@ -1,7 +1,9 @@
 'use strict';
 const $ = id => document.getElementById(id);
 const COLORS = ['#5b7cfa','#3ddc97','#f5b544','#c084fc','#f0655f','#38bdf8','#fb923c','#a3e635'];
-const state = { groups: [], accounts: [], selected: 'public', editing: null, selPools: new Set(), exportTab: 'pools', exportPools: new Set(), groupColor: COLORS[0], proxyGroup: null, proxyType: 'socks5h', importGroup: null, importTab: 'single', promptGroup: null, promptDraft: { system: [], user: [], replaces: [] }, confirm: null, publicProxy: null, sel: new Set(), revealed: {}, moveUids: [] };
+// 移动 / 导出 / 导入的临时状态都归共享的 acct_actions.js，这里只留本页自己的：
+// 侧栏批量勾选（selPools）、分组编辑、确认弹窗、公共池代理回显、行内勾选（sel）。
+const state = { groups: [], accounts: [], selected: 'public', editing: null, selPools: new Set(), groupColor: COLORS[0], proxyGroup: null, proxyType: 'socks5h', promptGroup: null, promptDraft: { system: [], user: [], replaces: [] }, confirm: null, publicProxy: null, sel: new Set(), revealed: {} };
 
 function esc(s) { return String(s == null ? '' : s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
 function fmt(n) { return Number(n || 0).toLocaleString('zh-CN'); }
@@ -403,7 +405,7 @@ async function runGroupAlive(g) {
 function accountsBox(list, mode) {
   const opts = gpOpts(mode);
   const ordered = GP_SORT.sort(list);
-  return '<div class="box"><header><h3>' + (mode === 'group' ? '分组账号' : '公共池账号') + ' <span class="hint">' + (mode === 'group' ? '仅本组密钥可见' : '未分组 + 共享') + '</span></h3><span class="grow"></span>' + (mode === 'group' ? groupBulkBtns(list) : '') + '<span class="hint" id="selInfo"></span><button class="xs" data-act="move-sel" disabled>移动所选</button><button class="xs" data-act="export-sel" disabled title="导出所选账号 JSON（含凭证），可在其他实例直接导入">导出所选</button><button class="xs danger" data-act="remove-sel" disabled title="删除所选账号：池状态与 auths/ 下的凭证文件一并删除，不可恢复">移除所选</button><button class="xs" data-act="add-account">添加账号</button><button class="xs" data-act="import">导入 JSON</button></header><div class="acc-wrap"><table class="acc">' + PoolList.head(opts) + '<tbody>' + PoolList.rows(ordered, opts) + '</tbody></table></div><div class="table-foot">共 ' + list.length + ' 个账号' + (GP_SORT.key ? ' · 按' + GP_SORT.label() + '排序' : '') + '</div></div>';
+  return '<div class="box"><header><h3>' + (mode === 'group' ? '分组账号' : '公共池账号') + ' <span class="hint">' + (mode === 'group' ? '仅本组密钥可见' : '未分组 + 共享') + '</span></h3><span class="grow"></span>' + (mode === 'group' ? groupBulkBtns(list) : '') + '</header><div class="gbar">' + AcctActions.bar({ scope: 'gp', group: mode === 'group' && selectedGroup() ? selectedGroup().id : '' }) + '</div><div class="acc-wrap"><table class="acc">' + PoolList.head(opts) + '<tbody>' + PoolList.rows(ordered, opts) + '</tbody></table></div><div class="table-foot">共 ' + list.length + ' 个账号' + (GP_SORT.key ? ' · 按' + GP_SORT.label() + '排序' : '') + '</div></div>';
 }
 function renderDetail() {
   const g = selectedGroup();
@@ -425,145 +427,12 @@ function renderAll() { renderStats(); renderRail(); renderDetail(); updateSelUI(
 function visibleAccounts() { const g = selectedGroup(); return g ? groupAccounts(g.id) : publicAccounts(); }
 function updateSelUI() {
   const list = visibleAccounts(); const n = list.filter(a => state.sel.has(a.uid)).length;
-  const info = $('selInfo'); if (info) info.textContent = n ? '已选 ' + n : '';
-  document.querySelectorAll('[data-act="move-sel"],[data-act="export-sel"],[data-act="remove-sel"]').forEach(b => {
-    b.disabled = !n;
-    // 移除是不可恢复操作，按钮上直接写数量，避免「以为只删一个」。
-    if (b.dataset.act === 'remove-sel') b.textContent = n ? '移除所选 (' + n + ')' : '移除所选';
-  });
   const all = document.querySelector('[data-act="sel-all"]'); if (all) { all.checked = n > 0 && n === list.length; all.indeterminate = n > 0 && n < list.length; }
+  // 账号级动作条（移动 / 导出 / 移除 / 添加 / 导入）由共享的 acct_actions.js 渲染，
+  // 勾选一变就让它重算按钮启停，避免页面自己再维护一份 disabled 逻辑。
+  if (window.AcctActions) AcctActions.syncAll();
 }
 function selectedVisible() { return visibleAccounts().filter(a => state.sel.has(a.uid)).map(a => a.uid); }
-// removeSelected 一键移除勾选的账号。后端 remove_batch 逐号删池状态 + auths/ 凭证
-// （单次上限 500，防误触删空号池）；这里只弹一次确认，失败号保留勾选便于重试。
-async function removeSelected() {
-  const uids = selectedVisible();
-  if (!uids.length) { toast('请先勾选账号', 'err'); return; }
-  if (!confirm('将删除 ' + uids.length + ' 个账号：池状态与 auths/ 下的凭证文件一并删除，且不可恢复。\n\n确认删除？')) return;
-  const btn = document.querySelector('[data-act="remove-sel"]');
-  if (btn) { btn.disabled = true; btn.textContent = '移除中…'; }
-  try {
-    const r = await api('accounts/remove_batch', { method: 'POST', body: JSON.stringify({ uids: uids }) });
-    const ok = (r.removed || []).length, bad = (r.failed || []).length, fe = (r.file_errors || []).length;
-    (r.removed || []).forEach(u => state.sel.delete(u));
-    toast('已移除 ' + ok + ' 个账号' + (bad ? '，失败 ' + bad : '') + (fe ? '，凭证文件删除失败 ' + fe : ''), bad || fe ? 'err' : 'ok');
-    await load(); // 重建列表后按钮是新的，updateSelUI 会按剩余勾选复位
-  } catch (e) {
-    toast('移除失败：' + (e.message || '未知错误'), 'err');
-  } finally {
-    updateSelUI();
-  }
-}
-
-// exportAccounts 导出账号 JSON。uids = 勾选的账号；groups = 按号池（分组）导出。
-// 两者可同时给，服务端取并集。groups 用 'public' 表示公共号池。
-async function exportAccounts(uids, groups) {
-  uids = uids || []; groups = groups || [];
-  if (!uids.length && !groups.length) { toast('请先勾选账号或号池', 'err'); return; }
-  const r = await api('accounts/export', { method: 'POST', body: JSON.stringify({ uids: uids, groups: groups }) });
-  const data = { format: r.format, version: r.version, exported_at: r.exported_at, accounts: r.accounts };
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob); const link = document.createElement('a');
-  const ts = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14);
-  const one = r.accounts.length === 1;
-  link.href = url; link.download = one ? 'workbuddy-' + r.accounts[0].uid + '.json' : 'workbuddy-accounts-' + ts + '.json';
-  document.body.appendChild(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000);
-  toast('已导出 ' + r.accounts.length + ' 个账号' + (r.missing && r.missing.length ? '（' + r.missing.length + ' 个不存在已跳过）' : '') + '；文件含登录凭证，请妥善保管', 'warn');
-}
-
-function openExportModal(tab) {
-  state.exportTab = tab || 'pools';
-  // 号池口径默认带上侧栏已勾选的号池；账号口径带上表格里已勾选的账号。
-  state.exportPools = new Set(state.selPools);
-  renderExportModal();
-  openVeil('exportVeil');
-}
-function switchExportTab(t) {
-  state.exportTab = t;
-  document.querySelectorAll('#exportVeil .tab').forEach(b => b.classList.toggle('on', b.dataset.tab === t));
-  $('exportPoolsPanel').hidden = t !== 'pools';
-  $('exportAccountsPanel').hidden = t !== 'accounts';
-  renderExportModal();
-}
-function renderExportModal() {
-  // 号池清单：公共号池 + 全部分组，逐个带计数与勾选框。
-  const pools = [{ id: 'public', name: '公共号池', meta: '未分组 + 共享分组', n: publicAccounts().length }].concat(
-    state.groups.map(g => ({ id: g.id, name: g.name, meta: (g.shared_pool ? '共享' : '独立') + ' · ' + g.member_count + ' 个账号', n: g.member_count })));
-  $('exportPoolList').innerHTML = pools.map(p =>
-    '<label class="radio"><input type="checkbox" data-act="export-pool" data-id="' + esc(p.id) + '"' + (state.exportPools.has(p.id) ? ' checked' : '') +
-    '><span><b>' + esc(p.name) + '</b> <span class="hint">' + esc(p.meta) + '</span></span></label>').join('');
-  // 账号口径：列出当前视图里已勾选的账号。
-  const sel = visibleAccounts().filter(a => state.sel.has(a.uid));
-  $('exportSelList').innerHTML = sel.length
-    ? sel.map(a => '<div class="hint">' + esc(a.nickname || a.uid.slice(0, 8)) + ' <code>' + esc(a.uid) + '</code></div>').join('')
-    : '<div class="hint">当前列表还没有勾选账号，请回到列表用左侧复选框勾选。</div>';
-  // 预估导出数量。
-  let n = 0;
-  if (state.exportTab === 'pools') {
-    pools.forEach(p => { if (state.exportPools.has(p.id)) n += p.id === 'public' ? publicAccounts().length : (state.groups.find(g => g.id === p.id) || {}).member_count || 0; });
-    $('exportPreview').textContent = n ? '将导出约 ' + n + ' 个账号（' + state.exportPools.size + ' 个号池）' : '未勾选号池';
-  } else {
-    n = sel.length;
-    $('exportPreview').textContent = n ? '将导出 ' + n + ' 个账号' : '未勾选账号';
-  }
-}
-
-function openMoveModal(uids) {
-  state.moveUids = uids;
-  const cur = new Set(uids.map(u => { const a = state.accounts.find(x => x.uid === u); return a ? (a.group || '') : ''; }));
-  const only = cur.size === 1 ? Array.from(cur)[0] : null;
-  const opts = [{ id: '', name: '公共号池（未分组）' }].concat(state.groups.map(g => ({ id: g.id, name: g.name })));
-  $('moveTarget').innerHTML = opts.map(o => '<option value="' + esc(o.id) + '"' + (o.id === only ? ' disabled' : '') + '>' + esc(o.name) + (o.id === only ? '（当前）' : '') + '</option>').join('');
-  const first = opts.find(o => o.id !== only); $('moveTarget').value = first ? first.id : '';
-  $('moveHint').textContent = '将 ' + uids.length + ' 个账号移动到目标号池（一个账号只能属于一个分组）。';
-  openVeil('moveVeil');
-}
-function showKeyModal(key) { GroupCfg.showKey(key); }
-function openGroupModal(edit) {
-  state.editing = edit ? edit.id : null;
-  state.groupColor = edit ? (edit.color || COLORS[0]) : COLORS[state.groups.length % COLORS.length];
-  $('groupTitle').textContent = edit ? '编辑分组' : '新建分组';
-  $('groupName').value = edit ? edit.name : '';
-  $('groupShared').checked = !!(edit && edit.shared_pool);
-  $('groupCallPublic').checked = !!(edit && edit.call_public);
-  $('groupColors').innerHTML = COLORS.map(c => '<button class="swatch ' + (c === state.groupColor ? 'on' : '') + '" style="--c:' + c + '" data-act="group-color" data-color="' + c + '"></button>').join('');
-  openVeil('groupVeil');
-}
-function openImportModal() {
-  state.importGroup = state.selected === 'public' ? null : state.selected;
-  $('importGroupName').textContent = state.importGroup ? '· ' + groupOf(state.importGroup).name : '· 公共号池';
-  $('importSingle').value = ''; $('importBatch').value = ''; $('importFile').value = '';
-  switchImportTab('single'); updateImportParse(); openVeil('importVeil');
-}
-function switchImportTab(t) { state.importTab = t; document.querySelectorAll('#importVeil .tab').forEach(b => b.classList.toggle('on', b.dataset.tab === t)); $('importSinglePanel').hidden = t !== 'single'; $('importBatchPanel').hidden = t !== 'batch'; if ($('importParse')) updateImportParse(); }
-function parseAccounts(text) {
-  try {
-    const d = JSON.parse(text); let arr = Array.isArray(d) ? d : (d && Array.isArray(d.accounts) ? d.accounts : (d && typeof d === 'object' ? [d] : []));
-    return arr.filter(x => x && (x.uid || (x.account && x.account.uid)) && (x.access_token || x.accessToken || (x.auth && x.auth.accessToken)));
-  } catch (e) { return []; }
-}
-// 实时提示识别到的账号数；文件选择后读入批量文本框（原先选文件没有任何效果）。
-function updateImportParse() {
-  const text = state.importTab === 'single' ? $('importSingle').value : $('importBatch').value;
-  const n = text.trim() ? parseAccounts(text).length : -1;
-  $('importParse').textContent = n < 0 ? '等待输入…' : (n ? '识别到 ' + n + ' 个账号' : '没有识别到有效账号（需要 uid + access_token/accessToken；也兼容插件 auths 原文件嵌套形 account.uid + auth.accessToken）');
-}
-$('importSingle').addEventListener('input', updateImportParse);
-$('importBatch').addEventListener('input', updateImportParse);
-// 支持一次多选多个 JSON 文件：逐个解析后按 uid 去重合并成一个数组放进批量文本框。
-// 解析失败 / 无有效账号的文件单独计数提示，不影响其他文件。
-$('importFile').addEventListener('change', async () => {
-  const files = Array.from($('importFile').files || []); if (!files.length) return;
-  const merged = new Map(); const bad = [];
-  for (const f of files) {
-    const arr = parseAccounts(await f.text());
-    if (!arr.length) { bad.push(f.name); continue; }
-    arr.forEach(x => merged.set(x.uid || (x.account && x.account.uid), x));
-  }
-  $('importBatch').value = merged.size ? JSON.stringify(Array.from(merged.values()), null, 1) : '';
-  updateImportParse();
-  $('importParse').textContent = files.length + ' 个文件，识别到 ' + merged.size + ' 个账号（已按 uid 去重）' + (bad.length ? '；无法识别：' + bad.join('、') : '');
-});
 /* ── 积分任务：与主页 app.js 同一套交互 ─────────────────────────────────
    主页点行内「任务」是在本页弹窗（openTasks → loadTasks；接受 / 领取 / 一键
    完成都直接打在弹窗里）。分组页原先用 window.open('/panel/?open=tasks&uid=…')
@@ -909,36 +778,9 @@ document.addEventListener('click', async e => {
       ids.forEach(id => { if (all) state.selPools.delete(id); else state.selPools.add(id); });
       renderRail(); return;
     }
-    if (act === 'export-groups') { openExportModal('pools'); return; }
-    if (act === 'export-tab') { switchExportTab(el.dataset.tab); return; }
-    if (act === 'export-pool') {
-      if (el.checked) state.exportPools.add(el.dataset.id); else state.exportPools.delete(el.dataset.id);
-      renderExportModal(); return;
-    }
-    if (act === 'export-do') {
-      if (state.exportTab === 'pools') {
-        const groups = Array.from(state.exportPools);
-        if (!groups.length) { toast('请先勾选号池', 'err'); return; }
-        closeVeil('exportVeil'); await exportAccounts([], groups); return;
-      }
-      const uids = selectedVisible();
-      if (!uids.length) { toast('请先勾选账号', 'err'); return; }
-      closeVeil('exportVeil'); await exportAccounts(uids); return;
-    }
-    if (act === 'export-sel') { await exportAccounts(selectedVisible()); return; }
-    if (act === 'export-account') { await exportAccounts([el.dataset.uid]); return; }
-    if (act === 'move-sel') { const u = selectedVisible(); if (!u.length) { toast('请先勾选账号', 'err'); return; } openMoveModal(u); return; }
-    if (act === 'remove-sel') { await removeSelected(); return; }
-    if (act === 'move-do') {
-      const target = $('moveTarget').value; const uids = state.moveUids.slice(); let ok = 0, fail = 0, lastErr = '';
-      for (const uid of uids) {
-        try { await api('accounts/' + encodeURIComponent(uid) + '/group', { method: 'POST', body: JSON.stringify({ group: target }) }); ok++; }
-        catch (e2) { fail++; lastErr = e2.message; }
-      }
-      closeVeil('moveVeil'); state.sel.clear(); await load();
-      const tg = target ? groupOf(target) : null;
-      toast('已移动 ' + ok + ' 个账号到' + (tg ? '「' + tg.name + '」' : '公共号池') + (fail ? '，失败 ' + fail + '（' + lastErr + '）' : ''), fail ? 'err' : 'ok'); return;
-    }
+    // 导出 / 移动 / 移除 / 添加 / 导入 全部走共享的 acct_actions.js：弹窗与请求只有一份，
+    // 这里只做「点到了哪个入口」的分发（行内单号按钮另走 act === 'acc'）。
+    if (act === 'export-groups') { AcctActions.actOn('export'); return; }
     if (act === 'new-group') { openGroupModal(null); return; }
     if (act === 'edit-group') { const g = selectedGroup(); if (g) openGroupModal(g); return; }
     if (act === 'group-color') { state.groupColor = el.dataset.color; document.querySelectorAll('#groupColors .swatch').forEach(b => b.classList.toggle('on', b.dataset.color === state.groupColor)); return; }
@@ -958,44 +800,19 @@ document.addEventListener('click', async e => {
         state.selected = 'public'; closeVeil('confirmVeil'); await load(); toast('分组已删除', 'ok');
       }); return;
     }
-    if (act === 'import') { openImportModal(); return; }
-    if (act === 'import-tab') { switchImportTab(el.dataset.tab); return; }
-    if (act === 'import-do') {
-      const text = state.importTab === 'single' ? $('importSingle').value : $('importBatch').value;
-      const arr = parseAccounts(text);
-      if (!arr.length) { toast('没有识别到有效账号', 'err'); return; }
-      const fd = new FormData(); fd.append('file', new Blob([JSON.stringify(arr)], { type: 'application/json' }), 'accounts.json');
-      if (state.importGroup) fd.append('group', state.importGroup);
-      const r = await api('import/cockpit', { method: 'POST', body: fd });
-      closeVeil('importVeil'); await load();
-      const errs = r.errors || [];
-      if (errs.length) console.warn('import errors:', errs);
-      // toast 放不下全部原因：最多带 2 条，其余只记数量，完整列表见控制台。
-      const errText = errs.length ? '（' + errs.slice(0, 2).join('；') + (errs.length > 2 ? ' 等 ' + errs.length + ' 条' : '') + '）' : '';
-      toast('导入完成：成功 ' + r.imported + '，跳过 ' + r.skipped + errText, r.imported ? 'ok' : 'warn'); return;
-    }
-    if (act === 'add-account') {
-      const g = selectedGroup(); $('addGroupName').textContent = g ? '· ' + g.name : '· 公共号池'; $('addWait').hidden = true; openVeil('addVeil');
-      state.addGroup = g ? g.id : ''; return;
-    }
-    if (act === 'start-login') {
-      const realm = $('addRealm').value || 'cn';
-      const r = await api('login/start', { method: 'POST', body: JSON.stringify({ realm, group: state.addGroup || '' }) });
-      $('addUrl').textContent = r.url; $('addWait').hidden = false;
-      const timer = setInterval(async () => {
-        try {
-          const p = await api('login/poll?state=' + encodeURIComponent(r.state));
-          if (p.done) { clearInterval(timer); closeVeil('addVeil'); await load(); toast('账号已添加' + (p.group ? '到分组' : '到公共池'), 'ok'); }
-        } catch (e) { /* 继续轮询 */ }
-      }, 3000);
-      return;
-    }
     if (act === 'acc') {
       const u = el.dataset.uid, a = el.dataset.a, p = 'accounts/' + encodeURIComponent(u) + '/';
       // 「任务」「模型」都在本页弹窗（与主页同一套实现）：深链回主页会把运维从
       // 当前分组踢走，回来还得重新点一遍分组。账号行的按钮一律不再跳页。
       if (a === 'tasks') { openTasks(u); return; }
       if (a === 'models') { openAccountModels(u); return; }
+      // 行内的移动 / 导出 / 移除和工具条上的「移动所选」共用同一个弹窗与同一个接口，
+      // 只是把作用域换成「就这一个号」。
+      if (a === 'move') { AcctActions.actOn('move', u, el.dataset.group || ''); return; }
+      if (a === 'export') { AcctActions.actOn('export', u); return; }
+      if (a === 'remove') { await AcctActions.actOn('remove', u); return; }
+      // 公共池里显示账号所属分组时，直接在本页切过去，不再新开标签。
+      if (a === 'gogroup') { const gid = el.dataset.g; if (gid && groupOf(gid)) { state.selected = gid; state.sel.clear(); renderAll(); syncHash(); } return; }
       if (a === 'disable' && !confirm('禁用后该账号不再参与选号（保号任务默认也跳过），需手动解冻才能恢复。若只是想临时让位、仍要保号，请改用「暂停选号」。确认禁用？')) return;
       el.disabled = true;
       try {
@@ -1069,13 +886,6 @@ document.addEventListener('click', async e => {
       } finally { el.disabled = false; }
       return;
     }
-    if (act === 'move-account') { openMoveModal([el.dataset.uid]); return; }
-    if (act === 'remove-account') {
-      const uid = el.dataset.uid;
-      openConfirm('移除账号', '<div class="hint">移除 ' + esc(uid) + ' 将删除池状态与 auths/ 下的凭证文件，且不可恢复。</div>', '移除', async () => {
-        await api('accounts/' + encodeURIComponent(uid) + '/remove', { method: 'POST' }); closeVeil('confirmVeil'); await load(); toast('账号已移除', 'ok');
-      }); return;
-    }
     if (act === 'close') {
       closeVeil(el.dataset.target);
       return;
@@ -1104,5 +914,20 @@ GroupCfg.mount({
   reload: load,
   confirm: (title, text, okText, fn) => openConfirm(title, '<div class="hint">' + esc(text) + '</div>', okText, async () => { closeVeil("confirmVeil"); await fn(); }),
   copyText: copyText,
+});
+// 账号级动作（移动 / 导出 / 移除 / 添加账号 / 导入 JSON）与主页是同一份 acct_actions.js：
+// 分组页只有一个列表，作用域固定 'gp'；勾选、刷新走本页现有实现。
+$('aaModals').innerHTML = AcctActions.modals();
+AcctActions.mount({
+  container: 'aaModals',
+  api: api,
+  toast: toast,
+  groups: () => state.groups.map(g => ({ id: g.id, name: g.name, member_count: g.member_count, shared_pool: g.shared_pool })),
+  publicCount: () => publicAccounts().length,
+  selUids: () => selectedVisible(),
+  clearSel: (scope, uids) => { (uids || []).forEach(u => state.sel.delete(u)); updateSelUI(); },
+  reload: load,
+  // 删除确认用浏览器原生 confirm：富文本确认弹窗是回调式的，取消时没有完成信号，
+  // 硬接成 Promise 会让调用方永远挂在 await 上。原生 confirm 同步返回 true/false。
 });
 load();

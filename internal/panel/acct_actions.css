@@ -1,0 +1,33 @@
+/* 账号级动作工具条与弹窗：主页分组卡片 / 号池分组页共用（acct_actions.js 配套）。
+   只做这两页都还没有的样式，按钮、输入框一律自带 .aa- 前缀，
+   避免和页面已有的 .fld/.lb/.tabs/.code-area 互相覆盖（那几套两页各有一份）。 */
+.aa-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.aa-info { font-size: 12px; color: var(--ink-3); }
+.aa-b {
+  font: 550 12.5px var(--sans); padding: 4px 10px; border-radius: 7px;
+  border: 1px solid var(--line); background: var(--surface-2); color: var(--ink-2);
+  cursor: pointer; white-space: nowrap; transition: color .12s, border-color .12s;
+}
+.aa-b:hover:not(:disabled) { color: var(--ink); border-color: var(--ink-3); }
+.aa-b:disabled { opacity: .45; cursor: not-allowed; }
+.aa-b.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.aa-b.danger:not(:disabled) { color: var(--bad); border-color: var(--bad); }
+.aa-hint { font-size: 12px; color: var(--ink-3); line-height: 1.6; }
+.aa-fld { display: block; margin-bottom: 12px; }
+.aa-fld > span { display: block; font-size: 12px; color: var(--ink-3); margin-bottom: 5px; }
+.aa-in, .aa-ta {
+  width: 100%; box-sizing: border-box; background: var(--surface-2);
+  border: 1px solid var(--line); border-radius: 8px; color: var(--ink);
+  font: 12.5px var(--sans); padding: 7px 9px;
+}
+.aa-ta { font-family: var(--mono); line-height: 1.55; resize: vertical; min-height: 130px; }
+.aa-tabs { display: inline-flex; gap: 2px; background: var(--surface-2); border-radius: 9px; padding: 3px; margin-left: 10px; vertical-align: middle; }
+.aa-tab { padding: 4px 14px; border-radius: 7px; border: none; background: transparent; color: var(--ink-3); font: 550 12.5px var(--sans); cursor: pointer; }
+.aa-tab.on { background: var(--surface); color: var(--ink); }
+.aa-pools { display: flex; flex-direction: column; gap: 7px; max-height: 260px; overflow: auto; }
+.aa-pool { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--ink-2); cursor: pointer; }
+.aa-pool b { color: var(--ink); font-weight: 600; }
+.aa-preview { margin-top: 10px; font-size: 12px; color: var(--ink-3); }
+.aa-grow { flex: 1; }
+.aa-url { margin-top: 10px; word-break: break-all; font: 12px var(--mono); background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; padding: 8px; color: var(--ink-2); }
+.aa-dots { margin-top: 8px; font-size: 12.5px; color: var(--ink-3); }
