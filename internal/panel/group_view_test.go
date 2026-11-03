@@ -282,3 +282,82 @@ func TestPoolListSharedAcrossPages(t *testing.T) {
 		}
 	}
 }
+
+// 分组配置卡（密钥/代理/共享池/提示词）的内容由 group_cfg.js 决定，两页只是宿主。
+// 这里在最小 DOM 沙箱里真跑一遍，防止卡片组成退化或公共池误挂分组密钥。
+func TestGroupCfgCards(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not installed; group cfg test skipped")
+	}
+	abs, err := filepath.Abs("group_cfg.js")
+	if err != nil {
+		t.Fatalf("abs: %v", err)
+	}
+	out, err := exec.Command(node, filepath.Join("testdata", "gcfg_smoke.cjs"), abs).CombinedOutput()
+	if err != nil {
+		t.Fatalf("node: %v\n%s", err, out)
+	}
+	line := strings.TrimSpace(string(out))
+	got := map[string]bool{}
+	if err := json.Unmarshal([]byte(line), &got); err != nil {
+		t.Fatalf("decode %q: %v", line, err)
+	}
+	for _, c := range []struct {
+		key  string
+		want bool
+		why  string
+	}{
+		{"grp", true, "分组卡缺少密钥/代理/共享池/提示词中的某一项"},
+		{"pubHasKeyCard", false, "公共池卡片不该出现分组密钥"},
+		{"pubScope", true, "公共池代理按钮缺少 data-gc-public，会错改当前分组"},
+		{"pubShared", true, "公共池卡片缺少共享分组计数"},
+		{"modals", true, "三个配置弹窗不完整"},
+	} {
+		if got[c.key] != c.want {
+			t.Errorf("%s（%s=%v）", c.why, c.key, got[c.key])
+		}
+	}
+}
+
+// 两页共用同一份分组配置：都引入 group_cfg.js/css，都注入弹窗与上下文，旧副本已删净。
+func TestGroupCfgSharedAcrossPages(t *testing.T) {
+	read := func(name string) string {
+		b, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		return string(b)
+	}
+	index, gh, app, gjs := read("index.html"), read("groups.html"), read("app.js"), read("groups.js")
+	shared := read("group_cfg.js")
+	for _, c := range []struct{ name, src, want string }{
+		{"主页引入样式", index, "/panel/group_cfg.css"},
+		{"主页引入脚本", index, "group_cfg.js"},
+		{"分组页引入样式", gh, "/panel/group_cfg.css"},
+		{"分组页引入脚本", gh, "/panel/group_cfg.js"},
+		{"共享模块导出", shared, "window.GroupCfg = {"},
+		{"共享模块导出密钥弹窗", shared, "showKey: showKey"},
+		{"主页注入弹窗", app, "GroupCfg.modals()"},
+		{"主页注入上下文", app, "GroupCfg.mount("},
+		{"主页渲染配置卡", app, "GroupCfg.render('grpCfg', g)"},
+		{"分组页注入弹窗", gjs, "GroupCfg.modals()"},
+		{"分组页注入上下文", gjs, "GroupCfg.mount("},
+		{"分组页渲染配置卡", gjs, "GroupCfg.render('gcCards', g)"},
+	} {
+		if !strings.Contains(c.src, c.want) {
+			t.Errorf("%s：缺少 %q", c.name, c.want)
+		}
+	}
+	for _, c := range []struct{ name, src, dead string }{
+		{"分组页密钥卡副本", gjs, "function keyCard("},
+		{"分组页代理卡副本", gjs, "function proxyCard("},
+		{"分组页提示词卡副本", gjs, "function promptCard("},
+		{"分组页代理弹窗副本", gjs, "function openProxyModal("},
+		{"分组页提示词行副本", gjs, "function renderPromptRows("},
+	} {
+		if strings.Contains(c.src, c.dead) {
+			t.Errorf("%s 仍然存在：%s", c.name, c.dead)
+		}
+	}
+}

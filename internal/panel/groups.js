@@ -129,42 +129,6 @@ function updatePoolSelUI() {
   btn.disabled = !n;
   btn.textContent = n ? '导出所选号池（' + n + '）' : '导出所选号池';
 }
-function keyCard(g) {
-  const shown = state.revealed[g.id];
-  const hint = shown ? esc(shown) : (g.has_key ? esc(g.key_hint || '已生成') : '尚未生成');
-  const btns = g.has_key ? '<button class="xs ghost" data-act="reveal-key">' + (shown ? '隐藏' : '显示') + '</button><button class="xs ghost" data-act="copy-group-key">复制</button>' : '';
-  return '<div class="card"><div class="card-h"><h3>分组密钥</h3><span class="tag accent">独立鉴权</span></div>' +
-    '<div class="kline"><code>' + hint + '</code>' + btns + '<button class="xs" data-act="rotate-key">' + (g.has_key ? '轮换' : '生成') + '</button></div>' +
-    '<div class="hint">点击「显示」查看完整密钥；旧版本创建的分组只存了哈希，需轮换一次后才能查看。</div><div class="card-f"><span>Bearer 此密钥只能访问本组</span></div></div>';
-}
-function proxyCard(g) {
-  const isPub = !g;
-  const p = isPub ? state.publicProxy : g.proxy;
-  const clr = p ? '<button class="xs ghost danger" data-act="clear-proxy">清除</button>' : '';
-  return '<div class="card"><div class="card-h"><h3>网络代理</h3>' + (p ? '<span class="tag ok">已配置</span>' : '<span class="tag mute">未配置</span>') + '</div>' +
-    (p ? '<div class="proxy-line"><span class="proto ' + esc(p.type) + '">' + esc(p.type.toUpperCase()) + '</span><code>' + esc(p.host) + ':' + p.port + '</code></div><div class="hint">覆盖聊天、OAuth、余额、模型探测与全部任务。</div>' : '<div class="hint">' + (isPub ? '未配置时公共池（未分组账号）使用服务器直连出口；共享分组账号仍走各自分组代理。' : '未配置时本组使用服务器直连出口。') + '</div>') +
-    '<div class="card-f"><span>' + (isPub ? '未分组账号全部出站请求' : '本组全部出站请求') + '</span><span class="grow"></span>' + clr + '<button class="xs ghost" data-act="edit-proxy">' + (p ? '编辑' : '配置') + '</button></div></div>';
-}
-function shareCard(g) {
-  return '<div class="card"><div class="card-h"><h3>共享池</h3><span class="tag ' + (g.shared_pool || g.call_public ? 'warn' : 'mute') + '">' + (g.shared_pool || g.call_public ? '已开启共享' : '双向隔离') + '</span></div>' +
-    '<label class="switch-row"><span class="sw-text"><b>允许本组账号进入公共池</b><em>默认关闭</em></span><input type="checkbox" data-act="toggle-shared"' + (g.shared_pool ? ' checked' : '') + '><span class="track"><i></i></span></label>' +
-    '<label class="switch-row"><span class="sw-text"><b>允许本组调用公共池账号</b><em>本组与公共池账号共用候选；默认关闭</em></span><input type="checkbox" data-act="toggle-call"' + (g.call_public ? ' checked' : '') + '><span class="track"><i></i></span></label>' +
-    '<div class="hint">' + (g.shared_pool ? '公共池可命中本组账号。' : '') + (g.call_public ? '本组账号与公共池账号进同一候选集，按权重一起抽签。' : '') + (!g.shared_pool && !g.call_public ? '本组与公共池双向隔离。' : '') + '</div></div>';
-}
-// 分组系统提示词：卡片开关 + 弹窗编辑器。保存走 groups/{id}/prompt，服务端
-// 同步写 groups.json，下一个请求即生效（无需重启）；关闭时正文保留、开关置灰。
-function promptCard(g) {
-  const on = !!g.prompt_enabled;
-  const n = g.prompt_chars || 0;
-  const ec = g.prompt_entries || 0, rc = g.prompt_replaces || 0;
-  const bits = [];
-  if (ec) bits.push(ec + ' 条提示词');
-  if (rc) bits.push(rc + ' 条替换');
-  return '<div class="card wide"><div class="card-h"><h3>提示词规则</h3>' + (on ? '<span class="tag accent">已启用 · ' + (bits.length ? bits.join(' · ') : '空规则') + '</span>' : '<span class="tag mute">继承全局</span>') + '</div>' +
-    '<label class="switch-row"><span class="sw-text"><b>启用本组专属提示词规则</b><em>' + (on ? '系统/用户提示词与关键词替换对本组密钥请求生效' : '沿用配置页 prompt.mode 设置') + '</em></span><input type="checkbox" data-act="toggle-prompt"' + (on ? ' checked' : '') + '><span class="track"><i></i></span></label>' +
-    (on && g.prompt_preview ? '<div class="hint" style="margin-top:8px">系统提示词预览：<code style="font:11px var(--mono);color:var(--ink-2)">' + esc(g.prompt_preview) + '</code></div>' : '') +
-    '<div class="card-f"><span>只影响本组密钥的 /v1/chat/completions 与 /v1/responses' + (on && n ? ' · ' + n + ' 字' : '') + '</span><span class="grow"></span><button class="xs ghost" data-act="edit-prompt">' + (on ? '编辑' : '配置') + '</button></div></div>';
-}
 // 测活结果：成功带上模型 / 耗时 / 回复片段；失败按阶段（模型目录 / 对话）给出原因。
 // 服务端对上游失败仍回 200 + ok:false（与代理测试同口径），因此这里按 r.ok 选 toast 颜色。
 function aliveToast(r) {
@@ -443,17 +407,19 @@ function accountsBox(list, mode) {
 }
 function renderDetail() {
   const g = selectedGroup();
+  // 配置卡（密钥 / 代理 / 共享池 / 提示词）由 group_cfg.js 渲染，和主页分组卡片是同一份 DOM；
+  // 分组页只负责放一个容器，配置项的增删改不用再动这里。
   if (!g) {
     const list = publicAccounts();
     $('detail').innerHTML = '<div class="detail-head"><div class="dh-title"><span class="group-mark" style="--c:var(--accent)"></span><div><h1>公共号池</h1><div class="sub">未分组账号 + 已进入共享池的分组账号</div></div></div><div class="dh-acts"><span class="tag accent">默认池</span></div></div>' +
-      '<div class="gp-cards"><div class="card"><div class="card-h"><h3>公共池</h3><span class="tag mute">config.api_key</span></div><div class="hint">公共池沿用现有主密钥；分组密钥不能反向访问公共池。</div></div>' +
-      proxyCard(null) +
-      '<div class="card"><div class="card-h"><h3>共享来源</h3><span class="tag ' + (state.groups.filter(x => x.shared_pool).length ? 'warn' : 'mute') + '">' + state.groups.filter(x => x.shared_pool).length + ' 个分组</span></div><div class="hint">只有开启「进入公共池」的分组才会出现在这里。</div></div></div>' + accountsBox(list, 'public');
+      '<div id="gcCards" class="gc-cards"></div>' + accountsBox(list, 'public');
+    GroupCfg.render('gcCards', null, { public: true, sharedCount: state.groups.filter(x => x.shared_pool).length });
     return;
   }
   const list = groupAccounts(g.id);
   $('detail').innerHTML = '<div class="detail-head"><div class="dh-title"><span class="group-mark" style="--c:' + esc(g.color || '#5b7cfa') + '"></span><div><h1>' + esc(g.name) + '</h1><div class="sub">' + esc(g.id) + ' · ' + g.member_count + ' 个账号</div></div></div><div class="dh-acts"><span class="tag ' + (g.shared_pool ? 'warn' : 'accent') + '">' + (g.shared_pool ? '共享分组' : '独立分组') + '</span><button class="xs" data-act="edit-group">编辑</button><button class="xs danger" data-act="delete-group">删除</button></div></div>' +
-    '<div class="gp-cards">' + keyCard(g) + proxyCard(g) + shareCard(g) + promptCard(g) + '</div>' + accountsBox(list, 'group');
+    '<div id="gcCards" class="gc-cards"></div>' + accountsBox(list, 'group');
+  GroupCfg.render('gcCards', g);
 }
 function renderAll() { renderStats(); renderRail(); renderDetail(); updateSelUI(); }
 function visibleAccounts() { const g = selectedGroup(); return g ? groupAccounts(g.id) : publicAccounts(); }
@@ -505,8 +471,6 @@ async function exportAccounts(uids, groups) {
   toast('已导出 ' + r.accounts.length + ' 个账号' + (r.missing && r.missing.length ? '（' + r.missing.length + ' 个不存在已跳过）' : '') + '；文件含登录凭证，请妥善保管', 'warn');
 }
 
-// 导出弹窗：两种口径——按号池（分组，多选）与按勾选账号。
-// 号池口径支持单选（只导一个分组）、多选（跨分组一起导）。
 function openExportModal(tab) {
   state.exportTab = tab || 'pools';
   // 号池口径默认带上侧栏已勾选的号池；账号口径带上表格里已勾选的账号。
@@ -543,6 +507,7 @@ function renderExportModal() {
     $('exportPreview').textContent = n ? '将导出 ' + n + ' 个账号' : '未勾选账号';
   }
 }
+
 function openMoveModal(uids) {
   state.moveUids = uids;
   const cur = new Set(uids.map(u => { const a = state.accounts.find(x => x.uid === u); return a ? (a.group || '') : ''; }));
@@ -553,7 +518,7 @@ function openMoveModal(uids) {
   $('moveHint').textContent = '将 ' + uids.length + ' 个账号移动到目标号池（一个账号只能属于一个分组）。';
   openVeil('moveVeil');
 }
-function showKeyModal(key) { $('keyBig').textContent = key; openVeil('keyVeil'); }
+function showKeyModal(key) { GroupCfg.showKey(key); }
 function openGroupModal(edit) {
   state.editing = edit ? edit.id : null;
   state.groupColor = edit ? (edit.color || COLORS[0]) : COLORS[state.groups.length % COLORS.length];
@@ -564,137 +529,6 @@ function openGroupModal(edit) {
   $('groupColors').innerHTML = COLORS.map(c => '<button class="swatch ' + (c === state.groupColor ? 'on' : '') + '" style="--c:' + c + '" data-act="group-color" data-color="' + c + '"></button>').join('');
   openVeil('groupVeil');
 }
-// 测试结果固定两行：连通性（耗时 / 状态 / 目标站点）+ 出口 IP 与归属地。
-// 出口 IP 由服务端经同一代理访问 ipip.net 取回——CSP 是 connect-src 'self'，
-// 前端不能直连第三方，也不该让浏览器实测（那样测的是浏览器出口而不是服务器出口）。
-function renderProxyTest(box, r) {
-  box.className = 'testbox ' + (r.ok ? 'ok' : 'err');
-  box.textContent = '';
-  const l1 = document.createElement('div');
-  l1.textContent = r.ok
-    ? '连接成功 · ' + r.latency_ms + ' ms · HTTP ' + r.status + ' · ' + r.target
-    : '连接失败：' + (r.error || '未知错误');
-  const l2 = document.createElement('div');
-  if (r.exit_ip) {
-    l2.className = 'l2';
-    l2.innerHTML = '出口 IP：<b>' + esc(r.exit_ip) + '</b>' +
-      (r.exit_region ? ' · ' + esc(r.exit_region) : ' · 未返回归属地') +
-      (r.ip_latency_ms != null ? ' · ' + r.ip_latency_ms + ' ms' : '');
-  } else {
-    l2.className = 'l2 warn';
-    l2.textContent = '出口 IP：未取到' + (r.ip_error ? '（' + r.ip_error + '）' : '');
-  }
-  box.append(l1, l2);
-}
-function proxyHint(t) { if (t === 'http') return 'HTTP CONNECT；目标域名由本机解析。'; if (t === 'socks5') return 'SOCKS5（本地 DNS）：先解析目标域名再由代理转发 IP。'; return 'SOCKS5H（远程 DNS）：域名交给代理解析，适合避免 DNS 泄漏。'; }
-function openProxyModal(g) {
-  state.proxyGroup = g ? g.id : 'public';
-  const p = g ? g.proxy : state.publicProxy;
-  $('proxyScope').textContent = g ? '本组全部出站请求（聊天、OAuth、余额、模型探测、签到/保活/旅行/活跃任务）都走此代理。' : '公共池（未分组账号）全部出站请求都走此代理；共享分组账号仍走各自分组代理。';
-  $('proxyClear').hidden = !p;
-  state.proxyType = p ? p.type : 'socks5h';
-  $('proxyHost').value = p ? p.host : '';
-  $('proxyPort').value = p ? p.port : 1080;
-  $('proxyUser').value = p ? (p.username || '') : '';
-  $('proxyPass').value = '';
-  $('proxyTestBox').hidden = true; $('proxyTestBox').className = 'testbox';
-  updateProxyUI(); openVeil('proxyVeil');
-}
-function updateProxyUI() {
-  document.querySelectorAll('#proxyTypes button').forEach(b => b.classList.toggle('on', b.dataset.type === state.proxyType));
-  $('proxyHint').textContent = proxyHint(state.proxyType);
-  const p = $('proxyPort'); if (!p.value || p.value === '1080' || p.value === '8080') p.value = state.proxyType === 'http' ? 8080 : 1080;
-}
-/* ── 提示词规则编辑器 ────────────────────────────────────────────────
- * 规则拆成两类：多条提示词（system 整体替换客户端 system / user 前置注入）与
- * 关键词替换（请求消息文本里出现即替换）。列表接口只回条数与预览，正文在打开
- * 弹窗时按需 GET 一次。
- *
- * 增删都先 readPromptRows() 把当前 DOM 收进 state.promptDraft 再重渲染：否则
- * "删第 2 条"时第 3 条刚输入的内容会被上一轮 DOM 覆盖（行下标会整体前移）。 */
-const PROMPT_ROLE_NAME = { system: '系统提示词', user: '用户提示词' };
-function promptTextRow(kind, text, idx) {
-  const ph = kind === 'system' ? '例如：你是一个只回答数据查询问题的助手，回答直接、简短。' : '例如：先用一句话给结论，再列要点。';
-  return '<div class="pr-row"><textarea class="code-area" data-pr-text data-kind="' + kind + '" data-idx="' + idx + '" rows="3" placeholder="' + ph + '">' + esc(text || '') + '</textarea>' +
-    '<button class="xs ghost danger pr-del" data-act="prompt-del" data-kind="' + kind + '" data-idx="' + idx + '">删除</button></div>';
-}
-function promptReplaceRow(r, idx) {
-  const scope = r.scope || 'all';
-  const opt = (v, t) => '<option value="' + v + '"' + (scope === v ? ' selected' : '') + '>' + t + '</option>';
-  return '<div class="pr-row pr-kv">' +
-    '<input data-pr-match data-idx="' + idx + '" placeholder="关键词" value="' + esc(r.match || '') + '">' +
-    '<span class="pr-arrow">→</span>' +
-    '<input data-pr-with data-idx="' + idx + '" placeholder="替换为（留空 = 删除）" value="' + esc(r.with || '') + '">' +
-    '<select data-pr-scope data-idx="' + idx + '">' + opt('all', '全部消息') + opt('system', '仅 system') + opt('user', '仅 user') + '</select>' +
-    '<button class="xs ghost danger pr-del" data-act="prompt-del" data-kind="replace" data-idx="' + idx + '">删除</button></div>';
-}
-function renderPromptRows() {
-  const d = state.promptDraft;
-  $('promptSystemList').innerHTML = d.system.length ? d.system.map((x, i) => promptTextRow('system', x, i)).join('') : '<div class="pr-empty">还没有' + PROMPT_ROLE_NAME.system + '，点右上角「添加」</div>';
-  $('promptUserList').innerHTML = d.user.length ? d.user.map((x, i) => promptTextRow('user', x, i)).join('') : '<div class="pr-empty">还没有' + PROMPT_ROLE_NAME.user + '，点右上角「添加」</div>';
-  $('promptReplaceList').innerHTML = d.replaces.length ? d.replaces.map((x, i) => promptReplaceRow(x, i)).join('') : '<div class="pr-empty">还没有关键词替换规则，点右上角「添加」</div>';
-}
-function readPromptRows() {
-  const d = state.promptDraft;
-  d.system = Array.from(document.querySelectorAll('#promptSystemList [data-pr-text]')).map(el => el.value);
-  d.user = Array.from(document.querySelectorAll('#promptUserList [data-pr-text]')).map(el => el.value);
-  d.replaces = Array.from(document.querySelectorAll('#promptReplaceList .pr-row')).map(row => ({
-    match: row.querySelector('[data-pr-match]').value,
-    with: row.querySelector('[data-pr-with]').value,
-    scope: row.querySelector('[data-pr-scope]').value,
-  }));
-}
-function promptCounts() {
-  const d = state.promptDraft;
-  const sys = d.system.filter(s => s.trim()).length;
-  const usr = d.user.filter(s => s.trim()).length;
-  const rep = d.replaces.filter(r => (r.match || '').trim()).length;
-  const chars = d.system.concat(d.user).reduce((n, s) => n + (s || '').length, 0);
-  return { sys, usr, rep, chars };
-}
-function updatePromptCount() {
-  const c = promptCounts();
-  $('promptCount').textContent = '系统 ' + c.sys + ' 条 · 用户 ' + c.usr + ' 条 · 关键词 ' + c.rep + ' 条 · 共 ' + c.chars + ' 字';
-}
-// openPromptModal 先按需 GET 全文（列表只回条数/预览），再展示编辑器。
-// forceEnable：从卡片开关"开启"进入时强制勾选，用户看到内容后再保存。
-async function openPromptModal(g, forceEnable) {
-  state.promptGroup = g.id;
-  state.promptDraft = { system: [], user: [], replaces: [] };
-  $('promptGroupName').textContent = '· ' + g.name;
-  const r = await api('groups/' + g.id + '/prompt');
-  const entries = Array.isArray(r.entries) ? r.entries : [];
-  entries.forEach(e => { if (!e) return; if (e.role === 'user') state.promptDraft.user.push(e.text || ''); else state.promptDraft.system.push(e.text || ''); });
-  // 旧版只有单条正文：补成一条系统提示词，保证编辑器打开就能看到原文。
-  if (!entries.length && r.text) state.promptDraft.system.push(r.text);
-  if (!state.promptDraft.system.length && !state.promptDraft.user.length) state.promptDraft.system.push('');
-  state.promptDraft.replaces = (Array.isArray(r.replaces) ? r.replaces : []).map(x => ({ match: (x && x.match) || '', with: (x && x.with) || '', scope: (x && x.scope) || 'all' }));
-  $('promptEnabled').checked = forceEnable ? true : !!r.enabled;
-  renderPromptRows();
-  updatePromptCount();
-  openVeil('promptVeil');
-}
-async function savePrompt() {
-  const g = state.promptGroup ? groupOf(state.promptGroup) : null;
-  if (!g) return;
-  readPromptRows();
-  const d = state.promptDraft;
-  const entries = [];
-  d.system.forEach(x => { if (x.trim()) entries.push({ role: 'system', text: x }); });
-  d.user.forEach(x => { if (x.trim()) entries.push({ role: 'user', text: x }); });
-  const replaces = d.replaces.filter(r => (r.match || '').trim()).map(r => ({ match: r.match, with: r.with, scope: r.scope }));
-  const enabled = $('promptEnabled').checked;
-  if (enabled && !entries.length && !replaces.length) { toast('已开启开关，请至少填写一条提示词或关键词替换（或关闭开关再保存）', 'err'); return; }
-  try {
-    await api('groups/' + g.id + '/prompt', { method: 'PUT', body: JSON.stringify({ enabled, entries, replaces }) });
-  } catch (e) {
-    renderDetail(); // 保存失败：卡片开关退回服务端真实状态
-    throw e;
-  }
-  closeVeil('promptVeil'); await load();
-  toast(enabled ? '已保存，下一个请求立即生效' : '已关闭本组提示词规则，恢复沿用全局设置', enabled ? 'ok' : 'warn');
-}
-$('promptVeil').addEventListener('input', () => { readPromptRows(); updatePromptCount(); });
 function openImportModal() {
   state.importGroup = state.selected === 'public' ? null : state.selected;
   $('importGroupName').textContent = state.importGroup ? '· ' + groupOf(state.importGroup).name : '· 公共号池';
@@ -1105,22 +939,6 @@ document.addEventListener('click', async e => {
       const tg = target ? groupOf(target) : null;
       toast('已移动 ' + ok + ' 个账号到' + (tg ? '「' + tg.name + '」' : '公共号池') + (fail ? '，失败 ' + fail + '（' + lastErr + '）' : ''), fail ? 'err' : 'ok'); return;
     }
-    if (act === 'reveal-key') {
-      const g = selectedGroup(); if (!g) return;
-      if (state.revealed[g.id]) { delete state.revealed[g.id]; renderDetail(); updateSelUI(); return; }
-      const r = await api('groups/' + g.id + '/key'); state.revealed[g.id] = r.key; renderDetail(); updateSelUI(); return;
-    }
-    if (act === 'copy-group-key') {
-      const g = selectedGroup(); if (!g) return;
-      const k = state.revealed[g.id] || (await api('groups/' + g.id + '/key')).key; copyText(k); return;
-    }
-    if (act === 'clear-proxy' || act === 'proxy-clear') {
-      const g = act === 'proxy-clear' ? (state.proxyGroup === 'public' ? null : groupOf(state.proxyGroup)) : selectedGroup();
-      const id = g ? g.id : 'public';
-      openConfirm('清除代理', '<div class="hint">清除后' + (g ? '「' + esc(g.name) + '」' : '公共池') + '的出站请求将改为服务器直连。</div>', '清除', async () => {
-        await api('groups/' + id + '/proxy', { method: 'DELETE' }); closeVeil('confirmVeil'); closeVeil('proxyVeil'); await load(); toast('代理已清除，恢复直连', 'ok');
-      }); return;
-    }
     if (act === 'new-group') { openGroupModal(null); return; }
     if (act === 'edit-group') { const g = selectedGroup(); if (g) openGroupModal(g); return; }
     if (act === 'group-color') { state.groupColor = el.dataset.color; document.querySelectorAll('#groupColors .swatch').forEach(b => b.classList.toggle('on', b.dataset.color === state.groupColor)); return; }
@@ -1139,66 +957,6 @@ document.addEventListener('click', async e => {
         await api('groups/' + g.id + '?account_action=' + mode, { method: 'DELETE' });
         state.selected = 'public'; closeVeil('confirmVeil'); await load(); toast('分组已删除', 'ok');
       }); return;
-    }
-    if (act === 'rotate-key') {
-      const g = selectedGroup(); if (!g) return;
-      const r = await api('groups/' + g.id + '/key/rotate', { method: 'POST' });
-      delete state.revealed[g.id]; showKeyModal(r.key); await load(); toast('新密钥已生成，旧密钥已失效', 'warn'); return;
-    }
-    if (act === 'toggle-shared' || act === 'toggle-call') {
-      const g = selectedGroup(); if (!g) return;
-      const body = { name: g.name, color: g.color, shared_pool: g.shared_pool, call_public: g.call_public };
-      if (act === 'toggle-shared') body.shared_pool = el.checked; else body.call_public = el.checked;
-      await api('groups/' + g.id, { method: 'PATCH', body: JSON.stringify(body) });
-      await load(); toast('共享设置已更新', 'ok'); return;
-    }
-    if (act === 'edit-prompt') { const g = selectedGroup(); if (g) await openPromptModal(g); return; }
-    if (act === 'toggle-prompt') {
-      const g = selectedGroup(); if (!g) return;
-      if (el.checked) { await openPromptModal(g, true); return; } // 开启必须先确认内容
-      try {
-        // 关闭时把规则原样回传：只发 enabled=false 的旧版报文会走兼容分支、清掉
-        // 新版的 entries/replaces（下次开启变成空规则）。
-        const cur = await api('groups/' + g.id + '/prompt');
-        await api('groups/' + g.id + '/prompt', { method: 'PUT', body: JSON.stringify({ enabled: false, entries: cur.entries || [], replaces: cur.replaces || [] }) });
-        await load(); toast('已关闭本组提示词规则，恢复沿用全局设置', 'warn');
-      } catch (e) { el.checked = true; throw e; } // 失败回滚开关视觉
-      return;
-    }
-    if (act === 'prompt-save') { await savePrompt(); return; }
-    if (act === 'prompt-add') {
-      readPromptRows();
-      const kind = el.dataset.role;
-      if (kind === 'replace') state.promptDraft.replaces.push({ match: '', with: '', scope: 'all' });
-      else if (kind === 'user') state.promptDraft.user.push('');
-      else state.promptDraft.system.push('');
-      renderPromptRows(); updatePromptCount();
-      const list = $(kind === 'replace' ? 'promptReplaceList' : (kind === 'user' ? 'promptUserList' : 'promptSystemList'));
-      const focus = list.querySelectorAll('input,textarea'); if (focus.length) focus[focus.length - 1].focus();
-      return;
-    }
-    if (act === 'prompt-del') {
-      readPromptRows();
-      const kind = el.dataset.kind, idx = Number(el.dataset.idx) || 0;
-      if (kind === 'replace') state.promptDraft.replaces.splice(idx, 1);
-      else if (kind === 'user') state.promptDraft.user.splice(idx, 1);
-      else state.promptDraft.system.splice(idx, 1);
-      renderPromptRows(); updatePromptCount();
-      return;
-    }
-    if (act === 'edit-proxy') { openProxyModal(selectedGroup() || null); return; }
-    if (act === 'proxy-type') { state.proxyType = el.dataset.type; updateProxyUI(); return; }
-    if (act === 'proxy-save') {
-      const body = { type: state.proxyType, host: $('proxyHost').value.trim(), port: parseInt($('proxyPort').value, 10) || 0, username: $('proxyUser').value.trim(), password: $('proxyPass').value };
-      await api('groups/' + state.proxyGroup + '/proxy', { method: 'PUT', body: JSON.stringify(body) });
-      closeVeil('proxyVeil'); await load(); toast('代理已保存', 'ok'); return;
-    }
-    if (act === 'proxy-test') {
-      const body = { type: state.proxyType, host: $('proxyHost').value.trim(), port: parseInt($('proxyPort').value, 10) || 0, username: $('proxyUser').value.trim(), password: $('proxyPass').value };
-      const box = $('proxyTestBox'); box.hidden = false; box.className = 'testbox'; box.textContent = '正在测试…（连通性 + 出口 IP）';
-      const r = await api('groups/' + state.proxyGroup + '/proxy/test', { method: 'POST', body: JSON.stringify(body) });
-      renderProxyTest(box, r);
-      return;
     }
     if (act === 'import') { openImportModal(); return; }
     if (act === 'import-tab') { switchImportTab(el.dataset.tab); return; }
@@ -1320,11 +1078,9 @@ document.addEventListener('click', async e => {
     }
     if (act === 'close') {
       closeVeil(el.dataset.target);
-      if (el.dataset.target === 'promptVeil') renderDetail(); // 取消编辑：开关退回真实状态
       return;
     }
     if (act === 'confirm-yes') { const fn = state.confirm; state.confirm = null; if (fn) await fn(); return; }
-    if (act === 'copy-key') { copyText($('keyBig').textContent); return; }
     if (act === 'gate-ok') { const v = $('gateKey').value.trim(); if (!v) return; localStorage.setItem('wb2api.key', v); closeVeil('keyGate'); load(); return; }
   } catch (err) { toast(err.message || String(err), 'err'); }
 });
@@ -1338,4 +1094,15 @@ $('btnRefresh').onclick = async () => {
 };
 $('btnTheme').onclick = () => { const cur = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light'; document.documentElement.dataset.theme = cur; localStorage.setItem('wb2gp.theme', cur); };
 if (localStorage.getItem('wb2gp.theme')) document.documentElement.dataset.theme = localStorage.getItem('wb2gp.theme');
+// 配置弹窗（代理 / 提示词 / 密钥）由共享组件注入，group_cfg.js 自己挂 document 级委托。
+$('gcModals').innerHTML = GroupCfg.modals();
+GroupCfg.mount({
+  api: api,
+  toast: toast,
+  getGroup: () => selectedGroup(),
+  getPublicProxy: () => state.publicProxy,
+  reload: load,
+  confirm: (title, text, okText, fn) => openConfirm(title, '<div class="hint">' + esc(text) + '</div>', okText, async () => { closeVeil("confirmVeil"); await fn(); }),
+  copyText: copyText,
+});
 load();

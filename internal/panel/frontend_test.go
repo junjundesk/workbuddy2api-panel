@@ -78,6 +78,8 @@ const src = fs.readFileSync(process.argv[2], 'utf8');
 // app.js 的账号表已改用共享模块 pool_list.js（表头 / 行 / 排序），
 // 冒烟要先把同一份共享脚本灌进沙箱，否则顶层 createSort 直接 ReferenceError。
 const shared = fs.readFileSync(process.argv[3], 'utf8');
+// app.js 顶层的分组设置弹窗还会调 GroupCfg.modals()/mount()（密钥/代理/共享池/提示词共享模块）。
+const cfg = fs.readFileSync(process.argv[4], 'utf8');
 const inert = new Proxy(function () {}, {
   get(t, k) { if (k === Symbol.toPrimitive) return () => ''; return inert; },
   set() { return true; },
@@ -101,6 +103,7 @@ sandbox.window = sandbox; sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
 try {
   vm.runInContext(shared, sandbox, { filename: 'pool_list.js' });
+  vm.runInContext(cfg, sandbox, { filename: 'group_cfg.js' });
   vm.runInContext(src, sandbox, { filename: 'app.js' });
   console.log('SMOKE OK');
   process.exit(0);
@@ -118,7 +121,7 @@ try {
 	}
 	hf.Close()
 	for _, hash := range []string{"#taskscenter", "#accounts", "#usage", "#models", "#config", "#logs", "#packages"} {
-		cmd := exec.Command(node, hf.Name(), "app.js", "pool_list.js")
+		cmd := exec.Command(node, hf.Name(), "app.js", "pool_list.js", "group_cfg.js")
 		cmd.Dir = "." // 测试工作目录 = internal/panel
 		cmd.Env = append(os.Environ(), "SMOKE_HASH="+hash)
 		out, err := cmd.CombinedOutput()

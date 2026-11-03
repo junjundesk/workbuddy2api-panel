@@ -178,6 +178,8 @@ func (p *Panel) routes() {
 	p.mux.HandleFunc("GET /panel/groups", p.groupsPage)
 	p.mux.HandleFunc("GET /panel/groups.js", p.groupsScript)
 	p.mux.HandleFunc("GET /panel/pool_list.js", p.poolListScript)
+	p.mux.HandleFunc("GET /panel/group_cfg.js", p.groupCfgScript)
+	p.mux.HandleFunc("GET /panel/group_cfg.css", p.groupCfgStyle)
 	p.mux.HandleFunc("GET /panel/api/overview", p.withAuth(p.overview))
 	p.mux.HandleFunc("GET /panel/api/logs", p.withAuth(p.logsHandler))
 	p.mux.HandleFunc("POST /panel/api/logs/clear", p.withAuth(p.logsClear))

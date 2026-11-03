@@ -9,6 +9,8 @@ let overviewData = null, cfgLoaded = null;
 // 主页要跟号池分组页显示同一组徽标（缺密钥 / 自定义提示词），所以额外拉一次完整列表，
 // 与 overview 并行取，失败不影响主流程（徽标退化为精简信息）。
 let overviewGroupViews = [];
+// 公共池代理（groups 接口的 public_proxy）：主页「设置」弹窗里公共池那栏要显示它。
+let overviewPublicProxy = null;
 let logPin = true, loginState = null, loginTimer = null;
 let refTimer = null;
 /* 视图级筛选状态（模块级声明放在文件顶部，避免顶层 go() 早于声明执行时踩 TDZ）。 */
@@ -755,6 +757,7 @@ async function loadOverview(quiet) {
       api('groups').catch(() => null), // 老版本后端 / 无分组权限时退化为精简信息，不挡主页
     ]);
     overviewGroupViews = (gv && gv.groups) || [];
+    overviewPublicProxy = (gv && gv.public_proxy) || null;
     overviewData = d;
     syncQueueConcOptions(d.accounts);
     $('sTotal').textContent = d.total;
@@ -874,8 +877,11 @@ function openGroupModal(id) {
   grpPickColor = (g && g.color) || GRP_COLORS[(overviewGroupViews || []).length % GRP_COLORS.length];
   $('grpTitle').textContent = g ? '编辑分组' : '新建分组';
   $('grpHint').textContent = g
-    ? '分组密钥只能访问本组账号；成员、密钥、代理与提示词在「号池分组」页管理。'
-    : '分组是独立号池：默认与公共池双向隔离，拥有自己的密钥与代理。';
+    ? '名称与识别色改完点保存；下面的密钥、代理、共享池、提示词改一下立刻生效，不用保存。'
+    : '分组是独立号池：默认与公共池双向隔离；创建后可在这里配密钥、代理与提示词。';
+  // 编辑态：共享开关交给共享池卡（改一次立即生效）；新建态还没有分组 id，只能用下面两个复选框做初始值。
+  if ($('grpShareDefaults')) $('grpShareDefaults').hidden = !!g;
+  if (g) GroupCfg.render('grpCfg', g); else if ($('grpCfg')) $('grpCfg').innerHTML = '';
   $('grpName').value = g ? g.name : '';
   $('grpShared').checked = !!(g && g.shared_pool);
   $('grpCall').checked = !!(g && g.call_public);
@@ -898,8 +904,12 @@ async function saveGroup() {
       await api('groups/' + encodeURIComponent(grpEditID), { method: 'PATCH', body: JSON.stringify(body) });
       toast('分组已更新', 'ok');
     } else {
-      await api('groups', { method: 'POST', body: JSON.stringify(body) });
-      toast('分组已创建，密钥与代理在「号池分组」页配置', 'ok');
+      const r = await api('groups', { method: 'POST', body: JSON.stringify(body) });
+      toast('分组已创建，密钥如下（只显示这一次，之后可在设置里显示/轮换）', 'ok');
+      closeGroupModal();
+      await loadOverview(true);
+      if (r && r.key) GroupCfg.showKey(r.key);
+      return;
     }
     closeGroupModal();
     await loadOverview(true);
@@ -944,6 +954,23 @@ async function exportAccountsJSON(uids, groups) {
 if ($('btnGrpCancel')) $('btnGrpCancel').onclick = closeGroupModal;
 if ($('btnGrpSave')) $('btnGrpSave').onclick = saveGroup;
 if ($('grpDel')) $('grpDel').onclick = deleteGroup;
+// 分组配置卡：与号池分组页共用 group_cfg.js（密钥/代理/共享池/提示词），这里只注入宿主上下文。
+// getGroup 用 grpEditID，所以「编辑分组」弹窗里改的任何配置都作用于当前这个分组。
+if ($('gcModals')) {
+  $('gcModals').innerHTML = GroupCfg.modals();
+  GroupCfg.mount({
+    api: api,
+    toast: toast,
+    getGroup: () => groupViewOf(grpEditID),
+    getPublicProxy: () => overviewPublicProxy,
+    reload: () => loadOverview(true),
+    // 主页的确认框是浏览器原生 confirm；模块传进来的是富文本，这里取纯文本用。
+    confirm: (title, text, okText, fn) => {
+      if (confirm(title + '\n\n' + String(text).replace(/<[^>]*>/g, ''))) fn();
+    },
+    copyText: copyText,
+  });
+}
 if ($('grpName')) $('grpName').addEventListener('keydown', ev => { if (ev.key === 'Enter') saveGroup(); });
 if ($('grpColors')) $('grpColors').addEventListener('click', ev => {
   const b = ev.target.closest('button[data-gcolor]');

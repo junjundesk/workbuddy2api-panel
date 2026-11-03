@@ -7,14 +7,14 @@ import (
 	"testing"
 )
 
-// 提示词规则编辑器的前端行为：
+// 提示词规则编辑器的前端行为（实现已搬到共享模块 group_cfg.js，主页与分组页同一份）：
 //   - promptTextRow 按角色渲染 textarea + 删除按钮，正文走 HTML 转义；
 //   - promptReplaceRow 回填关键词/替换值/作用范围（select 选中）；
 //   - promptCounts 只统计非空条目，字数含系统与用户正文。
 //
-// 与 groups_export_test.go 同一套 node+vm 切片手法：groups.js 是 go:embed 静态
-// 资源，Go 编译器只查语法（frontend_test.go），行为断言只能靠执行切片。
-func TestGroupsJSPromptRuleRows(t *testing.T) {
+// 与 groups_export_test.go 同一套 node+vm 切片手法：静态资源由 go:embed 提供，
+// Go 编译器只查语法（frontend_test.go），行为断言只能靠执行切片。
+func TestGroupCfgPromptRuleRows(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
 		t.Skip("node not installed; JS prompt rule test skipped")
@@ -22,8 +22,8 @@ func TestGroupsJSPromptRuleRows(t *testing.T) {
 	script := `const fs = require('fs');
 const vm = require('vm');
 const src = fs.readFileSync(process.argv[2], 'utf8');
-const start = src.indexOf('const PROMPT_ROLE_NAME');
-const end = src.indexOf('function openImportModal');
+const start = src.indexOf('function promptTextRow');
+const end = src.indexOf('async function openPrompt');
 if (start < 0 || end < 0) throw new Error('prompt rule helpers not found');
 const els = {};
 const mk = () => ({ innerHTML: '', textContent: '', value: '', checked: false, addEventListener() {}, querySelectorAll() { return []; }, focus() {} });
@@ -32,7 +32,8 @@ const ctx = { document, console, JSON, Math, Date, Number, String, Object, Array
 ctx.window = ctx; ctx.globalThis = ctx;
 vm.createContext(ctx);
 const prelude = [
-  "const state = { promptDraft: { system: [], user: [], replaces: [] } };",
+  "let promptDraft = { system: [], user: [], replaces: [] };",
+  "const PROMPT_ROLE_NAME = { system: '系统提示词', user: '用户提示词' };",
   "const esc = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');",
   "const $ = id => document.getElementById(id);",
 ].join('\n');
@@ -40,26 +41,28 @@ const epilogue = [
   "this.promptTextRow = promptTextRow;",
   "this.promptReplaceRow = promptReplaceRow;",
   "this.promptCounts = promptCounts;",
-  "this.state = state;",
+  "this.setDraft = d => { promptDraft = d; };",
 ].join('\n');
 vm.runInContext(prelude + '\n' + src.slice(start, end) + '\n' + epilogue, ctx);
 
 const row = ctx.promptTextRow('system', '<b>x</b>', 2);
 if (!/data-kind="system"/.test(row) || !/data-idx="2"/.test(row)) throw new Error('text row missing role/idx: ' + row);
-if (!/data-act="prompt-del"/.test(row)) throw new Error('text row missing delete: ' + row);
+if (!/data-act="gc-prompt-del"/.test(row)) throw new Error('text row missing delete: ' + row);
 if (row.indexOf('&lt;b&gt;x&lt;/b&gt;') < 0) throw new Error('text row not escaped: ' + row);
 if (row.indexOf('<b>x</b>') >= 0) throw new Error('text row leaked raw html: ' + row);
 
 const rep = ctx.promptReplaceRow({ match: '旧', with: '新', scope: 'user' }, 1);
 if (rep.indexOf('value="旧"') < 0 || rep.indexOf('value="新"') < 0) throw new Error('replace row values missing: ' + rep);
 if (rep.indexOf('value="user" selected') < 0) throw new Error('replace row scope not selected: ' + rep);
-if (!/data-act="prompt-del"/.test(rep) || !/data-idx="1"/.test(rep)) throw new Error('replace row missing delete/idx: ' + rep);
+if (!/data-act="gc-prompt-del"/.test(rep) || !/data-idx="1"/.test(rep)) throw new Error('replace row missing delete/idx: ' + rep);
 
-ctx.state.promptDraft = { system: ['a', ' '], user: ['b'], replaces: [{ match: 'k' }, { match: ' ' }] };
+ctx.setDraft({ system: ['a', ' '], user: ['b'], replaces: [{ match: 'k' }, { match: ' ' }] });
 const c = ctx.promptCounts();
 if (c.sys !== 1 || c.usr !== 1 || c.rep !== 1 || c.chars !== 3) throw new Error('counts mismatch: ' + JSON.stringify(c));
+// 删除按钮一律 gc- 前缀：宿主页的 data-act 委托（acct / group-*）不会误命中。
+if (src.indexOf('data-act="prompt-del"') >= 0) throw new Error('prompt-del 未加 gc- 前缀，会与分组页委托冲突');
 process.stdout.write('OK');`
-	f, err := os.CreateTemp(t.TempDir(), "groups-prompt-*.cjs")
+	f, err := os.CreateTemp(t.TempDir(), "gcfg-prompt-*.cjs")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,9 +70,9 @@ process.stdout.write('OK');`
 		t.Fatal(err)
 	}
 	f.Close()
-	out, err := exec.Command(node, f.Name(), "groups.js").CombinedOutput()
+	out, err := exec.Command(node, f.Name(), "group_cfg.js").CombinedOutput()
 	if err != nil {
-		t.Fatalf("groups prompt node test failed: %v\n%s", err, out)
+		t.Fatalf("group_cfg prompt node test failed: %v\n%s", err, out)
 	}
 	if !strings.Contains(string(out), "OK") {
 		t.Fatalf("unexpected output: %s", out)

@@ -1,0 +1,64 @@
+/* 分组配置卡与三个配置弹窗的样式：主页分组卡片与号池分组页共用。
+   命名空间说明：
+     .gcfg     卡片容器（自带 auto-fit 网格，两列/三列随宽度自适应）
+     .gc-veil  配置弹窗（代理 / 提示词 / 密钥），其余类名沿用面板既有语义类
+   这里只写两页都可能缺的规则；.fld / .lb / .grid2 / .veil / .dlg 由各页自己的
+   CSS 提供（两页已有，且主题变量同名），不要在这里重复定义，否则会盖掉各页主题。 */
+
+.gc-cards { margin: 12px 0 16px; }
+.gcfg { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 12px; }
+.gcfg .card { background: var(--surface); border: 1px solid var(--line); border-radius: 11px; box-shadow: var(--shadow); padding: 14px 15px 12px; display: flex; flex-direction: column; min-width: 0; }
+.gcfg .card-h { display: flex; align-items: center; gap: 7px; margin-bottom: 10px; flex-wrap: wrap; }
+.gcfg .card-h h3 { font-size: 13px; font-weight: 600; white-space: nowrap; }
+.gcfg .card-h .tag { margin-left: auto; }
+.gcfg .card-f { display: flex; align-items: center; gap: 8px; margin-top: auto; padding-top: 11px; border-top: 1px solid var(--line-soft); font-size: 10.5px; color: var(--ink-3); }
+.gcfg .card-f .grow { flex: 1; }
+.gcfg .card-f button { padding: 2px 7px; font-size: 11px; }
+.gcfg .hint { font-size: 11px; color: var(--ink-3); line-height: 1.55; margin-top: 8px; }
+.gcfg .kline { display: flex; align-items: center; gap: 5px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; padding: 6px 7px; }
+.gcfg .kline code { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 11.5px var(--mono); color: var(--accent); }
+.gcfg .kline button { padding: 2px 7px; font-size: 11px; flex: none; }
+.gcfg .proxy-line { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.gcfg .proxy-line code { font: 12px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gcfg .proto { padding: 2px 7px; border-radius: 4px; font: 600 10px var(--mono); flex: none; }
+.gcfg .proto.http { color: #7aa2ff; background: rgba(91,124,250,.15); }
+.gcfg .proto.socks5 { color: var(--violet); background: var(--violet-soft); }
+.gcfg .proto.socks5h { color: var(--ok); background: var(--ok-soft); }
+.gcfg .proto.direct { color: var(--ink-3); background: var(--surface-2); border: 1px solid var(--line); }
+.gcfg .switch-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 4px 0 2px; cursor: pointer; }
+.gcfg .switch-row + .switch-row { border-top: 1px dashed var(--line-soft); margin-top: 6px; padding-top: 9px; }
+.gcfg .switch-row .sw-text b { display: block; font-size: 12.5px; font-weight: 550; color: var(--ink-2); }
+.gcfg .switch-row .sw-text em { display: block; font-style: normal; font-size: 10.5px; color: var(--ink-3); margin-top: 2px; }
+.gcfg .switch-row input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.gcfg .switch-row .track { width: 36px; height: 21px; border-radius: 999px; background: var(--line); position: relative; flex: none; }
+.gcfg .switch-row .track i { position: absolute; top: 3px; left: 3px; width: 15px; height: 15px; border-radius: 50%; background: #fff; transition: transform .15s; }
+.gcfg .switch-row input:checked + .track { background: var(--accent); }
+.gcfg .switch-row input:checked + .track i { transform: translateX(15px); }
+
+/* 弹窗内：协议切换 / 代理提示 / 测试结果 / 提示词编辑器 / 密钥展示 */
+.gc-veil .seg { display: inline-flex; gap: 2px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 9px; padding: 3px; margin-bottom: 8px; }
+.gc-veil .seg button { border: 0; background: transparent; padding: 6px 16px; border-radius: 7px; color: var(--ink-3); font: 600 12px var(--mono); }
+.gc-veil .seg button.on { background: var(--surface); color: var(--ink); }
+.gc-veil .proxy-hint { font-size: 11.5px; color: var(--ink-3); line-height: 1.55; margin-bottom: 14px; }
+.gc-veil .testbox { border: 1px solid var(--line); background: var(--surface-2); border-radius: 8px; padding: 9px 11px; font-size: 11.5px; margin: 4px 0 10px; }
+.gc-veil .testbox.ok { border-color: var(--ok); background: var(--ok-soft); color: var(--ok); }
+.gc-veil .testbox.err { border-color: var(--bad); background: var(--bad-soft); color: var(--bad); }
+.gc-veil .testbox .l2 { margin-top: 5px; }
+.gc-veil .testbox .l2 b { font-family: var(--mono); font-weight: 600; }
+.gc-veil .testbox .l2.warn { color: var(--warn); }
+.gc-veil .pr-sec { border: 1px solid var(--line-soft); border-radius: 9px; padding: 10px 12px; margin-top: 10px; background: var(--surface-2); }
+.gc-veil .pr-sec-h { display: flex; align-items: center; gap: 8px; }
+.gc-veil .pr-sec-h b { font-size: 12.5px; font-weight: 600; color: var(--ink-2); }
+.gc-veil .pr-sec-h em { font-style: normal; font-size: 10.5px; color: var(--ink-3); }
+.gc-veil .pr-sec-h .grow { flex: 1; }
+.gc-veil .pr-row { display: flex; gap: 8px; align-items: flex-start; margin-top: 8px; }
+.gc-veil .pr-row textarea { min-height: 64px; margin-top: 0; }
+.gc-veil .pr-row .pr-del { flex: none; margin-top: 2px; }
+.gc-veil .pr-kv input, .gc-veil .pr-kv select { margin-top: 0; }
+.gc-veil .pr-kv input { flex: 1; }
+.gc-veil .pr-kv select { flex: none; width: 118px; }
+.gc-veil .pr-arrow { color: var(--ink-3); font-size: 12px; line-height: 32px; flex: none; }
+.gc-veil .pr-empty { font-size: 11px; color: var(--ink-3); margin-top: 7px; }
+.gc-veil .code-area { width: 100%; font: 11.5px/1.6 var(--mono); background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; padding: 10px; min-height: 120px; margin-top: 8px; }
+.gc-veil .key-big { background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; padding: 12px; font: 13px/1.5 var(--mono); color: var(--accent); word-break: break-all; user-select: all; margin-bottom: 12px; }
+.gc-veil .modal-warn { border: 1px solid color-mix(in srgb, var(--bad) 30%, var(--line)); background: var(--bad-soft); color: var(--bad); border-radius: 8px; padding: 9px 11px; font-size: 11.5px; line-height: 1.55; }

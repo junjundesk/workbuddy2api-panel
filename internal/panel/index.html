@@ -1387,13 +1387,18 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
      密钥 / 代理 / 提示词 / 成员导入仍归分组页——那些是分组级资源，搬到总览卡片里会把行撑爆。
      主页能就地改名称 / 识别色 / 共享策略，并可直接删除分组（组内账号移回公共池）。 -->
 <div class="veil" id="grpVeil">
-  <div class="dlg" style="width:480px">
+  <div class="dlg" style="width:760px">
     <header><h3 id="grpTitle">新建分组</h3><div class="hint" id="grpHint">分组是独立号池：默认与公共池双向隔离，拥有自己的密钥与代理。</div></header>
     <div class="body">
       <label class="fld"><span class="lb">分组名称</span><input id="grpName" maxlength="32" placeholder="例如：客户 A · 生产"></label>
       <div class="fld"><span class="lb">识别色</span><div class="swatches" id="grpColors"></div></div>
-      <label class="gchk"><input type="checkbox" id="grpShared"><span>允许本组账号进入公共池<em>开启后本组账号同时参与公共池调度，也会计入主页「公共池」卡片的共享账号数</em></span></label>
-      <label class="gchk"><input type="checkbox" id="grpCall"><span>允许本组调用公共池账号<em>与公共池账号共用候选集；本组密钥仍只能访问本组</em></span></label>
+      <!-- 新建时的共享默认值；编辑态交给下面的共享池卡（改一下立即生效，不用再点保存） -->
+      <div id="grpShareDefaults">
+        <label class="gchk"><input type="checkbox" id="grpShared"><span>允许本组账号进入公共池<em>开启后本组账号同时参与公共池调度，也会计入主页「公共池」卡片的共享账号数</em></span></label>
+        <label class="gchk"><input type="checkbox" id="grpCall"><span>允许本组调用公共池账号<em>与公共池账号共用候选集；本组密钥仍只能访问本组</em></span></label>
+      </div>
+      <!-- 分组配置卡由 group_cfg.js 渲染，与号池分组页是同一份：密钥、代理、共享池、提示词 -->
+      <div id="grpCfg"></div>
       <div class="hint" id="grpMsg"></div>
     </div>
     <footer>
@@ -1488,9 +1493,13 @@ legend { font-size: 12px; color: var(--ink-3); font-weight: 600; padding-bottom:
 </div>
 
 <div id="toasts"></div>
+<!-- 分组配置的三个弹窗（密钥/代理/提示词）由 group_cfg.js 注入，与号池分组页共用 -->
+<div id="gcModals"></div>
 
 <!-- 号池列表的共享实现：行渲染 / 状态口径 / 排序 / 行内操作都在这份脚本里，主页与分组页共用 -->
+<link rel="stylesheet" href="/panel/group_cfg.css">
 <script src="pool_list.js"></script>
+<script src="group_cfg.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

@@ -4,6 +4,7 @@
 //   - index.html  页面骨架
 //   - app.js      全部前端逻辑（独立文件而非内联，为了启用无需 unsafe-inline 的严格 CSP）
 //   - pool_list.js 号池账号列表的共享实现（主页账号池与分组页共用同一份渲染/排序/操作）
+//   - group_cfg.js/group_cfg.css 分组配置的共享实现（密钥/代理/共享池/提示词，两页同一份）
 //   - groups.html/groups.js 号池分组页
 //
 // 安全头对"面板页面与全部 /panel/api/* 响应"统一生效：CSP 限制脚本只能来自本服务，
@@ -29,6 +30,12 @@ var groupsJS []byte
 
 //go:embed pool_list.js
 var poolListJS []byte
+
+//go:embed group_cfg.js
+var groupCfgJS []byte
+
+//go:embed group_cfg.css
+var groupCfgCSS []byte
 
 // csp 内容安全策略（严格版，无需 unsafe-inline）：
 //   - default-src 'none'        默认全禁，逐个开口
@@ -93,4 +100,20 @@ func (p *Panel) poolListScript(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(poolListJS)
+}
+
+// groupCfgScript / groupCfgStyle 分组配置卡与配置弹窗的共享脚本/样式。
+// 主页分组卡片与号池分组页渲染的是同一份 DOM，改这里两页同时生效。
+func (p *Panel) groupCfgScript(w http.ResponseWriter, r *http.Request) {
+	setSecurityHeaders(w)
+	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(groupCfgJS)
+}
+
+func (p *Panel) groupCfgStyle(w http.ResponseWriter, r *http.Request) {
+	setSecurityHeaders(w)
+	w.Header().Set("Content-Type", "text/css; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(groupCfgCSS)
 }
