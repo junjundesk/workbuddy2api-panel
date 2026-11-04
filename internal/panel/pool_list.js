@@ -229,7 +229,18 @@
 
   /* ── 行内操作 ──────────────────────────────────────────────────────────
      两页共用同一套按钮与顺序，差别只在 data 属性：
-     主页行委托读 data-a / data-u，分组页读 data-act="acc" / data-a / data-uid。 */
+     主页行委托读 data-a / data-u，分组页读 data-act="acc" / data-a / data-uid。
+
+     按钮分两组收纳（原先 11 个平铺要给操作列留 490px，视觉极挤）：
+     - 常驻主操作（外层平铺）：签到 / 余额（额度）/ 测活 / 任务，以及异常态的
+       恢复按钮——冻结·冷却·禁用出「解冻」、已暂停出「恢复选号」。运维第一诉求
+       是把号救回来，恢复按钮必须一眼可见；正常态的「暂停选号」是低频管理动作，
+       反而收进菜单。
+     - 「更多」菜单（<details> 原生收纳）：模型 / 暂停选号 / 禁用 / 移动 /
+       前往分组 / 导出 / 移除。
+     每个按钮的 HTML（class、data-*、title、文案）与平铺版逐字节一致：app.js 的
+     closest('button[data-a]') 与 groups.js 的 closest('[data-act]') 委托不感知
+     层级，菜单里的按钮照样命中，两页零改动。 */
   function acts(a, o) {
     var now = Date.now();
     var frozen = a.disabled || coolSec(a, now) > 0;
@@ -241,22 +252,51 @@
       if (title) attrs += ' title="' + esc(title) + '"';
       return '<button class="xs ' + (cls || 'ghost') + '"' + attrs + '>' + label + '</button>';
     }
-    var h = '';
-    if (!a.enterprise) h += btn('checkin', a.checkin_done ? '已签' : '签到', '', a.checkin_done ? '今日已签到；点击可重新签到并刷新余额' : '');
-    h += btn('balance', a.enterprise ? '额度' : '余额', '', a.enterprise ? '刷新企业版已分配额度（上游 get-enterprise-user-usage）' : '');
-    if (!a.enterprise) h += btn('tasks', '任务', '', '查看 / 执行该账号的积分任务（弹窗，接受、领取、一键完成）');
-    h += btn('models', '模型', '', '在控制台打开模型面板');
-    h += btn('alive', '测活', '', '向该账号发一句 hi 验证能否正常对话（会消耗少量积分；不改选号 / 冷却状态）');
-    h += frozen ? btn('revive', '解冻', 'primary')
-      : (a.paused ? btn('resume', '恢复选号', 'primary')
-        : btn('pause', '暂停选号', '', a.enterprise ? '退出选号，但照常保活 / 刷新额度' : '退出选号，但照常签到 / 活跃上报 / 保活 / 刷新余额'));
-    if (!a.disabled) h += btn('disable', '禁用');
+    // 常驻主操作：高频动作 + 异常态恢复按钮。
+    var primary = '';
+    if (!a.enterprise) primary += btn('checkin', a.checkin_done ? '已签' : '签到', '', a.checkin_done ? '今日已签到；点击可重新签到并刷新余额' : '');
+    primary += btn('balance', a.enterprise ? '额度' : '余额', '', a.enterprise ? '刷新企业版已分配额度（上游 get-enterprise-user-usage）' : '');
+    primary += btn('alive', '测活', '', '向该账号发一句 hi 验证能否正常对话（会消耗少量积分；不改选号 / 冷却状态）');
+    if (!a.enterprise) primary += btn('tasks', '任务', '', '查看 / 执行该账号的积分任务（弹窗，接受、领取、一键完成）');
+    // 恢复按钮优先外露：frozen（冻结 / 冷却 / 已禁用）→ 解冻，已暂停 → 恢复选号。
+    var more = '';
+    more += btn('models', '模型', '', '在控制台打开模型面板');
+    if (frozen) primary += btn('revive', '解冻', 'primary');
+    else if (a.paused) primary += btn('resume', '恢复选号', 'primary');
+    else more += btn('pause', '暂停选号', '', a.enterprise ? '退出选号，但照常保活 / 刷新额度' : '退出选号，但照常签到 / 活跃上报 / 保活 / 刷新余额');
+    if (!a.disabled) more += btn('disable', '禁用');
     // 带上当前分组：共享弹窗会把它标成「（当前）」并禁用，避免原地移动。
-    if (o.canMove) h += btn('move', '移动', '', '移动到公共池或其他分组', a.group ? { group: a.group } : null);
-    if (o.mode !== 'group' && a.group) h += btn('gogroup', '前往分组', '', '在「号池分组」页打开它所在的分组', { g: a.group });
-    h += btn('export', '导出', '', '导出该账号 JSON（含登录凭证），可在其他实例导入');
-    h += btn('remove', '移除', 'danger');
-    return h;
+    if (o.canMove) more += btn('move', '移动', '', '移动到公共池或其他分组', a.group ? { group: a.group } : null);
+    if (o.mode !== 'group' && a.group) more += btn('gogroup', '前往分组', '', '在「号池分组」页打开它所在的分组', { g: a.group });
+    more += btn('export', '导出', '', '导出该账号 JSON（含登录凭证），可在其他实例导入');
+    more += btn('remove', '移除', 'danger');
+    return primary + '<details class="acts-more"><summary class="xs ghost" title="更多账号操作">更多 ▾</summary><div class="acts-menu">' + more + '</div></details>';
+  }
+
+  /* ── 「更多」菜单的开合互斥 ────────────────────────────────────────────
+     <details> 本身零状态、能整行 innerHTML 重绘，这里只补一条全局点击监听做
+     收纳体验：同屏最多展开一个菜单，用完即收。无 DOM 的 Node 测试环境
+     （vm 里只给 window / localStorage）不注册，避免 ReferenceError。 */
+  if (typeof document !== 'undefined' && document.addEventListener) {
+    document.addEventListener('click', function (ev) {
+      var t = ev && ev.target;
+      if (!t || typeof t.closest !== 'function') return;
+      var open = document.querySelectorAll('details.acts-more[open]');
+      if (!open.length) return;
+      var i;
+      var summary = t.closest('details.acts-more > summary');
+      if (summary) {
+        // 点「更多 ▾」：关掉其它已展开的（当前这个交给浏览器自己 toggle）。
+        for (i = 0; i < open.length; i++) {
+          if (open[i] !== summary.parentNode) open[i].removeAttribute('open');
+        }
+        return;
+      }
+      // 点菜单里的操作按钮（动作仍由页面既有委托处理），或点菜单外任意处：全部收起。
+      if (t.closest('.acts-menu button') || !t.closest('details.acts-more')) {
+        for (i = 0; i < open.length; i++) open[i].removeAttribute('open');
+      }
+    });
   }
 
   /* ── 表格 ────────────────────────────────────────────────────────────── */

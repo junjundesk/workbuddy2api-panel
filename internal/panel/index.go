@@ -3,6 +3,7 @@
 // 资源经 go:embed 打进二进制（随服务部署，无外部构建步骤）：
 //   - index.html  页面骨架
 //   - app.js      全部前端逻辑（独立文件而非内联，为了启用无需 unsafe-inline 的严格 CSP）
+//   - panel.css    两页共用的公共样式（设计令牌/明暗色板、A·B·C 风格预设、基础组件）
 //   - pool_list.js 号池账号列表的共享实现（主页账号池与分组页共用同一份渲染/排序/操作）
 //   - group_cfg.js/group_cfg.css 分组配置的共享实现（密钥/代理/共享池/提示词，两页同一份）
 //   - acct_actions.js/acct_actions.css 账号级批量动作的共享实现（移动/导出/移除/添加/导入，两页同一份）
@@ -43,6 +44,9 @@ var acctActionsJS []byte
 
 //go:embed acct_actions.css
 var acctActionsCSS []byte
+
+//go:embed panel.css
+var panelCSS []byte
 
 // csp 内容安全策略（严格版，无需 unsafe-inline）：
 //   - default-src 'none'        默认全禁，逐个开口
@@ -140,4 +144,13 @@ func (p *Panel) acctActionsStyle(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/css; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(acctActionsCSS)
+}
+
+// handlePanelCSS 输出两页共用的公共样式（设计令牌 / A·B·C 风格预设 / 基础组件样式）。
+// 主页与号池分组页经 <link> 引它，页面 <style> 只留各自的页面特有规则。
+func (p *Panel) handlePanelCSS(w http.ResponseWriter, r *http.Request) {
+	setSecurityHeaders(w)
+	w.Header().Set("Content-Type", "text/css; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(panelCSS)
 }

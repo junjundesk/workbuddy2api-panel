@@ -64,6 +64,10 @@ async function load() {
     // 之后每次 load 只把 hash 校准到当前选中，避免刷新 / 轮询把用户弹回别的组。
     if (!hashDone) { hashDone = true; const want = hashTarget(); if (want && groupOf(want)) state.selected = want; }
     syncHash();
+    // 左下角状态与主页同构（app.js 的 overview 回填同一口径）：版本 / 存储模式 / 健康灯
+    if (ov.version) $('navVer').textContent = 'v' + ov.version;
+    $('navRedis').textContent = ov.redis_mode === 'upstash' ? 'Redis 镜像' : '本地内存';
+    $('navPulse').className = 'pulse' + (ov.healthy > 0 ? '' : (ov.total ? ' warn' : ' bad'));
     $('navState').textContent = '服务正常';
     renderAll();
     return true;
@@ -1020,8 +1024,50 @@ $('btnRefresh').onclick = async () => {
   try { if (await load()) toast('已刷新 · ' + state.accounts.length + ' 个账号', 'ok'); }
   finally { b.disabled = false; b.textContent = '刷新'; }
 };
-$('btnTheme').onclick = () => { const cur = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light'; document.documentElement.dataset.theme = cur; localStorage.setItem('wb2gp.theme', cur); };
-if (localStorage.getItem('wb2gp.theme')) document.documentElement.dataset.theme = localStorage.getItem('wb2gp.theme');
+/* ── 主题（与主页 app.js 同一套：auto 跟随系统，点击翻转浅 / 深，太阳 / 月亮图标同款）──
+   统一读 wb2api.theme；老键 wb2gp.theme 只作兼容回退，写入时两个键一起写，两页表现一致。 */
+function gpStoredTheme() { return localStorage.getItem('wb2api.theme') || localStorage.getItem('wb2gp.theme') || 'auto'; }
+function gpEffTheme() {
+  const t = gpStoredTheme();
+  return t === 'auto' ? (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark') : t;
+}
+function gpApplyTheme() {
+  const eff = gpEffTheme();
+  document.documentElement.dataset.theme = eff;
+  $('icoTheme').innerHTML = eff === 'light'
+    ? '<circle cx="8" cy="8" r="3"/><path d="M8 1v2M8 13v2M1 8h2M13 8h2M3.2 3.2l1.4 1.4M11.4 11.4l1.4 1.4M12.8 3.2l-1.4 1.4M4.6 11.4l-1.4 1.4"/>'
+    : '<path d="M13.2 9.6A5.6 5.6 0 0 1 6.4 2.8a5.6 5.6 0 1 0 6.8 6.8z"/>';
+  $('btnTheme').title = eff === 'light' ? '切换到深色' : '切换到浅色';
+}
+addEventListener('change', gpApplyTheme);
+$('btnTheme').onclick = () => {
+  const next = gpEffTheme() === 'light' ? 'dark' : 'light';
+  localStorage.setItem('wb2api.theme', next);
+  localStorage.setItem('wb2gp.theme', next);
+  gpApplyTheme();
+};
+gpApplyTheme();
+/* ── UI 风格预设（a 极简 / b 高密 / c 光感）：与主页共用 wb2api.uiStyle ── */
+function gpApplyUiStyle(s) {
+  const v = (s === 'b' || s === 'c') ? s : 'a';
+  document.documentElement.dataset.uiStyle = v;
+  document.querySelectorAll('#uiStyleSeg button').forEach(b => b.classList.toggle('on', b.dataset.uiStyle === v));
+}
+gpApplyUiStyle(localStorage.getItem('wb2api.uiStyle') || 'a');
+$('uiStyleSeg').onclick = e => {
+  const b = e.target.closest('button[data-ui-style]');
+  if (!b) return;
+  localStorage.setItem('wb2api.uiStyle', b.dataset.uiStyle);
+  gpApplyUiStyle(b.dataset.uiStyle);
+};
+/* ── 侧边栏折叠：与主页共用 wb2api.navCollapsed（'1' 折叠 / '0' 展开）── */
+function gpApplyNavCollapsed(v) { document.documentElement.dataset.navCollapsed = v === '1' ? '1' : '0'; }
+gpApplyNavCollapsed(localStorage.getItem('wb2api.navCollapsed') || '0');
+$('btnNavCollapse').onclick = () => {
+  const next = document.documentElement.dataset.navCollapsed === '1' ? '0' : '1';
+  localStorage.setItem('wb2api.navCollapsed', next);
+  gpApplyNavCollapsed(next);
+};
 // 配置弹窗（代理 / 提示词 / 密钥）由共享组件注入，group_cfg.js 自己挂 document 级委托。
 $('gcModals').innerHTML = GroupCfg.modals();
 GroupCfg.mount({

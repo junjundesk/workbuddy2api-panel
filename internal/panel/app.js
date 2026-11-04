@@ -1,7 +1,9 @@
 'use strict';
 /* ── 状态 ─────────────────────────────────────────────────────────── */
 const LS_KEY = 'wb2api.key', LS_THEME = 'wb2api.theme';
-let theme = localStorage.getItem(LS_THEME) || 'auto';   // auto | light | dark
+// wb2gp.theme 是号池分组页的同义键（那边存的是生效态 light/dark）：两页来回切
+// 明暗必须一致，所以初始化先读本页键、缺了回落分组页键，保存时两键同写。
+let theme = localStorage.getItem(LS_THEME) || localStorage.getItem('wb2gp.theme') || 'auto';   // auto | light | dark
 let view = 'accounts';
 let overviewData = null, cfgLoaded = null;
 // 分组完整视图（GET /panel/api/groups 的 groupView）：overview 只回精简 groupBrief
@@ -46,9 +48,52 @@ addEventListener('change', applyTheme);
 $('btnTheme').onclick = () => {
   theme = effTheme() === 'light' ? 'dark' : 'light';
   localStorage.setItem(LS_THEME, theme);
+  localStorage.setItem('wb2gp.theme', effTheme()); // 同写分组页的键（生效态），跨页不打架
   applyTheme();
 };
 applyTheme();
+
+/* ── UI 风格预设（顶栏「极简 / 高密 / 光感」分段器）────────────────────
+   风格落到 <html data-ui-style="a|b|c">，视觉差异由 panel.css 的预设规则承担；
+   这里只管持久化、分段器高亮，以及账号表操作列宽随风格重排（高密平铺要更宽）。 */
+const LS_UI_STYLE = 'wb2api.uiStyle';
+const UI_STYLES = ['a', 'b', 'c'];
+let uiStyle = localStorage.getItem(LS_UI_STYLE) || 'a';
+if (UI_STYLES.indexOf(uiStyle) < 0) uiStyle = 'a';   // 非法值回落默认，别把怪值带进 data-*
+function applyUiStyle() {
+  document.documentElement.dataset.uiStyle = uiStyle;
+  const seg = $('uiStyleSeg');
+  if (seg && seg.querySelectorAll) {
+    seg.querySelectorAll('button[data-ui-style]').forEach(b => b.classList.toggle('on', b.dataset.uiStyle === uiStyle));
+  }
+}
+applyUiStyle();
+if ($('uiStyleSeg')) $('uiStyleSeg').addEventListener('click', e => {
+  const b = e.target && e.target.closest && e.target.closest('button[data-ui-style]');
+  if (!b) return;
+  const v = b.dataset.uiStyle;
+  if (v === uiStyle || UI_STYLES.indexOf(v) < 0) return;
+  uiStyle = v;
+  localStorage.setItem(LS_UI_STYLE, uiStyle);
+  applyUiStyle();
+  // 风格切换会改账号表操作列宽（高密 470px / 其余 300px）：已加载就地重绘分组卡片。
+  if (overviewData) renderAccounts(overviewData.accounts || [], overviewData.groups);
+});
+
+/* ── 侧边栏折叠（<html data-nav-collapsed="0|1">）──────────────────────
+   折叠态只留图标 + 状态脉冲圆点，展开态才显示文字与版本行；宽度与显隐由
+   panel.css 按 data-nav-collapsed 切换，这里只管状态与持久化。 */
+const LS_NAV_COLLAPSED = 'wb2api.navCollapsed';
+let navCollapsed = localStorage.getItem(LS_NAV_COLLAPSED) === '1';
+function applyNavCollapsed() {
+  document.documentElement.dataset.navCollapsed = navCollapsed ? '1' : '0';
+}
+applyNavCollapsed();
+if ($('btnNavCollapse')) $('btnNavCollapse').onclick = () => {
+  navCollapsed = !navCollapsed;
+  localStorage.setItem(LS_NAV_COLLAPSED, navCollapsed ? '1' : '0');
+  applyNavCollapsed();
+};
 
 /* ── 请求 ─────────────────────────────────────────────────────────── */
 async function api(path, opts = {}) {
@@ -683,7 +728,10 @@ function renderAccountGroups(list, groups) {
   const maxCred = Math.max(1, ...list.map(s => s.credits || 0));
   // 固定列宽：各卡片的列上下对齐。
   // 账号列不设宽度，吸收剩余空间；操作列必须显式给宽——表头 .c-acts 的 width:1px 在 fixed 布局下会把它压成 1px，按钮溢出盖住左侧列。
-  const cols = '<colgroup><col style="width:4px"><col><col style="width:200px"><col style="width:100px"><col style="width:90px"><col style="width:50px"><col style="width:300px"><col style="width:90px"><col style="width:490px"></colgroup>';
+  // 操作列宽随 UI 风格走：高密（b）平铺全部行操作要 470px，极简 / 光感收纳进
+  // 「更多」菜单后 300px 严丝合缝（切换风格时 uiStyle 段会就地重绘本卡片）。
+  const actsW = document.documentElement.dataset.uiStyle === 'b' ? '470px' : '300px';
+  const cols = '<colgroup><col style="width:4px"><col><col style="width:200px"><col style="width:100px"><col style="width:90px"><col style="width:50px"><col style="width:300px"><col style="width:90px"><col style="width:' + actsW + '"></colgroup>';
   // 表头与行都交给 PoolList：列名 / 排序箭头 / 点击区域只有一处定义，
   // 与分组页改一次两边同时生效。
   const opts = accTableOpts(maxCred, groups);

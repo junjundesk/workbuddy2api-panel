@@ -1015,3 +1015,82 @@ process.stdout.write([okRow, okText, catFail, chatFail, noReply, nilResp, xssFai
 	}
 }
 
+// TestSharedPanelCSSAndUnifiedShell 锁死方案 D 的工程底座：
+//  1. 公共样式 /panel/panel.css 嵌入并同时含深浅两套 --violet / --violet-soft（防 SOCKS5 标签回退透明）
+//     以及三套风格预设 html[data-ui-style="a|b|c"]、可折叠侧栏 html[data-nav-collapsed="1"]；
+//  2. index.html 与 groups.html 均外链 /panel/panel.css，不再在各自 <style> 重复定义 :root 令牌；
+//  3. 两页共享完整的 8 项侧栏导航、#btnNavCollapse 折叠按钮、#uiStyleSeg 风格预设切换胶囊，
+//     且主题/风格/侧栏折叠在 app.js 与 groups.js 共用同一套 localStorage 键。
+func TestSharedPanelCSSAndUnifiedShell(t *testing.T) {
+	css := string(panelCSS)
+	for _, want := range []string{
+		"--violet: #c084fc",
+		"--violet: #7c3aed",
+		"--violet-soft:",
+		"--r-box:",
+		`html[data-ui-style="a"]`,
+		`html[data-ui-style="b"]`,
+		`html[data-ui-style="c"]`,
+		`html[data-nav-collapsed="1"]`,
+		".style-seg",
+		"details.acts-more",
+	} {
+		if !strings.Contains(css, want) {
+			t.Errorf("panel.css 缺少关键规则 %q", want)
+		}
+	}
+
+	for _, page := range []struct {
+		name string
+		raw  []byte
+	}{
+		{"index.html", indexHTML},
+		{"groups.html", groupsHTML},
+	} {
+		html := string(page.raw)
+		if !strings.Contains(html, `<link rel="stylesheet" href="/panel/panel.css">`) {
+			t.Errorf("%s 未引用 /panel/panel.css", page.name)
+		}
+		if strings.Contains(html, ":root {") || strings.Contains(html, ":root{") {
+			t.Errorf("%s 仍在内联 <style> 定义 :root 令牌，应统一收归 panel.css", page.name)
+		}
+		for _, want := range []string{
+			`id="btnNavCollapse"`,
+			`id="uiStyleSeg"`,
+			`data-ui-style="a"`,
+			`data-ui-style="b"`,
+			`data-ui-style="c"`,
+			`id="navPulse"`,
+			`id="navVer"`,
+			`id="navRedis"`,
+			`class="nav-label">账号池<`,
+			`class="nav-label">号池分组<`,
+			`class="nav-label">用量<`,
+			`class="nav-label">积分构成<`,
+			`class="nav-label">任务中心<`,
+			`class="nav-label">模型与档位<`,
+			`class="nav-label">配置<`,
+			`class="nav-label">运行日志<`,
+		} {
+			if !strings.Contains(html, want) {
+				t.Errorf("%s 缺少统一壳层元素 %q", page.name, want)
+			}
+		}
+	}
+
+	for _, js := range []struct {
+		name string
+		raw  []byte
+	}{
+		{"app.js", appJS},
+		{"groups.js", groupsJS},
+	} {
+		src := string(js.raw)
+		for _, key := range []string{"wb2api.theme", "wb2api.uiStyle", "wb2api.navCollapsed"} {
+			if !strings.Contains(src, key) {
+				t.Errorf("%s 未使用跨页同步键 %q", js.name, key)
+			}
+		}
+	}
+}
+
