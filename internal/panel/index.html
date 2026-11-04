@@ -314,7 +314,10 @@
   .acc-groups[hidden] { display: none; }
   /* 卡片头最多挂 6 个按钮（任务执行/本组测活/本组签到/本组余额/分组页/设置）：
      窄屏或积分标签较长时允许换行，避免按钮被挤出卡片或压掉积分。 */
-  .gcard > header { cursor: pointer; user-select: none; gap: 10px; flex-wrap: wrap; }
+  .gcard > header {
+    cursor: pointer; user-select: none; gap: 10px; flex-wrap: wrap;
+    background: linear-gradient(180deg, color-mix(in srgb, var(--surface-2) 65%, var(--surface)) 0%, var(--surface) 100%);
+  }
   .gcard > header .car { width: 10px; color: var(--ink-3); transition: transform .15s; display: inline-block; font-size: 11px; }
   .gcard.fold > header .car { transform: rotate(-90deg); }
   .gcard.fold > .tbl-wrap { display: none; }
@@ -325,7 +328,7 @@
   .box > .gbar { padding: 8px 14px; border-bottom: 1px solid var(--line-soft); background: var(--surface-2); }
   .gcard.fold > header { border-bottom: none; }
   .gcard .gdot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
-  .gcard .gn { font-weight: 600; font-size: 13px; }
+  .gcard .gn { font-weight: 650; font-size: 14px; }
   .gcard .gbadge { font-size: 10.5px; padding: 1px 6px; border-radius: 4px; border: 1px solid var(--line); color: var(--ink-3); }
   .gcard .gc { color: var(--ink-3); font-size: 12.5px; }
   .gcard .gs { display: inline-flex; gap: 6px; }
@@ -376,16 +379,19 @@
 <div class="shell">
   <nav class="nav">
     <div class="brand">
+      <div class="brand-logo" aria-hidden="true"><svg viewBox="0 0 16 16" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 1.8 14 5v6L8 14.2 2 11V5z"/><path d="M2 5l6 3.2L14 5M8 8.2v6"/></svg></div>
       <div class="brand-text"><div class="name">WorkBuddy2API</div><div class="sub" id="navSub">控制台</div></div>
       <button class="icon ghost nav-toggle" id="btnNavCollapse" title="折叠 / 展开侧边栏" aria-label="折叠侧边栏"><svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2.5 3.5h11v9h-11z"/><path d="M6 3.5v9"/></svg></button>
     </div>
     <ul>
+      <li class="nav-sec"><span>核心调度</span></li>
       <li><a href="#accounts" data-view="accounts" class="on" title="账号池">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="5.5" r="2.6"/><path d="M2.8 13.5c.6-2.6 2.7-4 5.2-4s4.6 1.4 5.2 4"/></svg>
         <span class="nav-label">账号池</span></a></li>
       <li><a href="/panel/groups" title="号池分组">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2.2 5.4 8 2.5l5.8 2.9v5.2L8 13.5l-5.8-2.9z"/><path d="M2.2 5.4 8 8.3l5.8-2.9M8 8.3v5.2"/></svg>
         <span class="nav-label">号池分组</span></a></li>
+      <li class="nav-sec"><span>观测与资产</span></li>
       <li><a href="#usage" data-view="usage" title="用量">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 13.5h12"/><path d="M4.5 13.5V8.2M8 13.5V3.5M11.5 13.5v-3"/></svg>
         <span class="nav-label">用量</span></a></li>
@@ -398,6 +404,7 @@
       <li><a href="#models" data-view="models" title="模型与档位">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M8 1.8 14 5v6L8 14.2 2 11V5z"/><path d="M2 5l6 3.2L14 5M8 8.2v6"/></svg>
         <span class="nav-label">模型与档位</span></a></li>
+      <li class="nav-sec"><span>系统运维</span></li>
       <li><a href="#config" data-view="config" title="配置">
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><circle cx="8" cy="8" r="2.2"/><path d="M8 1.6v1.9M8 12.5v1.9M1.6 8h1.9M12.5 8h1.9M3.5 3.5l1.3 1.3M11.2 11.2l1.3 1.3M12.5 3.5l-1.3 1.3M4.8 11.2l-1.3 1.3"/></svg>
         <span class="nav-label">配置</span></a></li>
@@ -418,9 +425,9 @@
       <span class="meta" id="subMeta">-</span>
       <div class="grow"></div>
       <div class="style-seg" id="uiStyleSeg" role="group" aria-label="界面风格预设">
-        <button type="button" data-ui-style="a" class="on" title="风格 A：Linear 极简精密风">极简</button>
-        <button type="button" data-ui-style="b" title="风格 B：Cloudflare 高密运维风（平铺全部行操作）">高密</button>
-        <button type="button" data-ui-style="c" title="风格 C：Raycast 玻璃光感风">光感</button>
+        <button type="button" data-ui-style="a" class="on" title="风格 A：Linear 悬浮内嵌舱（默认）">✦ 悬浮</button>
+        <button type="button" data-ui-style="b" title="风格 B：Cloudflare 高密工业矩阵（平铺全部行操作）">▤ 矩阵</button>
+        <button type="button" data-ui-style="c" title="风格 C：Raycast 极光毛玻璃">◈ 极光</button>
       </div>
       <button class="icon ghost" id="btnTheme" title="切换明暗（跟随系统 → 浅色 → 深色）" aria-label="切换主题">
         <svg id="icoTheme" viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M13.2 9.6A5.6 5.6 0 0 1 6.4 2.8a5.6 5.6 0 1 0 6.8 6.8z"/></svg>
@@ -431,16 +438,34 @@
 
     <!-- 账号池 -->
     <section class="view" id="view-accounts">
-      <div class="stats">
-        <div class="stat"><div class="v" id="sTotal">-</div><div class="k">账号总数</div></div>
-        <div class="stat good"><div class="v" id="sHealthy">-</div><div class="k">可用</div></div>
-        <div class="stat warn"><div class="v" id="sCooling">-</div><div class="k">冷却中</div></div>
-        <div class="stat bad"><div class="v" id="sDisabled">-</div><div class="k">已禁用</div></div>
-        <div class="stat warn"><div class="v" id="sPaused">-</div><div class="k">已暂停选号</div></div>
-        <div class="stat warn" title="积分剩余 0 的账号数：在「无积分」分组里，或最后一次余额快照为 0（不含封号号）"><div class="v" id="sNoCredit">-</div><div class="k">无积分</div></div>
-        <div class="stat bad" title="封号账号数：在「封号池」分组里，或禁用原因含 11140（余额不计入积分统计）"><div class="v" id="sBanned">-</div><div class="k">封号</div></div>
-        <div class="stat"><div class="v" id="sCredits">-</div><div class="k">积分剩余 / 总额</div></div>
-        <div class="stat"><div class="v" id="sSticky">-</div><div class="k">粘性会话</div></div>
+      <div class="stats bento-9">
+        <div class="stat good hero">
+          <div class="stat-top"><div class="k">可用账号</div><span class="stat-ico" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M13.5 4.5 6.5 11.5 2.5 7.5"/></svg></span></div>
+          <div class="v" id="sHealthy">-</div>
+          <div class="stat-bar"><i id="sHealthyBar"></i></div>
+          <div class="stat-sub"><span id="sHealthyPct">可用率 —</span><span>实时可调度</span></div>
+        </div>
+        <div class="stat accent hero">
+          <div class="stat-top"><div class="k">积分剩余 / 总额</div><span class="stat-ico" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M8 1.8 14 5v6L8 14.2 2 11V5z"/><path d="M2 5l6 3.2L14 5"/></svg></span></div>
+          <div class="v" id="sCredits">-</div>
+          <div class="stat-bar"><i id="sCreditsBar"></i></div>
+          <div class="stat-sub"><span id="sCreditsPct">剩余占比 —</span><span>不含封号池</span></div>
+        </div>
+        <div class="stat wide">
+          <div class="stat-top"><div class="k">账号总数</div><span class="stat-ico" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="5.5" r="2.5"/><path d="M3 13.5c.6-2.5 2.6-3.8 5-3.8s4.4 1.3 5 3.8"/></svg></span></div>
+          <div class="v" id="sTotal">-</div>
+          <div class="stat-sub"><span>纳管总规模</span></div>
+        </div>
+        <div class="stat wide">
+          <div class="stat-top"><div class="k">粘性会话</div><span class="stat-ico" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M6.5 9.5 9.5 6.5"/><path d="M5.5 11.5 4 13a2.1 2.1 0 0 1-3-3l1.5-1.5m8-1L12 6a2.1 2.1 0 0 0-3-3L7.5 4.5"/></svg></span></div>
+          <div class="v" id="sSticky">-</div>
+          <div class="stat-sub"><span>活跃上下文绑定</span></div>
+        </div>
+        <div class="stat warn"><div class="stat-top"><div class="k">冷却中</div></div><div class="v" id="sCooling">-</div><div class="stat-sub"><span>限流 / 熔断退避</span></div></div>
+        <div class="stat warn"><div class="stat-top"><div class="k">已暂停选号</div></div><div class="v" id="sPaused">-</div><div class="stat-sub"><span>仅保活不接单</span></div></div>
+        <div class="stat warn" title="积分剩余 0 的账号数：在「无积分」分组里，或最后一次余额快照为 0（不含封号号）"><div class="stat-top"><div class="k">无积分</div></div><div class="v" id="sNoCredit">-</div><div class="stat-sub"><span>待次日签到回血</span></div></div>
+        <div class="stat bad"><div class="stat-top"><div class="k">已禁用</div></div><div class="v" id="sDisabled">-</div><div class="stat-sub"><span>已脱离调度池</span></div></div>
+        <div class="stat bad" title="封号账号数：在「封号池」分组里，或禁用原因含 11140（余额不计入积分统计）"><div class="stat-top"><div class="k">封号</div></div><div class="v" id="sBanned">-</div><div class="stat-sub"><span>上游 11140 隔离</span></div></div>
       </div>
 
       <div class="box" id="expBox" hidden>
@@ -458,12 +483,14 @@
           <h3>账号池</h3>
           <span class="grow"></span>
           <span class="note" id="accNote"></span>
-          <button class="xs" id="btnPatrol" title="巡检全部账号：封号（上游 code 11140）与积分 0 的账号自动移入「封号池」「无积分」分组">巡检</button>
           <label class="acc-selall" title="全选当前账号池（含各分组）"><input type="checkbox" id="accSelAll">全选</label>
-          <button class="xs" id="btnCheckinAll" title="逐号签到并刷新余额，进度与每号结果在弹窗里逐条展示；401 失效号自动移入失效池">全部签到</button>
-          <button class="xs" id="btnTravelAll">旅行巡检</button>
-          <button class="xs" id="btnActivityAll">活跃上报</button>
-          <button class="xs" id="btnKeepaliveAll">全部保活</button>
+          <div class="btn-cluster">
+            <button class="xs" id="btnPatrol" title="巡检全部账号：封号（上游 code 11140）与积分 0 的账号自动移入「封号池」「无积分」分组">巡检</button>
+            <button class="xs" id="btnCheckinAll" title="逐号签到并刷新余额，进度与每号结果在弹窗里逐条展示；401 失效号自动移入失效池">全部签到</button>
+            <button class="xs" id="btnTravelAll">旅行巡检</button>
+            <button class="xs" id="btnActivityAll">活跃上报</button>
+            <button class="xs" id="btnKeepaliveAll">全部保活</button>
+          </div>
         </header>
         <!-- 账号级动作条：与分组卡片、号池分组页同一份实现（acct_actions.js） -->
         <div class="gbar" id="accAllBar"></div>

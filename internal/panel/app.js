@@ -749,7 +749,7 @@ function renderAccountGroups(list, groups) {
       '<span class="gn">' + esc(b.name) + '</span><span class="gbadge' + bg.cls + '">' + bg.text + '</span>' +
       '<span class="gc">' + b.items.length + ' 个账号</span>' +
       '<span class="gs">' + tag(c.ok, 'ok', '可用') + tag(c.cool, 'warn', '冷却') + tag(c.paused, 'warn', '暂停') + tag(c.off, 'bad', '禁用') + tag(c.banned, 'bad', '封号') + '</span>' +
-      '<span class="gcred">' + cred + '</span><span class="grow"></span>' +
+      '<span class="gcred">' + cred + '</span><span class="grow"></span><span class="btn-cluster">' +
       (!b.pub && b.items.some(taskEligible) ? '<button class="xs" data-gtask="' + k + '" title="扫描本组账号的成长任务待办并排队执行，进度在任务中心查看">任务执行</button>' : '') +
       // 本组测活只在分组（独立号池）出现：公共池是混合来源，测活对象不明确，且它是默认池不宜一键打满。
       (!b.pub && b.items.length ? '<button class="xs" data-galive="' + k + '" title="逐个向本组账号发一句 hi 验证能否正常对话（每号消耗少量积分；不改选号 / 冷却状态），结果在弹窗清单里逐条展示">本组测活</button>' : '') +
@@ -761,7 +761,7 @@ function renderAccountGroups(list, groups) {
       (b.pub ? '<button class="xs ghost" data-gnew="1" title="新建一个专属分组（独立号池，默认与公共池隔离）">＋ 新建分组</button>' : '') +
       // 账号级动作（移动/导出/移除/添加/导入）贴在列表上方，与号池分组页是同一份
       // acct_actions.js：按钮、弹窗、请求都共用，改一处两页同时生效。
-      '</header><div class="gbar">' + AcctActions.bar({ scope: b.key, group: b.pub ? '' : b.id }) + '</div>' +
+      '</span></header><div class="gbar">' + AcctActions.bar({ scope: b.key, group: b.pub ? '' : b.id }) + '</div>' +
       '<div class="tbl-wrap"><table class="acc gfix">' + cols + head + '<tbody>' + rows + '</tbody></table></div></div>';
   }).join('');
   // 卡片是整段重建的，新生成的按钮条默认 disabled；按当前勾选立刻同步一次，
@@ -818,6 +818,9 @@ async function loadOverview(quiet) {
     syncQueueConcOptions(d.accounts);
     $('sTotal').textContent = d.total;
     $('sHealthy').textContent = d.healthy;
+    const hPct = d.total > 0 ? Math.min(100, Math.max(0, Math.round((d.healthy || 0) / d.total * 100))) : 0;
+    if ($('sHealthyBar')) $('sHealthyBar').style.width = hPct + '%';
+    if ($('sHealthyPct')) $('sHealthyPct').textContent = d.total > 0 ? '可用率 ' + hPct + '%' : '可用率 —';
     $('sCooling').textContent = d.cooling;
     $('sDisabled').textContent = d.disabled;
     // 暂停选号单列（issue #125）：它只关选号、照常签到保活，与禁用是两种状态。
@@ -833,6 +836,9 @@ async function loadOverview(quiet) {
     const remSum = counted.reduce((a, s) => a + (s.credits || 0), 0);
     const totSum = counted.reduce((a, s) => a + (s.credits_total || 0), 0);
     $('sCredits').textContent = totSum > 0 ? remSum + ' / ' + totSum : remSum;
+    const cPct = totSum > 0 ? Math.min(100, Math.max(0, Math.round(remSum / totSum * 100))) : 0;
+    if ($('sCreditsBar')) $('sCreditsBar').style.width = cPct + '%';
+    if ($('sCreditsPct')) $('sCreditsPct').textContent = totSum > 0 ? '剩余占比 ' + cPct + '%' : '剩余占比 —';
     const credStat = $('sCredits') && $('sCredits').parentElement;
     if (credStat) credStat.title = bannedN
       ? '不含 ' + bannedN + ' 个封号账号（11140）的积分'

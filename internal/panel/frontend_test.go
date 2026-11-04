@@ -1034,6 +1034,12 @@ func TestSharedPanelCSSAndUnifiedShell(t *testing.T) {
 		`html[data-nav-collapsed="1"]`,
 		".style-seg",
 		"details.acts-more",
+		".stats.bento-9",
+		".stat.hero",
+		".stat-bar",
+		".brand-logo",
+		"li.nav-sec",
+		".btn-cluster",
 	} {
 		if !strings.Contains(css, want) {
 			t.Errorf("panel.css 缺少关键规则 %q", want)
@@ -1055,6 +1061,8 @@ func TestSharedPanelCSSAndUnifiedShell(t *testing.T) {
 			t.Errorf("%s 仍在内联 <style> 定义 :root 令牌，应统一收归 panel.css", page.name)
 		}
 		for _, want := range []string{
+			`class="brand-logo"`,
+			`class="nav-sec"`,
 			`id="btnNavCollapse"`,
 			`id="uiStyleSeg"`,
 			`data-ui-style="a"`,
