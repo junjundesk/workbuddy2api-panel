@@ -450,6 +450,18 @@ function accSelSync() {
     all.checked = total > 0 && n === total;
     all.indeterminate = n > 0 && n < total;
   }
+  // 共享账号同时出现在公共池和所属分组，所有行都以同一份 accSel 为准。
+  document.querySelectorAll('input[data-sel]').forEach(cb => { cb.checked = accSel.has(cb.dataset.sel); });
+  const buckets = new Map(groupAccountsForView(
+    (overviewData && overviewData.accounts) || [], (overviewData && overviewData.groups) || []
+  ).map(b => [b.key, b.items]));
+  document.querySelectorAll('input[data-gsel]').forEach(cb => {
+    const items = buckets.get(cb.dataset.gsel) || [];
+    const picked = items.filter(a => accSel.has(a.uid)).length;
+    cb.checked = items.length > 0 && picked === items.length;
+    cb.indeterminate = picked > 0 && picked < items.length;
+    cb.disabled = !items.length;
+  });
   // 分组卡片里的「移动 / 导出 / 移除」按各卡片自己的勾选数启停（acct_actions.js 维护）。
   if (window.AcctActions) AcctActions.syncAll();
 }
@@ -469,6 +481,13 @@ function accScopeUids(scope) {
 }
 function accScopeClear(scope, uids) {
   (uids || []).forEach(u => accSel.delete(u));
+  accSelSync();
+}
+function accSelGroup(scope, on) {
+  const b = accScopeBucket(scope);
+  if (!b) { accSelSync(); return; }
+  // 只增删这张卡片的账号，不清空其他组；公共池沿用含共享账号的展示口径。
+  b.items.forEach(a => { if (on) accSel.add(a.uid); else accSel.delete(a.uid); });
   accSelSync();
 }
 function accSelAll(on) {
@@ -745,7 +764,9 @@ function renderAccountGroups(list, groups) {
       : '<tr><td colspan="9"><div class="empty">' + (b.pub ? '没有未分组的账号' : '这个分组还没有账号') + '</div></td></tr>';
     const k = esc(b.key);
     return '<div class="box gcard' + (fold[b.key] ? ' fold' : '') + '"><header data-gfold="' + k + '" title="点击折叠 / 展开">' +
-      '<span class="car">▾</span><span class="gdot" style="background:' + esc(b.color || 'var(--ink-3)') + '"></span>' +
+      '<span class="car">▾</span><label class="acc-selall" title="' + (b.pub ? '全选公共池账号（含共享分组账号）' : '全选本组账号') + '">' +
+      '<input type="checkbox" data-gsel="' + k + '" aria-label="全选' + esc(b.name) + '账号' + (b.pub ? '（含共享分组账号）' : '') + '">全选</label>' +
+      '<span class="gdot" style="background:' + esc(b.color || 'var(--ink-3)') + '"></span>' +
       '<span class="gn">' + esc(b.name) + '</span><span class="gbadge' + bg.cls + '">' + bg.text + '</span>' +
       '<span class="gc">' + b.items.length + ' 个账号</span>' +
       '<span class="gs">' + tag(c.ok, 'ok', '可用') + tag(c.cool, 'warn', '冷却') + tag(c.paused, 'warn', '暂停') + tag(c.off, 'bad', '禁用') + tag(c.banned, 'bad', '封号') + '</span>' +
@@ -1132,6 +1153,8 @@ function onAccSortClick(e) {
 /* 多选：行内勾选框（分组卡片与单表共用同一委托；change 比 click 稳——click 时
    checked 状态在部分浏览器仍未落定）。工具条与巡检弹窗按钮各自绑定。 */
 document.addEventListener('change', ev => {
+  const group = ev.target && ev.target.closest ? ev.target.closest('input[data-gsel]') : null;
+  if (group) { accSelGroup(group.dataset.gsel, group.checked); return; }
   const cb = ev.target && ev.target.closest ? ev.target.closest('input[data-sel]') : null;
   if (!cb) return;
   if (cb.checked) accSel.add(cb.dataset.sel); else accSel.delete(cb.dataset.sel);
@@ -1457,6 +1480,8 @@ async function runGroupTasks(btn) {
   finally { btn.disabled = false; }
 }
 if ($('accGroups')) $('accGroups').addEventListener('click', ev => {
+  // 复选框及其 label 文本都只处理勾选，不能冒泡成标题的折叠操作。
+  if (ev.target.closest('label.acc-selall')) return;
   const gt = ev.target.closest('button[data-gtask]');
   if (gt) { if (!gt.disabled) runGroupTasks(gt); return; }
   const gal = ev.target.closest('button[data-galive]');
