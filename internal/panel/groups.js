@@ -553,6 +553,19 @@ function updateSelUI() {
   if (window.AcctActions) AcctActions.syncAll();
 }
 function selectedVisible() { return visibleAccounts().filter(a => state.sel.has(a.uid)).map(a => a.uid); }
+
+// 分组页有独立的 DOM 和编辑状态，不能借用主页 app.js 的同名弹窗函数。
+function openGroupModal(g) {
+  state.editing = g ? g.id : null;
+  state.groupColor = (g && g.color) || COLORS[state.groups.length % COLORS.length];
+  $('groupTitle').textContent = g ? '编辑分组' : '新建分组';
+  $('groupName').value = g ? g.name : '';
+  $('groupShared').checked = !!(g && g.shared_pool);
+  $('groupCallPublic').checked = !!(g && g.call_public);
+  $('groupColors').innerHTML = COLORS.map(c => '<button class="swatch' + (c === state.groupColor ? ' on' : '') + '" style="--c:' + c + '" data-act="group-color" data-color="' + c + '" title="' + c + '"></button>').join('');
+  openVeil('groupVeil');
+  setTimeout(() => $('groupName').focus(), 30);
+}
 /* ── 积分任务：与主页 app.js 同一套交互 ─────────────────────────────────
    主页点行内「任务」是在本页弹窗（openTasks → loadTasks；接受 / 领取 / 一键
    完成都直接打在弹窗里）。分组页原先用 window.open('/panel/?open=tasks&uid=…')
@@ -910,7 +923,12 @@ document.addEventListener('click', async e => {
       const body = { name: $('groupName').value.trim(), color: state.groupColor, shared_pool: $('groupShared').checked, call_public: $('groupCallPublic').checked };
       if (!body.name) { toast('请填写分组名称', 'err'); return; }
       if (state.editing) { await api('groups/' + state.editing, { method: 'PATCH', body: JSON.stringify(body) }); toast('分组已更新', 'ok'); }
-      else { const r = await api('groups', { method: 'POST', body: JSON.stringify(body) }); state.selected = r.group.id; showKeyModal(r.key); toast('分组已创建', 'ok'); }
+      else {
+        const r = await api('groups', { method: 'POST', body: JSON.stringify(body) });
+        // 密钥弹窗可立即复制，不能等列表刷新后才让共享组件找到新组。
+        state.groups.push(r.group); state.selected = r.group.id;
+        GroupCfg.showKey(r.key); toast('分组已创建', 'ok');
+      }
       closeVeil('groupVeil'); await load(); return;
     }
     if (act === 'delete-group') {
